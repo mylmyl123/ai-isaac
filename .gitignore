@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Training artifacts (not yet produced, but claim the paths now)
+runs/
+wandb/
+*.pt
+*.ckpt
+
+# Isaac save data (in case anyone drops it into the tree)
+*.dat

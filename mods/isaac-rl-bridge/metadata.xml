@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+    <name>Isaac RL Bridge</name>
+    <directory>isaac-rl-bridge</directory>
+    <description>Streams game state to a local RL trainer over TCP and injects the returned action each tick. Requires Isaac launched with --luadebug.</description>
+    <version>0.1.0</version>
+    <visibility>Hidden</visibility>
+    <tag id="Lua"/>
+</metadata>
