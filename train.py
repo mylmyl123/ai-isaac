@@ -137,12 +137,11 @@ class IsaacFleet:
                 # Isaac's launch-arg parser uses `=` (NOT space) as separator:
                 # https://bindingofisaacrebirth.wiki.gg/wiki/Launch_Options
                 # `--set-stage=1` boots straight into a run as Isaac on Basement 1,
-                # skipping both the studio logos and the main menu entirely — no
-                # human click needed and no risk of the Lua auto-start firing
-                # `restart 0` mid-cutscene (which crashes the game).
+                # skipping both the studio logos and the main menu entirely.
+                # Do NOT also pass --set-stage-type; the default (0 = normal) is
+                # what we want and some Repentance versions crash if you set it
+                # explicitly to certain values.
                 cmd += [f"--set-stage={self.auto_start_stage}"]
-                # Stage type 0 = normal (not Alt/Antibirth). Explicit for safety.
-                cmd += ["--set-stage-type=0"]
             cmd += self.extra_args
 
             log.info("[isaac %d/%d] port=%d cwd=%s cmd=%s",
