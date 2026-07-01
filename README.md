@@ -381,6 +381,8 @@ The diagnostic's summary line tells you which launch strategy works. Once one su
 
 | Symptom | Fix |
 |---|---|
+| Isaac boots to intro / main menu and won't auto-start | `--set-stage=N` **requires** the `=` (Isaac's parser doesn't accept a space). `train.py` uses the correct syntax; if you're launching manually, use `isaac-ng.exe --luadebug --set-stage=1 --set-stage-type=0`. That skips both the studio logos and the menu. |
+| Game crashes the instant a run starts | Almost always the Lua auto-start firing `restart 0` during the intro cinematic. Fixed on `main` — the fallback now waits ~10s and won't fire once the run is active. If you're on an older checkout, `git pull`. Also make sure the launch flag above is set so the fallback never triggers. |
 | `require('socket') failed` in Isaac log | Missing `--luadebug`. Always launch through `tools/launch_isaac.py` or `train.py`. |
 | `[Errno 48] Address already in use` (or `[WinError 10048]`) | Prior server still bound. PowerShell: `Get-NetTCPConnection -LocalPort 9500` then `Stop-Process -Id <pid>`. Or just use a different `--port`. |
 | Trainer hangs on `listening for Isaac` | Isaac isn't loading the mod, or another mod is crashing before ours loads. Check `%USERPROFILE%\Documents\My Games\Binding of Isaac Repentance\log.txt` for `[isaac-rl-bridge] mod loaded`. Also run `python tools\manage_mods.py disable-others`. |

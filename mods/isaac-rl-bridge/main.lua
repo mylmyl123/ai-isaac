@@ -213,24 +213,33 @@ end)
 
 Reward.attach(mod)
 
--- Auto-start a run from the main menu so training doesn't need a human click.
--- The bridge waits ~30 render frames after Isaac finishes booting so the intro
--- animation / mod-loading has time to settle, then executes `restart 0`.
+-- Auto-start fallback: if the game somehow lands on the main menu (e.g. the
+-- `--set-stage=N` launch flag wasn't passed or Isaac ignored it), issue a
+-- `restart 0` from the menu to boot into a run.
 --
--- We use MC_POST_RENDER (fires every render frame including menus) rather than
--- MC_POST_UPDATE (only fires during a run).
+-- IMPORTANT: this must NOT fire during the studio-logo splash or the intro
+-- cinematic — running `restart 0` there crashes the game. We wait a long
+-- time (~10s of render frames) and additionally require the game to have
+-- been in the "no active run" state consistently, which excludes cutscenes
+-- where the game frame counter briefly ticks.
+--
+-- Prefer setting the `--set-stage=1` launch flag over relying on this path.
 local menu_wait_frames = 0
-local AUTO_START_AFTER_FRAMES = 90    -- ~1.5s of intro/menu at 60 render Hz
+local auto_start_fired = false
+local AUTO_START_AFTER_FRAMES = 600   -- ~10s at 60 render Hz — well past logos + intro
 mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
-    -- Game():IsPaused() also returns true on the menu, but Room():GetFrameCount()==0
-    -- and Game():GetFrameCount()==0 is a more reliable "we're not in a run" check.
+    if auto_start_fired then return end
+    -- Once a run is active, the game-tick counter advances. Skip the
+    -- callback entirely so we don't try to restart mid-run.
     if Game():GetFrameCount() > 0 then
         menu_wait_frames = 0
+        auto_start_fired = true   -- run is active; disable the fallback
         return
     end
     menu_wait_frames = menu_wait_frames + 1
     if menu_wait_frames == AUTO_START_AFTER_FRAMES then
-        Isaac.DebugString("[isaac-rl-bridge] auto-starting run from menu")
+        auto_start_fired = true
+        Isaac.DebugString("[isaac-rl-bridge] auto-start fallback firing (main menu detected after intro)")
         Isaac.ExecuteCommand("restart 0")   -- 0 = Isaac
     end
 end)
