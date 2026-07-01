@@ -102,51 +102,50 @@ class IsaacFleet:
         self.auto_start_stage = auto_start_stage
         self.procs: list[subprocess.Popen] = []
 
-    def _instance_workdir(self, i: int) -> Path:
-        """Isolated per-instance working directory.
+    def _install_dir(self) -> Path:
+        return Path(self.binary).resolve().parent
 
-        Steam / Isaac otherwise fight over the same log.txt, save files, and
-        lock files, and Steam's DRM will collapse two launches into one window.
-        Giving each Isaac its own cwd makes them independent.
+    def _ensure_steam_appid(self) -> None:
+        """Drop steam_appid.txt next to isaac-ng.exe.
 
-        We also drop a steam_appid.txt into this cwd — that file tells the
-        Steamworks DRM stub "yes, we were legitimately launched, don't relaunch
-        under Steam." Without it, Isaac exits within a couple seconds.
+        Without this file, Repentance's DRM stub tries to relaunch under Steam
+        and both launches die with exit code 53. The file's presence is the
+        standard 'external launch' signal for Steamworks games.
         """
-        d = Path.cwd() / ".isaac-instances" / f"port_{self.base_port + i}"
-        d.mkdir(parents=True, exist_ok=True)
-        appid_file = d / "steam_appid.txt"
-        if not appid_file.exists():
-            appid_file.write_text("250900\n", encoding="utf-8")
-        return d
+        appid = self._install_dir() / "steam_appid.txt"
+        if not appid.exists():
+            try:
+                appid.write_text("250900\n", encoding="utf-8")
+                log.info("wrote %s (required for external launch)", appid)
+            except OSError as e:
+                log.warning(
+                    "could not write %s (%s). Isaac may exit immediately. "
+                    "Run this shell as Administrator once, OR create the file manually with the single line: 250900",
+                    appid, e,
+                )
 
     def spawn(self, stagger_s: float = 3.0) -> None:
+        self._ensure_steam_appid()
+        install_dir = self._install_dir()
         for i in range(self.n_envs):
             port = self.base_port + i
             env = os.environ.copy()
             env["ISAAC_RL_PORT"] = str(port)
-            # NOTE: do NOT set SteamAppId / SteamGameId here — Repentance's
-            # DRM stub reads them and refuses if they don't match a real
-            # Steam context. The steam_appid.txt in the cwd is the right
-            # mechanism (created in _instance_workdir).
 
             cmd = [self.binary, "--luadebug"]
             if self.auto_start_stage is not None:
-                # Boot straight into a run at this stage — no title-screen click.
                 cmd += ["--set-stage", str(self.auto_start_stage)]
             cmd += self.extra_args
 
-            workdir = self._instance_workdir(i)
-
             log.info("[isaac %d/%d] port=%d cwd=%s cmd=%s",
-                     i + 1, self.n_envs, port, workdir, " ".join(cmd))
+                     i + 1, self.n_envs, port, install_dir, " ".join(cmd))
 
             creationflags = 0
             if platform.system() == "Windows":
-                # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP so each child is
-                # fully independent of this Python process's console. Without
-                # NEW_PROCESS_GROUP, Ctrl-C in this terminal would also kill Isaac
-                # BEFORE our signal handler can shut them down gracefully.
+                # New console per instance so each Isaac has its own window
+                # decorations (helpful for arranging on-screen). NEW_PROCESS_GROUP
+                # keeps Ctrl-C in our parent shell from killing Isaac before
+                # our cleanup runs.
                 creationflags = (
                     getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -155,11 +154,12 @@ class IsaacFleet:
             proc = subprocess.Popen(
                 cmd,
                 env=env,
-                cwd=str(workdir),
+                # cwd MUST be the Isaac install dir so the game finds
+                # resources/, packed/, shaders/ etc. via its relative paths.
+                cwd=str(install_dir),
                 creationflags=creationflags,
             )
             self.procs.append(proc)
-            # Stagger so the OS doesn't spike CPU on N simultaneous cold starts.
             time.sleep(stagger_s)
 
     def shutdown(self) -> None:

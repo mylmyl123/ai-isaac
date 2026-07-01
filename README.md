@@ -325,11 +325,30 @@ Bump `n_envs` in the YAML for more instances. Each extra instance costs ~1 CPU c
 
 ---
 
+## Before training: disable other mods
+
+The RL bridge assumes vanilla Repentance. Other mods will fight it for `MC_INPUT_ACTION`, spawn modded enemies the tables don't know, and reward-hack the agent. Toggle them off with the helper:
+
+```powershell
+python tools\manage_mods.py list             # see what's on
+python tools\manage_mods.py disable-others   # disable everything except isaac-rl-bridge
+# ... train ...
+python tools\manage_mods.py enable-all       # restore everything after training
+```
+
+The disable is reversible (writes `disable.it` markers instead of deleting mods). Launch Isaac once through Steam after running `disable-others` so the change takes effect, then close.
+
 ## Troubleshooting
 
 ### Isaac opens then immediately closes
 
-Run the launch diagnostic — it tries 5 different launch strategies and prints the tail of every `log.txt` it can find, so you can see exactly what Isaac wrote before exiting:
+Almost always one of:
+
+1. **`steam_appid.txt` missing next to `isaac-ng.exe`.** `train.py` writes it automatically now, but if you're launching Isaac another way, you need this file in the same folder as the binary containing just `250900`. Without it, Repentance's DRM stub tries to relaunch under Steam, both launches collide, exit code 53.
+2. **Wrong working directory.** Isaac loads `resources/`, `shaders/`, `packed/` etc. via **paths relative to its cwd**. If cwd isn't the Isaac install directory, most assets fail to load and the game crashes (0xC0000005). `train.py` sets cwd to the install directory automatically.
+3. **A conflicting mod is crashing on startup.** Run `python tools\manage_mods.py disable-others` and try again.
+
+For a systematic diagnosis, run the launch tester — it tries 5 different launch strategies and prints the tail of every `log.txt` it can find:
 
 ```powershell
 python tools\test_launch.py --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe"
@@ -350,7 +369,7 @@ The diagnostic's summary line tells you which launch strategy works. Once one su
 |---|---|
 | `require('socket') failed` in Isaac log | Missing `--luadebug`. Always launch through `tools/launch_isaac.py` or `train.py`. |
 | `[Errno 48] Address already in use` (or `[WinError 10048]`) | Prior server still bound. PowerShell: `Get-NetTCPConnection -LocalPort 9500` then `Stop-Process -Id <pid>`. Or just use a different `--port`. |
-| Trainer hangs on `listening for Isaac` | Isaac isn't loading the mod. Confirm it's enabled in the Mods menu and check `.\.isaac-instances\port_9500\log.txt` for `[isaac-rl-bridge] mod loaded`. |
+| Trainer hangs on `listening for Isaac` | Isaac isn't loading the mod, or another mod is crashing before ours loads. Check `%USERPROFILE%\Documents\My Games\Binding of Isaac Repentance\log.txt` for `[isaac-rl-bridge] mod loaded`. Also run `python tools\manage_mods.py disable-others`. |
 | Handshake succeeds but no step logs | Isaac is on the main menu. Use `--auto-start-stage 1` (the default) or click New Run. |
 | Character doesn't move despite step logs | Another input mod is capturing `MC_INPUT_ACTION`. Disable all mods except Isaac RL Bridge. |
 | Ctrl-C doesn't stop the trainer | Fixed on `main` — `pull` if you haven't recently. Socket recv now uses 1s timeouts so Python can process signals. |
