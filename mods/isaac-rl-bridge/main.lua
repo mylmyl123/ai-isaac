@@ -38,6 +38,18 @@ if MINIMAL_MODE then
     Isaac.DebugString("[isaac-rl-bridge] MINIMAL_MODE=1 — running with training I/O disabled")
 end
 
+-- ISAAC_RL_NO_ONESHOT: when set to "1", hardwires the mod to IGNORE pill_card,
+-- drop_bomb, and use_active in Python actions. Character will still move and
+-- shoot normally. Purpose: bisect whether crashes are caused by one-shot input
+-- events (pill uses, bomb drops, active-item uses) or by something else in
+-- the data path. If Isaac stops crashing with this flag on, we know one-shot
+-- inputs are the problem. If crashes continue, the culprit is elsewhere
+-- (probably Obs.build, entity iteration, or the network path).
+local NO_ONESHOT = os.getenv("ISAAC_RL_NO_ONESHOT") == "1"
+if NO_ONESHOT then
+    Isaac.DebugString("[isaac-rl-bridge] NO_ONESHOT=1 — pill_card, drop_bomb, use_active will be ignored")
+end
+
 local mod = RegisterMod("isaac-rl-bridge", 1)
 local conn = nil
 local tick = 0
@@ -165,9 +177,9 @@ local function apply_action(a)
     elseif s == 3 then cached_action[ButtonAction.ACTION_SHOOTDOWN]  = true
     elseif s == 4 then cached_action[ButtonAction.ACTION_SHOOTLEFT]  = true
     end
-    cached_action[ButtonAction.ACTION_ITEM]     = a.use_active == 1 or a.use_active == true
-    cached_action[ButtonAction.ACTION_BOMB]     = a.drop_bomb  == 1 or a.drop_bomb  == true
-    cached_action[ButtonAction.ACTION_PILLCARD] = a.pill_card  == 1 or a.pill_card  == true
+    cached_action[ButtonAction.ACTION_ITEM]     = (not NO_ONESHOT) and (a.use_active == 1 or a.use_active == true) or false
+    cached_action[ButtonAction.ACTION_BOMB]     = (not NO_ONESHOT) and (a.drop_bomb  == 1 or a.drop_bomb  == true) or false
+    cached_action[ButtonAction.ACTION_PILLCARD] = (not NO_ONESHOT) and (a.pill_card  == 1 or a.pill_card  == true) or false
 
     -- For every action that just transitioned from unpressed to pressed,
     -- reset its triggered_consumed flag to false. The next IS_ACTION_TRIGGERED
