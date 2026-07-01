@@ -199,7 +199,14 @@ class IsaacFleet:
         # relaunch too quickly the new process either fails silently or connects
         # its socket and then instantly RSTs during boot (WinError 10054 on the
         # trainer side). Sleep past that window before spawning.
-        time.sleep(3.0)
+        #
+        # 3 seconds turned out to be insufficient on some Windows / Steam
+        # combinations — Steam's DRM stub can hold state 5-10s after the child
+        # process exits, and a --set-stage=N fast-path launch during that
+        # window makes the fresh Isaac exit cleanly during boot (before mods
+        # are loaded; log.txt ends at the version banner). Bumped to 10s to
+        # give the OS + Steam plenty of time to release everything.
+        time.sleep(10.0)
 
         log.info("respawn(port=%d): launching replacement Isaac", port)
         self._launch_one(i)
@@ -251,12 +258,9 @@ def main() -> int:
                     help="Don't spawn Isaac processes; expect them to be started manually.")
     ap.add_argument("--no-auto-start", action="store_true",
                     help="Don't auto-boot into a run. You'll have to click 'New Run' in each window.")
-    ap.add_argument("--auto-start-stage", type=int, default=None,
-                    help="Stage passed to --set-stage on first launch. Default None: the mod's menu-auto-start "
-                         "Lua fallback handles the initial run boot (slower by ~10s but avoids a "
-                         "documented Repentance clean-exit bug during rapid Isaac respawn cycles). "
-                         "Pass an integer (e.g. 1) to use Isaac's --set-stage=N flag directly — faster "
-                         "but only safe on rock-solid installs.")
+    ap.add_argument("--auto-start-stage", type=int, default=1,
+                    help="Stage passed to --set-stage on first launch (default: 1 = boot straight into Basement 1). "
+                         "Set to 0 to skip the flag entirely (slower boot, uses the mod's menu-auto-start).")
     ap.add_argument("--tensorboard", action="store_true", help="Also start TensorBoard in the background at :6006")
     ap.add_argument("--override", nargs="*", default=[], help="Extra config overrides: key=value")
     args = ap.parse_args()
@@ -351,10 +355,15 @@ def main() -> int:
             "waiting for %d Isaac(s) to connect on ports %d..%d — click 'New Run' in each window.",
             cfg.n_envs, cfg.base_port, cfg.base_port + cfg.n_envs - 1,
         )
-    else:
+    elif args.auto_start_stage:
         log.info(
             "waiting for %d Isaac(s) to boot into stage %d and connect on ports %d..%d",
             cfg.n_envs, args.auto_start_stage, cfg.base_port, cfg.base_port + cfg.n_envs - 1,
+        )
+    else:
+        log.info(
+            "waiting for %d Isaac(s) to boot (menu auto-start via mod) and connect on ports %d..%d",
+            cfg.n_envs, cfg.base_port, cfg.base_port + cfg.n_envs - 1,
         )
 
     # Hand off to the trainer. Its build_vec_env() will open the server sockets

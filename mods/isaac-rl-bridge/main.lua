@@ -419,7 +419,12 @@ Reward.attach(mod)
 -- live run whose owner just tabbed away, killing the socket.
 local auto_start_fired = false
 local render_frames_on_menu = 0
-local AUTO_START_AFTER_FRAMES = 600   -- ~10s at 60 render Hz — well past logos + intro
+-- Menu auto-start timeout in render frames. Reduced from 600 (10s) to 240 (4s)
+-- so if --set-stage=N somehow doesn't take effect and Isaac lands on the main
+-- menu, we auto-fire 'restart 0' quickly instead of leaving the user staring
+-- at a menu. 240 frames ≈ 4s at 60 render Hz — well past intro cinematics
+-- (which don't seem to fire MC_POST_RENDER anyway due to Theora playback).
+local AUTO_START_AFTER_FRAMES = 240
 
 -- Death auto-restart. When the player dies, Isaac shows a death animation and
 -- then the 'You Died' screen. During that screen MC_POST_UPDATE stops firing,
