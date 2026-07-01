@@ -251,9 +251,12 @@ def main() -> int:
                     help="Don't spawn Isaac processes; expect them to be started manually.")
     ap.add_argument("--no-auto-start", action="store_true",
                     help="Don't auto-boot into a run. You'll have to click 'New Run' in each window.")
-    ap.add_argument("--auto-start-stage", type=int, default=1,
-                    help="Stage passed to --set-stage on first launch (default: 1). Only affects the first run; "
-                         "subsequent resets are driven by the trainer via Isaac.ExecuteCommand.")
+    ap.add_argument("--auto-start-stage", type=int, default=None,
+                    help="Stage passed to --set-stage on first launch. Default None: the mod's menu-auto-start "
+                         "Lua fallback handles the initial run boot (slower by ~10s but avoids a "
+                         "documented Repentance clean-exit bug during rapid Isaac respawn cycles). "
+                         "Pass an integer (e.g. 1) to use Isaac's --set-stage=N flag directly — faster "
+                         "but only safe on rock-solid installs.")
     ap.add_argument("--tensorboard", action="store_true", help="Also start TensorBoard in the background at :6006")
     ap.add_argument("--override", nargs="*", default=[], help="Extra config overrides: key=value")
     args = ap.parse_args()
