@@ -48,9 +48,13 @@ function Net:_reconnect()
     end
     local s = socket.tcp()
     s:settimeout(self.timeout_s)
-    -- Retry a few times so the trainer can start after Isaac.
+    -- Retry a few times so the trainer can start after Isaac. Kept SHORT so a
+    -- reconnect never freezes Isaac for more than ~1.25s. Previously 40
+    -- retries * 250ms = up to 10s of frozen game loop, which read on-screen
+    -- as the 'walks into corner and lags' symptom during Python's PPO
+    -- gradient-update window.
     local last_err
-    for _ = 1, 40 do
+    for _ = 1, 5 do
         local ok, err = s:connect(self.host, self.port)
         if ok then
             s:setoption("tcp-nodelay", true)
@@ -64,16 +68,25 @@ function Net:_reconnect()
         self.host .. ":" .. tostring(self.port) .. " — " .. tostring(last_err))
 end
 
--- Send a length-prefixed frame. Reconnects on transient failure.
+-- Send a length-prefixed frame. Reconnects on peer-death; drops-on-timeout.
 function Net:send(payload)
     if not self.sock then self:_reconnect() end
     local frame = pack_u32_be(#payload) .. payload
     local sent, err, last = self.sock:send(frame)
-    if not sent then
-        -- Retry once after reconnect.
-        self:_reconnect()
-        self.sock:send(frame)
+    if sent then return end
+    -- `err == "timeout"` means TCP send buffer is full because Python is
+    -- temporarily not reading (mid PPO update, GC pause, whatever). This is
+    -- NOT a dead peer — do NOT reconnect. Reconnecting on timeout was the
+    -- direct cause of the 'walks into corner then lag then crash' pattern:
+    -- _reconnect() blocks Isaac's game loop for up to 10s, and any partially
+    -- written bytes leave the framing out of sync with Python. Just drop
+    -- this frame; the next tick will build a fresh obs and try again.
+    if err == "timeout" then
+        return
     end
+    -- Real error (peer closed, network reset). Try one reconnect + resend.
+    self:_reconnect()
+    self.sock:send(frame)
 end
 
 -- Receive a length-prefixed frame. Returns the payload string or nil on timeout.
