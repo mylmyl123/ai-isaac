@@ -94,13 +94,6 @@ local cached_action = {
     [ButtonAction.ACTION_DROP] = false,
 }
 -- Previous tick's action state — snapshot right before apply_action rebuilds.
--- Used to distinguish 'pressed this frame' (IS_ACTION_TRIGGERED) from 'button
--- is being held' (IS_ACTION_PRESSED). Without this we return TRUE for TRIGGERED
--- every single tick that a one-shot action (PillCard, Bomb, Item) is set,
--- which floods Isaac's engine with thousands of trigger events per second and
--- has been observed in the users log:
---     [INFO] - Action PillCard Triggered  (repeated thousands of times)
--- That cascade of one-shot events is what makes Isaac crash mid-run.
 local last_cached_action = {
     [ButtonAction.ACTION_LEFT] = false,
     [ButtonAction.ACTION_RIGHT] = false,
@@ -115,14 +108,37 @@ local last_cached_action = {
     [ButtonAction.ACTION_PILLCARD] = false,
     [ButtonAction.ACTION_DROP] = false,
 }
+-- One-shot 'triggered' consumption tracker. When a fresh press (false->true
+-- edge) occurs, the corresponding entry flips to false (not yet consumed).
+-- The FIRST time MC_INPUT_ACTION returns true for IS_ACTION_TRIGGERED on that
+-- action, the entry flips to true (consumed) and all subsequent queries for
+-- that action return false until the NEXT edge.
+--
+-- Without this, cached_action=true persists for 2 game frames (FRAME_SKIP=2),
+-- and Isaac's engine polls IS_ACTION_TRIGGERED on EACH of those frames —
+-- often multiple times per frame across its subsystems — resulting in
+-- multiple one-shot events per Python action. That flood is what filled the
+-- user's crash log with thousands of 'Action PillCard Triggered' lines and
+-- eventually made Isaacs engine collapse.
+local triggered_consumed = {
+    [ButtonAction.ACTION_LEFT] = true,
+    [ButtonAction.ACTION_RIGHT] = true,
+    [ButtonAction.ACTION_UP] = true,
+    [ButtonAction.ACTION_DOWN] = true,
+    [ButtonAction.ACTION_SHOOTLEFT] = true,
+    [ButtonAction.ACTION_SHOOTRIGHT] = true,
+    [ButtonAction.ACTION_SHOOTUP] = true,
+    [ButtonAction.ACTION_SHOOTDOWN] = true,
+    [ButtonAction.ACTION_BOMB] = true,
+    [ButtonAction.ACTION_ITEM] = true,
+    [ButtonAction.ACTION_PILLCARD] = true,
+    [ButtonAction.ACTION_DROP] = true,
+}
 
 local function clear_cached_action()
-    -- Called on death and reset so a fresh run doesn't inherit half-pressed
-    -- inputs from the previous life (SHOOTRIGHT stuck at true, ITEM held
-    -- down, etc.). Held inputs bleeding across a restart destabilises Isaac's
-    -- game-state transition and has been observed to trigger engine crashes.
     for k in pairs(cached_action) do cached_action[k] = false end
     for k in pairs(last_cached_action) do last_cached_action[k] = false end
+    for k in pairs(triggered_consumed) do triggered_consumed[k] = true end
 end
 
 -- Decode MultiDiscrete([9, 5, 2, 2, 2]) into ButtonAction booleans.
@@ -133,9 +149,7 @@ local mv_table = {
     [7] = {left = true},                     [8] = {up = true, left = true},
 }
 local function apply_action(a)
-    -- Snapshot current state BEFORE rebuilding so MC_INPUT_ACTION can tell
-    -- IS_ACTION_TRIGGERED (edge-triggered, fires once per press) apart from
-    -- IS_ACTION_PRESSED (level-triggered, fires while held).
+    -- Snapshot current -> last so MC_INPUT_ACTION can compute press edges.
     for k, v in pairs(cached_action) do last_cached_action[k] = v end
     for k in pairs(cached_action) do cached_action[k] = false end
     local m = mv_table[a.move or 0]
@@ -154,6 +168,16 @@ local function apply_action(a)
     cached_action[ButtonAction.ACTION_ITEM]     = a.use_active == 1 or a.use_active == true
     cached_action[ButtonAction.ACTION_BOMB]     = a.drop_bomb  == 1 or a.drop_bomb  == true
     cached_action[ButtonAction.ACTION_PILLCARD] = a.pill_card  == 1 or a.pill_card  == true
+
+    -- For every action that just transitioned from unpressed to pressed,
+    -- reset its triggered_consumed flag to false. The next IS_ACTION_TRIGGERED
+    -- query for that action will fire ONCE and set the flag to true; every
+    -- subsequent query for the same action gets false until the next edge.
+    for k, v in pairs(cached_action) do
+        if v and not last_cached_action[k] then
+            triggered_consumed[k] = false
+        end
+    end
 end
 
 -- Drain damage events, merge with pending non-damage events, return combined list.
@@ -416,14 +440,16 @@ mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, hook, action)
     local pressed = cached_action[action]
     if pressed == nil then return nil end
     if hook == InputHook.IS_ACTION_TRIGGERED then
-        -- Edge-triggered: true ONLY on the tick the button transitions from
-        -- unpressed to pressed. This is what Isaac's engine uses to detect
-        -- one-shot events like 'use pill', 'drop bomb', 'use active item'.
-        -- Returning `pressed` unconditionally (as we did previously) meant
-        -- Isaac saw a fresh trigger EVERY tick pill_card was set — which
-        -- floods the engine with thousands of one-shot events per second
-        -- and eventually crashes it.
-        return pressed and not last_cached_action[action]
+        -- Return TRUE exactly ONCE per fresh press. Uses a consumption latch
+        -- so multiple queries within the same press window (either across
+        -- the 2 game frames the same cached_action persists, or multiple
+        -- calls per frame from different Isaac subsystems) all return false
+        -- after the first successful read. Prevents Isaac from processing
+        -- the same pill/bomb/item use dozens of times per Python action.
+        if not pressed then return false end
+        if triggered_consumed[action] then return false end
+        triggered_consumed[action] = true
+        return true
     elseif hook == InputHook.IS_ACTION_PRESSED then
         return pressed
     elseif hook == InputHook.GET_ACTION_VALUE then
