@@ -97,13 +97,16 @@ PYTHONPATH=python pytest tests/
 
 ### 3. Install the Lua mod
 
-Copy `mods\isaac-rl-bridge\` into your Repentance mods folder:
+Copy `mods\isaac-rl-bridge\` into your Repentance mods folder. Isaac reads mods from **two** locations, either works:
 
-| OS | Path |
+| Location | Path (Windows) |
 |---|---|
-| Windows | `%USERPROFILE%\Documents\My Games\Binding of Isaac Repentance\mods\` |
-| Linux | `~/.local/share/binding of isaac repentance/mods/` |
-| macOS | `~/Library/Application Support/Binding of Isaac Repentance/mods/` |
+| Next to the game binary (used by Steam Workshop) | `C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\mods\` |
+| Documents folder (used for hand-installed mods) | `%USERPROFILE%\Documents\My Games\Binding of Isaac Repentance\mods\` |
+
+Linux uses `~/.local/share/binding of isaac repentance/mods/` for user-installed and the equivalent `steamapps/.../mods/` for workshop.  macOS uses `~/Library/Application Support/Binding of Isaac Repentance/mods/`.
+
+You can put `isaac-rl-bridge` in either — Isaac loads mods from both dirs at startup. The workshop-side location works even if you don't have write access to Documents.
 
 A symlink so edits reflect live (**run PowerShell as Administrator** or Windows will refuse):
 
