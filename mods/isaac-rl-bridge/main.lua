@@ -135,15 +135,20 @@ local function exchange()
         return
     end
     if action.reset then
-        -- Order matters: `restart 0` must run FIRST. It works from any game state
-        -- (in-run, death animation, 'You Died' screen, game over). If we run
-        -- `stage N` first while the player is dead, Isaac can freeze or crash
-        -- because the stage command teleports a corpse rather than starting a
-        -- new run.
-        Isaac.ExecuteCommand("restart 0")
+        -- Use bare `restart` (equivalent to pressing R in-game), NOT `restart 0`.
+        -- Difference: `restart` restarts the CURRENT run in place — the process
+        -- stays alive and Isaac tears down + rebuilds the run state internally.
+        -- `restart 0` says 'new run as character 0 (Isaac)' and in some
+        -- Repentance builds triggers a deeper teardown path that ends the
+        -- process entirely (window closes) instead of restarting in-place.
+        -- Since we already boot as Isaac via --set-stage=1, we don't need to
+        -- respecify the character on every reset — pressing R is enough.
+        Isaac.DebugString("[isaac-rl-bridge] issuing 'restart' from reset command")
+        Isaac.ExecuteCommand("restart")
         -- Only touch stage if we want something other than the default (1).
-        -- `restart 0` already boots into Basement 1, so a `stage 1` afterward
-        -- is at best redundant and at worst races against the new run's init.
+        -- The initial --set-stage=1 boot already put us on Basement 1, so a
+        -- `stage 1` afterward is at best redundant and at worst races against
+        -- the new run's init.
         if action.stage and tonumber(action.stage) and tonumber(action.stage) ~= 1 then
             pending_stage = tonumber(action.stage)
         end
@@ -330,6 +335,9 @@ mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
             if render_frames_on_menu == AUTO_START_AFTER_FRAMES then
                 auto_start_fired = true
                 Isaac.DebugString("[isaac-rl-bridge] auto-start fallback firing (main menu detected after intro)")
+                -- On the menu we DO need `restart 0` — there's no active run
+                -- to soft-restart, so we're explicitly saying 'new run as
+                -- Isaac'. This is the one place bare `restart` won't work.
                 Isaac.ExecuteCommand("restart 0")
             end
         end
@@ -345,8 +353,11 @@ mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
     if player:IsDead() then
         death_render_frames = death_render_frames + 1
         if death_render_frames == DEATH_AUTO_RESTART_FRAMES then
-            Isaac.DebugString("[isaac-rl-bridge] player dead too long — forcing restart 0")
-            Isaac.ExecuteCommand("restart 0")
+            Isaac.DebugString("[isaac-rl-bridge] player dead too long — issuing 'restart'")
+            -- See the reset-handler comment: bare `restart` (press-R equivalent)
+            -- keeps the process alive across the tear-down. `restart 0` in some
+            -- Repentance builds closes the window instead.
+            Isaac.ExecuteCommand("restart")
             death_render_frames = 0   -- reset; MC_POST_GAME_STARTED will fire
         end
     else
