@@ -154,6 +154,16 @@ local function exchange()
         return
     end
     apply_action(action)
+
+    -- Run a small incremental GC step every exchange (≈15 Hz). Each Obs.build
+    -- allocates dozens of fresh tables (enemies, projectiles, pickups, grid
+    -- rows) plus a JSON string; the resulting garbage accumulates fast. Without
+    -- this, Isaac's default automatic GC eventually triggers a full sweep on
+    -- a large heap and stalls the game for hundreds of ms — the user-visible
+    -- symptom is a periodic ≈30s hitch that can escalate to a hard crash if
+    -- the frame budget overruns badly enough. `step, 100` collects a small
+    -- chunk each tick; the heap stays flat and the cost is invisible per-frame.
+    collectgarbage("step", 100)
 end
 
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)

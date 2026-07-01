@@ -138,13 +138,23 @@ end
 
 -- 4-channel room grid: {wall/pit, rock, spike/fire, poop/tnt}
 -- We flatten each channel to a 9*15=135 float array; Python reshapes to (4,9,15).
+--
+-- The four channel arrays are module-level and reused across calls to cut Lua
+-- garbage. Each Obs.build used to allocate 4 fresh 135-slot tables; at 15 Hz
+-- that was ~8100 table slots/sec churned through Lua's GC. Reusing keeps the
+-- allocation footprint per exchange near-zero for this section.
+local _grid_W, _grid_H = 15, 9
+local _grid_N = _grid_W * _grid_H
+local _walls  = {}
+local _rocks  = {}
+local _spikes = {}
+local _poop   = {}
+for i = 1, _grid_N do _walls[i] = 0; _rocks[i] = 0; _spikes[i] = 0; _poop[i] = 0 end
+
 local function build_room_grid(room)
-    local W, H = 15, 9
-    local n = W * H
-    local walls   = {}
-    local rocks   = {}
-    local spikes  = {}
-    local poop    = {}
+    local W, H, n = _grid_W, _grid_H, _grid_N
+    local walls, rocks, spikes, poop = _walls, _rocks, _spikes, _poop
+    -- Zero the reused arrays in place.
     for i = 1, n do walls[i] = 0; rocks[i] = 0; spikes[i] = 0; poop[i] = 0 end
 
     -- The interior grid of a 1x1 room starts at grid index (W+2)+1 with a border.
@@ -179,6 +189,9 @@ local function build_room_grid(room)
         end
     end
 
+    -- Return the reused arrays wrapped in a fresh 4-key table. The wrapper
+    -- table itself is small; json.encode reads the four keys without
+    -- allocating additional storage. Do NOT mutate these arrays elsewhere.
     return { walls = walls, rocks = rocks, spikes = spikes, poop = poop }
 end
 
