@@ -49,81 +49,110 @@ tests/                      # Offline unit tests (no live Isaac needed)
 
 ## Setting up on your GPU machine
 
+> **All shell examples are PowerShell** (Windows). Linux / macOS equivalents are in the collapsed sections at the end of each step.
+
 ### 1. System requirements
 
-- **OS:** Linux (recommended), Windows, or macOS. Multi-instance training is cleanest on Linux with Xvfb.
-- **GPU:** any CUDA-capable card with ≥8 GB VRAM. The default policy config is ~15 M parameters; batch size 512 fits in 6 GB comfortably.
-- **CPU:** 4-8 physical cores. CPU is the bottleneck (each Isaac instance chews one core at 30 Hz).
+- **OS:** Windows 10/11 (primary), Linux, or macOS. Multi-instance training is cleanest on Linux with Xvfb; on Windows each instance opens a real window.
+- **GPU:** any CUDA-capable card with ≥8 GB VRAM. Default policy is ~15 M parameters; batch 512 fits in 6 GB.
+- **CPU:** 4–8 physical cores. Each Isaac instance chews one core at 30 Hz — CPU is the throughput bottleneck.
 - **RAM:** ≥16 GB.
 - **Software:** Python 3.10+, `git`, Steam with *The Binding of Isaac: Rebirth* + *Repentance* DLC.
 
 ### 2. Clone and install
 
-```bash
+```powershell
 git clone https://github.com/mylmyl123/ai-isaac.git
 cd ai-isaac
 
-python3 -m venv .venv
-source .venv/bin/activate                     # Windows: .venv\Scripts\activate
-pip install --upgrade pip
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-# For CUDA-enabled torch on Linux (replace cu121 with your CUDA version):
-# pip install --index-url https://download.pytorch.org/whl/cu121 torch
 
-PYTHONPATH=python pytest tests/               # should print "17 passed"
+# CUDA-enabled torch (replace cu121 with your CUDA version — check `nvidia-smi`):
+pip install --index-url https://download.pytorch.org/whl/cu121 torch
+
+# Confirm CUDA is visible:
+python -c "import torch; print('cuda?', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+
+# Run offline tests (should print '17 passed'):
+$env:PYTHONPATH = "python"; pytest tests/
 ```
+
+If PowerShell blocks `Activate.ps1`, run once as admin:
+`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`.
+
+<details><summary>bash equivalent</summary>
+
+```bash
+git clone https://github.com/mylmyl123/ai-isaac.git
+cd ai-isaac
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip && pip install -r requirements.txt
+pip install --index-url https://download.pytorch.org/whl/cu121 torch
+PYTHONPATH=python pytest tests/
+```
+</details>
 
 ### 3. Install the Lua mod
 
-Copy `mods/isaac-rl-bridge/` into your Repentance mods folder:
+Copy `mods\isaac-rl-bridge\` into your Repentance mods folder:
 
 | OS | Path |
 |---|---|
-| Linux | `~/.local/share/binding of isaac repentance/mods/` |
 | Windows | `%USERPROFILE%\Documents\My Games\Binding of Isaac Repentance\mods\` |
+| Linux | `~/.local/share/binding of isaac repentance/mods/` |
 | macOS | `~/Library/Application Support/Binding of Isaac Repentance/mods/` |
 
-Symlinking so edits reflect live is nicer:
+A symlink so edits reflect live (**run PowerShell as Administrator** or Windows will refuse):
 
-```bash
-# Linux
-ln -s "$(pwd)/mods/isaac-rl-bridge" \
-      ~/.local/share/binding\ of\ isaac\ repentance/mods/isaac-rl-bridge
+```powershell
+$src = (Resolve-Path .\mods\isaac-rl-bridge).Path
+$dst = "$env:USERPROFILE\Documents\My Games\Binding of Isaac Repentance\mods\isaac-rl-bridge"
+New-Item -ItemType SymbolicLink -Path $dst -Target $src
 ```
 
-In-game, open Mods and enable **Isaac RL Bridge**.
+Or just plain copy (no admin needed):
+
+```powershell
+Copy-Item -Recurse .\mods\isaac-rl-bridge "$env:USERPROFILE\Documents\My Games\Binding of Isaac Repentance\mods\"
+```
+
+In-game: open Mods and enable **Isaac RL Bridge**.
 
 ### 4. Verify `--luadebug` works (Risk R1 in the plan)
 
 Isaac's Lua sandbox only exposes `require`/`socket` when `--luadebug` is set. Launch with the helper:
 
-```bash
-python tools/launch_isaac.py --port 9500
+```powershell
+python tools\launch_isaac.py --port 9500
 ```
 
-In the Isaac log (`~/.local/share/binding of isaac repentance/log.txt` on Linux, `%USERPROFILE%\Documents\My Games\Binding of Isaac Repentance\log.txt` on Windows), you should see:
+Check the Isaac log — on Windows it lives at:
 
-```
-[isaac-rl-bridge] mod loaded (port 9500, frame skip 2)
+```powershell
+Get-Content "$env:USERPROFILE\Documents\My Games\Binding of Isaac Repentance\log.txt" -Tail 50 -Wait
 ```
 
-If instead you see `require('socket') failed`, the `--luadebug` flag isn't reaching the process. Don't launch Isaac from the Steam UI — always go through `tools/launch_isaac.py`.
+You should see `[isaac-rl-bridge] mod loaded (port 9500, frame skip 2)`. If instead it says `require('socket') failed`, the `--luadebug` flag isn't reaching the process. **Don't launch Isaac from the Steam UI** — always go through `tools\launch_isaac.py`.
 
 ### 5. Smoke test the socket loop
 
-Two terminals.
+Two PowerShell windows.
 
 **Terminal A** — start the Python side first (it opens the server; Isaac connects into it):
 
-```bash
-source .venv/bin/activate
-PYTHONPATH=python python -m isaac_rl.env --port 9500 --steps 1000
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "python"
+python -m isaac_rl.env --port 9500 --steps 1000
 ```
 
 **Terminal B**:
 
-```bash
-python tools/launch_isaac.py --port 9500
+```powershell
+python tools\launch_isaac.py --port 9500
 ```
 
 Start any run in Isaac. Expected in Terminal A:
@@ -145,76 +174,102 @@ If that works, the bridge is proven end-to-end.
 
 ### Stage 1 — single-room combat
 
-The config in `python/isaac_rl/configs/stage1_single_room.yaml` uses 4 Isaac instances on ports 9500–9503. Two options:
+The config in `python\isaac_rl\configs\stage1_single_room.yaml` uses 4 Isaac instances on ports 9500–9503. Two options:
 
-**Option A — let the trainer launch Isaac (Linux only, needs a display or Xvfb).** Edit the config:
+**Option A — let the trainer launch Isaac** (works on Windows, Linux). Edit the YAML:
 
 ```yaml
 launch_isaac: true
-isaac_binary: /path/to/isaac-ng     # full path to the binary
+isaac_binary: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\The Binding of Isaac Rebirth\\isaac-ng.exe"
 ```
 
-Then:
+Note the double-backslashes — YAML strings need them. Then in **one** PowerShell:
 
-```bash
-PYTHONPATH=python python -m isaac_rl.ppo --config python/isaac_rl/configs/stage1_single_room.yaml
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "python"
+python -m isaac_rl.ppo --config python\isaac_rl\configs\stage1_single_room.yaml
 ```
 
-**Option B — launch Isaac manually (works everywhere, most reliable).** In separate terminals:
+**Option B — launch Isaac manually** (most reliable — easier to watch/kill individual instances). One PowerShell per instance:
 
-```bash
-python tools/launch_isaac.py --port 9500
-python tools/launch_isaac.py --port 9501
-python tools/launch_isaac.py --port 9502
-python tools/launch_isaac.py --port 9503
+```powershell
+python tools\launch_isaac.py --port 9500
 ```
 
-Then start training with `launch_isaac: false` (the default):
+Repeat for `9501`, `9502`, `9503` in three more PowerShells. Or spawn all 4 from one:
 
-```bash
-PYTHONPATH=python python -m isaac_rl.ppo --config python/isaac_rl/configs/stage1_single_room.yaml
+```powershell
+9500..9503 | ForEach-Object {
+    Start-Process powershell -ArgumentList "-NoExit","-Command","python tools\launch_isaac.py --port $_"
+}
 ```
 
-TensorBoard:
+Then start training (keep `launch_isaac: false`):
 
-```bash
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "python"
+python -m isaac_rl.ppo --config python\isaac_rl\configs\stage1_single_room.yaml
+```
+
+TensorBoard in yet another PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
 tensorboard --logdir runs
 ```
 
 Watch `rollout/ep_reward` climb; `reward/room_clear` should start firing within an hour of wall-clock training. Kill/checkpoint criteria are in the plan.
 
-### Multi-instance tips (Linux)
+<details><summary>bash equivalents</summary>
 
-- Run each Isaac inside its own Xvfb window to avoid focus-stealing and cursor issues:
-  ```bash
-  Xvfb :99 -screen 0 640x360x24 &
-  DISPLAY=:99 python tools/launch_isaac.py --port 9500 &
-  ```
-- In Isaac's `options.ini`, set `Fullscreen=0`, `WindowWidth=640`, `WindowHeight=360`, `VSync=0`, `MusicVolume=0`, `SFXVolume=0`. These reduce CPU load a lot per instance.
-- Frame skip is set in `mods/isaac-rl-bridge/main.lua` (`FRAME_SKIP`). Default 2 = 15 Hz control.
+```bash
+# Option B, one env per shell:
+python tools/launch_isaac.py --port 9500
+python tools/launch_isaac.py --port 9501
+python tools/launch_isaac.py --port 9502
+python tools/launch_isaac.py --port 9503
+
+# Trainer:
+PYTHONPATH=python python -m isaac_rl.ppo --config python/isaac_rl/configs/stage1_single_room.yaml
+
+# TensorBoard:
+tensorboard --logdir runs
+```
+</details>
+
+### Multi-instance tips (Windows)
+
+- Each Isaac instance opens its own window. Give the trainer window focus so it stays responsive; the Isaac windows can be minimized (background rendering still runs, but at a lower priority).
+- In Isaac's `options.ini` (same folder as `log.txt`), set: `Fullscreen=0`, `WindowWidth=640`, `WindowHeight=360`, `VSync=0`, `MusicVolume=0`, `SFXVolume=0`. Cuts per-instance CPU meaningfully.
+- Frame skip is set at the top of `mods\isaac-rl-bridge\main.lua` (`FRAME_SKIP`). Default 2 = 15 Hz control.
+- Windows Defender occasionally slows the first mod load. If `require("socket")` succeeds but the first exchange stalls, add the Isaac install folder to Defender's exclusions.
 
 ### Advancing through the curriculum
 
 After Stage 1 hits ~90% room clear:
 
-```bash
-# Resume from Stage 1 checkpoint by copying its state_dict path into
-# your Stage 2 launch (support for auto-resume is a small follow-up).
-PYTHONPATH=python python -m isaac_rl.ppo --config python/isaac_rl/configs/stage2_floor_clear.yaml
+```powershell
+$env:PYTHONPATH = "python"
+python -m isaac_rl.ppo --config python\isaac_rl\configs\stage2_floor_clear.yaml
 ```
 
-Stages 3 and 4 configs live alongside; edit `total_env_steps` if you want a shorter budget.
+Stages 3 and 4 configs live alongside; edit `total_env_steps` in the YAML if you want a shorter budget.
+
+> **Auto-resume between stages isn't wired yet.** For continuity, load the previous stage's `.pt` in the trainer before it starts (small edit in `ppo.py` — the eval script shows the loading pattern).
 
 ### Evaluating a checkpoint
 
-```bash
-PYTHONPATH=python python -m isaac_rl.eval \
-    --checkpoint runs/stage4_full_run/<timestamp>/ckpts/step_10000000.pt \
-    --config python/isaac_rl/configs/stage4_full_run.yaml \
+```powershell
+$env:PYTHONPATH = "python"
+python -m isaac_rl.eval `
+    --checkpoint runs\stage4_full_run\<timestamp>\ckpts\step_10000000.pt `
+    --config python\isaac_rl\configs\stage4_full_run.yaml `
     --episodes 32
 ```
 
-Prints Mom-kill rate, mean max floor reached, mean/median reward.
+Note: PowerShell continues lines with a backtick (`` ` ``), not backslash. Prints Mom-kill rate, mean max floor reached, mean/median reward.
 
 ---
 
@@ -246,7 +301,7 @@ Bumping to 8 instances roughly halves wall-clock. If you can get a speedhack wor
 | Symptom | Fix |
 |---|---|
 | `require('socket') failed` in Isaac log | Missing `--luadebug`. Always launch through `tools/launch_isaac.py`. |
-| `[Errno 48] Address already in use` | Prior server still bound. `lsof -i :9500` → kill, or use a different `--port`. |
+| `[Errno 48] Address already in use` (or `[WinError 10048]`) | Prior server still bound. PowerShell: `Get-NetTCPConnection -LocalPort 9500` then `Stop-Process -Id <pid>`. Or just use a different `--port`. |
 | Trainer hangs on `listening for Isaac` | Isaac isn't loading the mod. Confirm it's enabled in the Mods menu and check the log for `[isaac-rl-bridge] mod loaded`. |
 | Handshake succeeds but no step logs | Isaac is on the main menu. Start any run. |
 | Character doesn't move despite step logs | Another input mod is capturing `MC_INPUT_ACTION`. Disable other mods. |
