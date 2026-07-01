@@ -20,6 +20,24 @@ local FRAME_SKIP = 2
 local HOST = "127.0.0.1"
 local PORT = tonumber(os.getenv("ISAAC_RL_PORT") or "9500")
 
+-- Minimal-mode: when ISAAC_RL_MINIMAL is set, the mod strips its behaviour to
+-- the absolute bare minimum needed to reproduce/rule-out Isaac engine crashes:
+--   * NO exchange() with Python. No sockets. No JSON.
+--   * NO Obs.build entity iteration.
+--   * NO reward events, no MC_ENTITY_TAKE_DMG hooks, no PICKUP hooks.
+--   * ONLY the two runtime-critical callbacks left:
+--       - MC_POST_UPDATE: watch for player death and restart cleanly.
+--       - MC_INPUT_ACTION: still installed but always returns nil.
+-- Purpose: if Isaac still crashes at isaac-ng.exe 0x003a93b5 with this mode
+-- ON, the crash is fundamental to Isaacs restart cycle on your machine and
+-- has nothing to do with our RL data path. If the crash STOPS with this mode
+-- on, we've bisected the fault into either Obs.build, apply_action, or the
+-- reward hooks, and can re-enable them one by one to find the culprit.
+local MINIMAL_MODE = os.getenv("ISAAC_RL_MINIMAL") == "1"
+if MINIMAL_MODE then
+    Isaac.DebugString("[isaac-rl-bridge] MINIMAL_MODE=1 — running with training I/O disabled")
+end
+
 local mod = RegisterMod("isaac-rl-bridge", 1)
 local conn = nil
 local tick = 0
@@ -189,10 +207,13 @@ end
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     tick = 0
     reset_run_state()
-    -- Fresh run: give Isaac a few ticks before we start iterating entities.
     reset_cooldown = 30
-    death_announced = false   -- new run, player is alive again
-    clear_cached_action()     -- new run, start with no buttons held
+    death_announced = false
+    clear_cached_action()
+    if MINIMAL_MODE then
+        Isaac.DebugString("[isaac-rl-bridge] MINIMAL_MODE: run started, socket disabled")
+        return   -- no socket, no handshake, no I/O with Python
+    end
     -- Apply any deferred console commands from the reset that just fired.
     if pending_seed then
         Isaac.ExecuteCommand("seed " .. pending_seed)
@@ -247,12 +268,23 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     run_state.frames_since_room = run_state.frames_since_room + 1
     run_state.frames_since_hit = run_state.frames_since_hit + 1
 
-    -- After a `restart 0` we spend a fixed number of ticks NOT calling exchange().
-    -- Iterating entities via Isaac.GetRoomEntities()/FindByType() during the
-    -- game's teardown/rebuild triggers Lua5.3.3r.dll access-violation crashes
-    -- (0xc0000005). Room/level transitions also skip their exchange to be safe.
     if reset_cooldown > 0 then
         reset_cooldown = reset_cooldown - 1
+        return
+    end
+
+    if MINIMAL_MODE then
+        -- Only need death → restart handling. No exchange, no obs, nothing.
+        local pl = Isaac.GetPlayer(0)
+        if pl and pl:IsDead() then
+            if not death_announced then
+                death_announced = true
+                clear_cached_action()
+                Isaac.DebugString("[isaac-rl-bridge] MINIMAL_MODE: player died, restart")
+                Isaac.ExecuteCommand("restart")
+                reset_cooldown = 60
+            end
+        end
         return
     end
 
@@ -335,6 +367,7 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
 end)
 
 mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, hook, action)
+    if MINIMAL_MODE then return nil end   -- no input injection at all
     -- Only inject cached inputs into a valid PLAYER entity. Isaac's input
     -- system also queries with entity=nil for menu / transition / You-Died-
     -- screen contexts. Feeding those stale gameplay inputs (SHOOTRIGHT, ITEM,
