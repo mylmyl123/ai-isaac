@@ -128,6 +128,18 @@ class SocketIsaacEnv(gym.Env):
                     raise TimeoutError(f"Isaac did not connect on port {self.port} within {self.accept_timeout_s}s")
                 continue
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Bump the OS recv buffer to 1 MB. During training the trainer stops
+        # reading from the socket for a few seconds while it runs a PPO update
+        # (no env.step() calls). With the default ~64KB recv buffer, Isaacs
+        # mod fills it in ~2 seconds at 15 obs/sec, TCP window closes, mods
+        # sock:send() times out with a PARTIAL write, and the framing on the
+        # wire is now corrupted for good. Symptom: mysterious 'Isaac died
+        # mid-step [WinError 10054]' warnings. 1MB buys ~30s of PPO-update
+        # headroom, well beyond any reasonable update duration.
+        try:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError as _e:
+            log.warning("port %d: failed to set SO_RCVBUF=1MB: %s (falling back to OS default)", self.port, _e)
         log.info("Isaac connected from %s", addr)
         self._client = client
         hello = recv_frame(client)

@@ -74,13 +74,23 @@ function Net:send(payload)
     local frame = pack_u32_be(#payload) .. payload
     local sent, err, last = self.sock:send(frame)
     if sent then return end
-    -- `err == "timeout"` means TCP send buffer is full because Python is
-    -- temporarily not reading (mid PPO update, GC pause, whatever). This is
-    -- NOT a dead peer — do NOT reconnect. Reconnecting on timeout was the
-    -- direct cause of the 'walks into corner then lag then crash' pattern:
-    -- _reconnect() blocks Isaac's game loop for up to 10s, and any partially
-    -- written bytes leave the framing out of sync with Python. Just drop
-    -- this frame; the next tick will build a fresh obs and try again.
+    -- Check for PARTIAL write. LuaSocket returns (nil, "timeout", bytes_sent).
+    -- If ANY bytes made it onto the wire before the timeout, framing is now
+    -- corrupted: Python will read those bytes as the start of a new frame,
+    -- get a bogus length prefix, and either hang or drop the connection.
+    -- Closing the socket immediately is the only safe recovery — the next
+    -- send() call will reconnect fresh with clean framing.
+    if last and last > 0 and last < #frame then
+        Isaac.DebugString("[isaac-rl-bridge] partial send (" .. tostring(last) .. "/" .. tostring(#frame) .. ") — closing socket to preserve framing")
+        if self.sock then
+            pcall(function() self.sock:close() end)
+            self.sock = nil
+        end
+        return
+    end
+    -- Pure timeout (zero bytes written). Peer temporarily not reading. Buffer
+    -- was already full at the OS level. Drop this frame; next tick will build
+    -- fresh obs and retry.
     if err == "timeout" then
         return
     end
