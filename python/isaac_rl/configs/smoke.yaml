@@ -1,0 +1,37 @@
+# Stage 0 — smoke test. 1 env, tiny rollout, no Isaac spawning; you launch the game manually.
+run_name: smoke
+n_envs: 1
+rollout_steps: 32
+total_env_steps: 20000
+minibatch_size: 32
+n_epochs: 2
+lr: 3e-4
+gamma: 0.99
+gae_lambda: 0.95
+clip: 0.2
+vf_coef: 0.5
+ent_coef: 0.02
+max_grad_norm: 0.5
+
+use_rnd: false
+rnd_coef: 0.0
+
+base_port: 9500
+reset_stage: null
+max_episode_steps: 1800
+launch_isaac: false
+isaac_binary: null
+accept_timeout_s: 300.0
+
+device: cuda
+seed: 0
+checkpoint_dir: runs
+checkpoint_every: 100000
+log_every: 5
+
+policy:
+  entity_dim: 64
+  proj_dim: 64
+  pickup_dim: 32
+  trunk_dim: 128
+  gru_dim: 128

@@ -2,12 +2,10 @@
 
 Design notes:
 - The trainer owns the server socket. Isaac connects into us via LuaSocket.
-  This is the opposite of what feels natural but matches Isaac's lifecycle: the
-  trainer is long-lived while Isaac restarts on mod reloads.
-- One env == one Isaac process. Multi-env parallelism is handled by vec_env.py.
+- One env == one Isaac process. Multi-env parallelism is in vec_env.py.
 - `reset()` sends a `reset` command down the wire; Lua runs `restart 0` on the
-  next tick and reconnects on MC_POST_GAME_STARTED. We accept a fresh socket.
-- `step()` is synchronous: send action → wait for next obs frame.
+  next tick and reconnects on MC_POST_GAME_STARTED.
+- `step()` is synchronous: send action → wait for next obs frame → shape reward.
 """
 from __future__ import annotations
 
@@ -20,6 +18,7 @@ import gymnasium as gym
 import numpy as np
 
 from .protocol import recv_frame, send_frame
+from .reward import RewardConfig, RewardShaper
 from .spaces import (
     ACTION_FACTORS,
     action_space,
@@ -37,11 +36,21 @@ class SocketIsaacEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, port: int = 9500, host: str = "127.0.0.1", accept_timeout_s: float = 60.0):
+    def __init__(
+        self,
+        port: int = 9500,
+        host: str = "127.0.0.1",
+        accept_timeout_s: float = 300.0,
+        max_steps: int = 27000,          # ~30 min at 15 Hz
+        reward_config: RewardConfig | None = None,
+        reset_stage: int | None = None,   # curriculum: force `stage N` on reset
+    ):
         super().__init__()
         self.host = host
         self.port = port
         self.accept_timeout_s = accept_timeout_s
+        self.max_steps = max_steps
+        self.reset_stage = reset_stage
 
         self.observation_space = observation_space()
         self.action_space = action_space()
@@ -51,6 +60,8 @@ class SocketIsaacEnv(gym.Env):
         self._last_action = np.zeros(len(ACTION_FACTORS), dtype=np.int64)
         self._last_seed: int | None = None
         self._steps = 0
+
+        self.reward_shaper = RewardShaper(reward_config)
 
         self._open_server()
 
@@ -88,18 +99,18 @@ class SocketIsaacEnv(gym.Env):
     # -- gym api ----------------------------------------------------------
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        # If we don't yet have a client, wait for Isaac's MC_POST_GAME_STARTED handshake.
+        self.reward_shaper.reset()
+
         if self._client is None:
             self._accept()
-            # First frame after handshake is a fresh obs — grab it.
             raw = recv_frame(self._client)
         else:
-            # Ask Lua to restart the run. It replies with a handshake, then obs.
             payload: dict[str, Any] = {"reset": True}
             if seed is not None:
                 payload["seed"] = int(seed)
+            if self.reset_stage is not None:
+                payload["stage"] = int(self.reset_stage)
             send_frame(self._client, payload)
-            # After restart, the mod reconnects. Close and re-accept.
             try:
                 self._client.close()
             except OSError:
@@ -122,23 +133,22 @@ class SocketIsaacEnv(gym.Env):
         self._last_action = a
         self._steps += 1
         obs = encode_obs(raw, last_action=self._last_action)
-        # M1: no reward or terminal signals yet. reward.py fills these in once
-        # the Lua obs builder emits damage / room_clear / death events.
-        reward = 0.0
-        terminated = False
-        truncated = False
-        info: dict[str, Any] = {"raw": raw, "steps": self._steps}
+
+        reward, terminated, breakdown = self.reward_shaper(raw)
+        truncated = self._steps >= self.max_steps
+        info: dict[str, Any] = {
+            "raw": raw,
+            "steps": self._steps,
+            "reward_breakdown": breakdown,
+        }
         return obs, reward, terminated, truncated, info
 
 
-def wait_for_isaac(port: int = 9500, timeout_s: float = 120.0) -> SocketIsaacEnv:
-    """Convenience: construct the env and block until Isaac connects (used by smoke test)."""
-    env = SocketIsaacEnv(port=port, accept_timeout_s=timeout_s)
-    return env
+def wait_for_isaac(port: int = 9500, **kwargs) -> SocketIsaacEnv:
+    return SocketIsaacEnv(port=port, **kwargs)
 
 
 if __name__ == "__main__":
-    # Random-policy smoke test. Start this first, then launch Isaac with the mod.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     import argparse
 
@@ -154,10 +164,16 @@ if __name__ == "__main__":
 
     rng = np.random.default_rng(0)
     t0 = time.perf_counter()
+    ep_reward = 0.0
     for i in range(args.steps):
         a = rng.integers(low=0, high=ACTION_FACTORS)
         obs, r, term, trunc, info = env.step(a)
+        ep_reward += r
         if i % 100 == 0:
             hz = (i + 1) / max(time.perf_counter() - t0, 1e-6)
-            log.info("step %d @ %.1f Hz — player hp_red=%.0f", i, hz, obs["player"][4])
+            log.info("step %d @ %.1f Hz — hp_red=%.0f  ep_reward=%.2f", i, hz, obs["player"][4], ep_reward)
+        if term or trunc:
+            log.info("episode ended (term=%s trunc=%s) reward=%.2f", term, trunc, ep_reward)
+            obs, info = env.reset()
+            ep_reward = 0.0
     env.close()

@@ -1,17 +1,20 @@
 -- main.lua — Isaac RL bridge entry point.
 --
--- Registers callbacks that:
---   1. Connect to the Python trainer on game start.
---   2. Each MC_POST_UPDATE (30 Hz), build an obs, send it, wait for an action.
---   3. Inject the cached action via MC_INPUT_ACTION.
+-- Callback flow (30 Hz game clock):
+--   MC_POST_GAME_STARTED  — connect socket, handshake, reset per-run state
+--   MC_POST_NEW_LEVEL     — record floor descent event; reset per-floor state
+--   MC_POST_NEW_ROOM      — record room entry; reset per-room state
+--   MC_ENTITY_TAKE_DMG    — reward.lua captures damage events
+--   MC_POST_PICKUP_UPDATE — reward.lua captures pedestal grabs
+--   MC_POST_UPDATE (30Hz) — every FRAME_SKIP ticks: build obs, send, block for action
+--   MC_INPUT_ACTION       — return cached action booleans
 --
--- Control rate is 15 Hz: we send/receive every other game frame and reuse the
--- cached action across the skipped frame (plan §1.3). Bump FRAME_SKIP to 1 to
--- drop to 30 Hz control if diagnosing lag.
+-- Control rate is 15 Hz by default (FRAME_SKIP=2). Bump to 1 for 30 Hz.
 
-local Net = require("net")
-local Obs = require("obs")
-local json = require("json")
+local Net    = require("net")
+local Obs    = require("obs")
+local Reward = require("reward")
+local json   = require("json")
 
 local FRAME_SKIP = 2
 local HOST = "127.0.0.1"
@@ -21,8 +24,29 @@ local mod = RegisterMod("isaac-rl-bridge", 1)
 local conn = nil
 local tick = 0
 
+-- Per-run state that Python's reward shaper wants to know about.
+local run_state = {
+    frames_since_room = 0,
+    frames_since_hit  = 0,
+    visited_rooms = {},          -- set of SafeGridIndex -> true
+    visited_rooms_count = 0,
+    last_stage = 0,
+    last_room_clear = false,
+    pending_events = {},          -- non-damage events (new_room, new_level, death, room_clear)
+}
+
+local function reset_run_state()
+    run_state.frames_since_room = 0
+    run_state.frames_since_hit  = 0
+    run_state.visited_rooms = {}
+    run_state.visited_rooms_count = 0
+    run_state.last_stage = 0
+    run_state.last_room_clear = false
+    run_state.pending_events = {}
+    Reward.reset_run()
+end
+
 -- Cached action written by Python, read by MC_INPUT_ACTION.
--- Keys match ButtonAction enum members. Values are booleans.
 local cached_action = {
     [ButtonAction.ACTION_LEFT] = false,
     [ButtonAction.ACTION_RIGHT] = false,
@@ -38,47 +62,46 @@ local cached_action = {
     [ButtonAction.ACTION_DROP] = false,
 }
 
--- Decode a policy MultiDiscrete([9, 5, 2, 2, 2]) action into ButtonAction booleans.
--- move  ∈ 0..8: 0=none, 1..8 clockwise from up (up, up-right, right, down-right, down, down-left, left, up-left)
--- shoot ∈ 0..4: 0=none, 1..4 cardinal (up, right, down, left)
+-- Decode MultiDiscrete([9, 5, 2, 2, 2]) into ButtonAction booleans.
+local mv_table = {
+    [1] = {up = true},                       [2] = {up = true, right = true},
+    [3] = {right = true},                    [4] = {down = true, right = true},
+    [5] = {down = true},                     [6] = {down = true, left = true},
+    [7] = {left = true},                     [8] = {up = true, left = true},
+}
 local function apply_action(a)
     for k in pairs(cached_action) do cached_action[k] = false end
-    local move = a.move or 0
-    local shoot = a.shoot or 0
-
-    -- Movement direction table indexed by move value (1..8).
-    local mv = {
-        [1] = {up = true},
-        [2] = {up = true, right = true},
-        [3] = {right = true},
-        [4] = {down = true, right = true},
-        [5] = {down = true},
-        [6] = {down = true, left = true},
-        [7] = {left = true},
-        [8] = {up = true, left = true},
-    }
-    local m = mv[move]
+    local m = mv_table[a.move or 0]
     if m then
         cached_action[ButtonAction.ACTION_UP]    = m.up    == true
         cached_action[ButtonAction.ACTION_DOWN]  = m.down  == true
         cached_action[ButtonAction.ACTION_LEFT]  = m.left  == true
         cached_action[ButtonAction.ACTION_RIGHT] = m.right == true
     end
-
-    if     shoot == 1 then cached_action[ButtonAction.ACTION_SHOOTUP]    = true
-    elseif shoot == 2 then cached_action[ButtonAction.ACTION_SHOOTRIGHT] = true
-    elseif shoot == 3 then cached_action[ButtonAction.ACTION_SHOOTDOWN]  = true
-    elseif shoot == 4 then cached_action[ButtonAction.ACTION_SHOOTLEFT]  = true
+    local s = a.shoot or 0
+    if     s == 1 then cached_action[ButtonAction.ACTION_SHOOTUP]    = true
+    elseif s == 2 then cached_action[ButtonAction.ACTION_SHOOTRIGHT] = true
+    elseif s == 3 then cached_action[ButtonAction.ACTION_SHOOTDOWN]  = true
+    elseif s == 4 then cached_action[ButtonAction.ACTION_SHOOTLEFT]  = true
     end
-
     cached_action[ButtonAction.ACTION_ITEM]     = a.use_active == 1 or a.use_active == true
     cached_action[ButtonAction.ACTION_BOMB]     = a.drop_bomb  == 1 or a.drop_bomb  == true
     cached_action[ButtonAction.ACTION_PILLCARD] = a.pill_card  == 1 or a.pill_card  == true
 end
 
--- Poll-and-block: send obs, wait for action. On timeout the previous action is reused.
+-- Drain damage events, merge with pending non-damage events, return combined list.
+local function collect_events()
+    local dmg = Reward.drain()
+    local pend = run_state.pending_events
+    run_state.pending_events = {}
+    -- Concatenate.
+    for i = 1, #pend do dmg[#dmg + 1] = pend[i] end
+    return dmg
+end
+
 local function exchange()
-    local obs = Obs.build(tick)
+    local events = collect_events()
+    local obs = Obs.build(tick, events, run_state)
     local ok, payload = pcall(json.encode, obs)
     if not ok then
         Isaac.DebugString("[isaac-rl-bridge] json.encode failed: " .. tostring(payload))
@@ -87,18 +110,16 @@ local function exchange()
     conn:send(payload)
 
     local msg = conn:recv()
-    if not msg then return end  -- timeout — keep previous cached_action
+    if not msg then return end
     local ok2, action = pcall(json.decode, msg)
     if not ok2 or type(action) ~= "table" then
         Isaac.DebugString("[isaac-rl-bridge] json.decode failed: " .. tostring(action))
         return
     end
     if action.reset then
-        -- Trainer requested episode reset. Restart the run with an optional seed.
-        if action.seed then
-            Isaac.ExecuteCommand("seed " .. tostring(action.seed))
-        end
-        Isaac.ExecuteCommand("restart 0")  -- 0 = Isaac
+        if action.seed then Isaac.ExecuteCommand("seed " .. tostring(action.seed)) end
+        if action.stage then Isaac.ExecuteCommand("stage " .. tostring(action.stage)) end
+        Isaac.ExecuteCommand("restart 0")
         return
     end
     apply_action(action)
@@ -106,23 +127,71 @@ end
 
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     tick = 0
+    reset_run_state()
     if conn then conn:close() end
     conn = Net.connect(HOST, PORT, 0.25)
-    -- Handshake: schema version + start seed, so the trainer can log it.
     local seed = Game():GetSeeds():GetStartSeed()
     conn:send(json.encode({hello = true, schema = 1, seed = seed, is_continued = is_continued}))
     Isaac.DebugString("[isaac-rl-bridge] connected to trainer on port " .. tostring(PORT))
 end)
 
+mod:AddCallback(ModCallbacks.MC_POST_NEW_LEVEL, function()
+    local stage = Game():GetLevel():GetStage()
+    run_state.pending_events[#run_state.pending_events + 1] = {
+        kind = "new_level", stage = stage,
+    }
+    Reward.reset_room()
+    run_state.last_stage = stage
+end)
+
+mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
+    local level = Game():GetLevel()
+    local sgi = level:GetCurrentRoomDesc().SafeGridIndex
+    local room = Game():GetRoom()
+    local is_new = not run_state.visited_rooms[sgi]
+    if is_new then
+        run_state.visited_rooms[sgi] = true
+        run_state.visited_rooms_count = run_state.visited_rooms_count + 1
+    end
+    run_state.pending_events[#run_state.pending_events + 1] = {
+        kind = "new_room",
+        safe_grid_index = sgi,
+        is_new = is_new,
+        room_type = room:GetType(),
+    }
+    run_state.frames_since_room = 0
+    run_state.last_room_clear = room:IsClear()
+    Reward.reset_room()
+end)
+
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     tick = tick + 1
+    run_state.frames_since_room = run_state.frames_since_room + 1
+    run_state.frames_since_hit = run_state.frames_since_hit + 1
+
+    -- Detect room-clear transition (false -> true).
+    local room = Game():GetRoom()
+    local is_clear = room:IsClear()
+    if is_clear and not run_state.last_room_clear then
+        run_state.pending_events[#run_state.pending_events + 1] = {
+            kind = "room_clear",
+            safe_grid_index = Game():GetLevel():GetCurrentRoomDesc().SafeGridIndex,
+        }
+    end
+    run_state.last_room_clear = is_clear
+
+    -- Detect death this frame (Python turns it into terminated=True).
+    local player = Isaac.GetPlayer(0)
+    if player:IsDead() then
+        run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
+    end
+
     if (tick % FRAME_SKIP) == 0 and conn then
         exchange()
     end
 end)
 
 mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, hook, action)
-    -- Only override player inputs. Menu/pause pass through (nil return).
     if entity and entity:ToPlayer() == nil then return nil end
     local pressed = cached_action[action]
     if pressed == nil then return nil end
@@ -133,5 +202,15 @@ mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, hook, action)
     end
     return nil
 end)
+
+-- Reset the "frames since hit" counter whenever the player takes damage.
+mod:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, entity)
+    if entity and entity:ToPlayer() then
+        run_state.frames_since_hit = 0
+    end
+    return nil
+end)
+
+Reward.attach(mod)
 
 Isaac.DebugString("[isaac-rl-bridge] mod loaded (port " .. tostring(PORT) .. ", frame skip " .. FRAME_SKIP .. ")")

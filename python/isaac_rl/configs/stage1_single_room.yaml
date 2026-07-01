@@ -1,0 +1,43 @@
+# Stage 1 — single-room combat on Basement 1.
+# Recommended fleet: 4 Isaac instances, single GPU.
+
+run_name: stage1_single_room
+n_envs: 4
+rollout_steps: 256
+total_env_steps: 20_000_000
+minibatch_size: 512
+n_epochs: 4
+lr: 3.0e-4
+lr_decay: true
+gamma: 0.99            # short episodes; discount can be lower than the 6-floor gamma
+gae_lambda: 0.95
+clip: 0.2
+vf_coef: 0.5
+ent_coef: 0.02
+max_grad_norm: 0.5
+
+use_rnd: true
+rnd_coef: 0.1
+rnd_lr: 1.0e-4
+
+base_port: 9500
+reset_stage: 1
+max_episode_steps: 1800
+
+# Set to the absolute path of your isaac-ng / isaac.exe binary and flip launch_isaac.
+launch_isaac: false
+isaac_binary: null
+accept_timeout_s: 300.0
+
+device: cuda
+seed: 42
+checkpoint_dir: runs
+checkpoint_every: 500_000
+log_every: 10
+
+policy:
+  entity_dim: 128
+  proj_dim: 128
+  pickup_dim: 64
+  trunk_dim: 512
+  gru_dim: 512
