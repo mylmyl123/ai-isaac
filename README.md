@@ -328,7 +328,7 @@ Bump `n_envs` in the YAML for more instances. Each extra instance costs ~1 CPU c
 
 ---
 
-## Before training: disable other mods
+## Before training: disable other mods & configure Isaac
 
 The RL bridge assumes vanilla Repentance. Other mods will fight it for `MC_INPUT_ACTION`, spawn modded enemies the tables don't know, and reward-hack the agent. Toggle them off with the helper:
 
@@ -339,7 +339,18 @@ python tools\manage_mods.py disable-others   # disable everything except isaac-r
 python tools\manage_mods.py enable-all       # restore everything after training
 ```
 
-The disable is reversible (writes `disable.it` markers instead of deleting mods). Launch Isaac once through Steam after running `disable-others` so the change takes effect, then close.
+You also need to patch Isaac's `options.ini` so it doesn't pause when the window loses focus (fatal for multi-instance training) and doesn't throttle background windows to 5 FPS:
+
+```powershell
+python tools\configure_isaac.py show     # print current vs. training-friendly values
+python tools\configure_isaac.py apply    # write the training-friendly values (backs up first)
+# ... train ...
+python tools\configure_isaac.py restore  # restore your original options.ini
+```
+
+Both scripts are reversible — `apply` backs up your original as `options.ini.pre-rl-bak`, and `restore` puts it back.
+
+Launch Isaac once through Steam after both scripts so it picks up the changes, close, then start training.
 
 ## Troubleshooting
 

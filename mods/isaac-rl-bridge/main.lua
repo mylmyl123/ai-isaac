@@ -213,4 +213,26 @@ end)
 
 Reward.attach(mod)
 
+-- Auto-start a run from the main menu so training doesn't need a human click.
+-- The bridge waits ~30 render frames after Isaac finishes booting so the intro
+-- animation / mod-loading has time to settle, then executes `restart 0`.
+--
+-- We use MC_POST_RENDER (fires every render frame including menus) rather than
+-- MC_POST_UPDATE (only fires during a run).
+local menu_wait_frames = 0
+local AUTO_START_AFTER_FRAMES = 90    -- ~1.5s of intro/menu at 60 render Hz
+mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
+    -- Game():IsPaused() also returns true on the menu, but Room():GetFrameCount()==0
+    -- and Game():GetFrameCount()==0 is a more reliable "we're not in a run" check.
+    if Game():GetFrameCount() > 0 then
+        menu_wait_frames = 0
+        return
+    end
+    menu_wait_frames = menu_wait_frames + 1
+    if menu_wait_frames == AUTO_START_AFTER_FRAMES then
+        Isaac.DebugString("[isaac-rl-bridge] auto-starting run from menu")
+        Isaac.ExecuteCommand("restart 0")   -- 0 = Isaac
+    end
+end)
+
 Isaac.DebugString("[isaac-rl-bridge] mod loaded (port " .. tostring(PORT) .. ", frame skip " .. FRAME_SKIP .. ")")
