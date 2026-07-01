@@ -299,6 +299,9 @@ def main() -> int:
                     help="Stage passed to --set-stage on first launch (default: 1 = boot straight into Basement 1). "
                          "Set to 0 to skip the flag entirely (slower boot, uses the mod's menu-auto-start).")
     ap.add_argument("--tensorboard", action="store_true", help="Also start TensorBoard in the background at :6006")
+    ap.add_argument("--resume", type=str, default=None, metavar="CKPT.pt",
+                    help="Resume training from a checkpoint. Point at a .pt file (e.g. runs/<run>/<timestamp>/latest.pt "
+                         "or runs/<run>/<timestamp>/ckpts/step_1000000.pt). Loads policy, RND, optimizer, and step count.")
     ap.add_argument("--override", nargs="*", default=[], help="Extra config overrides: key=value")
     args = ap.parse_args()
 
@@ -310,6 +313,9 @@ def main() -> int:
         cfg.n_envs = args.n_envs
     if args.base_port is not None:
         cfg.base_port = args.base_port
+    if args.resume is not None:
+        cfg.resume_from = args.resume
+        log.info("will resume training from checkpoint: %s", args.resume)
     for kv in args.override:
         k, _, v = kv.partition("=")
         try:

@@ -13,6 +13,7 @@ import argparse
 import logging
 import math
 import os
+import signal
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -80,6 +81,7 @@ class PPOConfig:
     run_name: str = "ppo-isaac"
     checkpoint_dir: str = "runs"
     checkpoint_every: int = 500_000
+    resume_from: str | None = None   # path to a .pt checkpoint to resume from
     log_every: int = 10
 
     # Policy net
@@ -166,6 +168,65 @@ def train(cfg: PPOConfig) -> None:
     global_step = 0
     updates = 0
     t_start = time.time()
+
+    # --- resume from checkpoint if requested ----------------------------
+    if getattr(cfg, "resume_from", None):
+        ckpt_path = Path(cfg.resume_from).expanduser()
+        if not ckpt_path.exists():
+            log.warning("resume: checkpoint file %s does not exist, starting fresh", ckpt_path)
+        else:
+            log.info("resume: loading checkpoint %s", ckpt_path)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            policy.load_state_dict(ckpt["policy"])
+            optim.load_state_dict(ckpt["optim"])
+            if rnd is not None and ckpt.get("rnd_predictor") is not None:
+                rnd.predictor.load_state_dict(ckpt["rnd_predictor"])
+            if rnd is not None and ckpt.get("rnd_target") is not None:
+                rnd.target.load_state_dict(ckpt["rnd_target"])
+            global_step = int(ckpt.get("global_step", 0))
+            log.info("resume: continuing from step %d", global_step)
+
+    # Helper: save a checkpoint at the current state. Called every
+    # cfg.checkpoint_every steps AND on any exit (Ctrl+C, exception, normal
+    # completion) via the finally-block below. Also copies to latest.pt for
+    # easy --resume usage.
+    def _save_ckpt(tag: str) -> None:
+        ckpt_path = run_dir / "ckpts" / f"step_{global_step}.pt"
+        try:
+            torch.save({
+                "policy": policy.state_dict(),
+                "rnd_predictor": rnd.predictor.state_dict() if rnd is not None else None,
+                "rnd_target": rnd.target.state_dict() if rnd is not None else None,
+                "optim": optim.state_dict(),
+                "cfg": asdict(cfg),
+                "global_step": global_step,
+            }, ckpt_path)
+            # Overwrite latest.pt in the run dir. Trainer users can pass this
+            # to --resume without knowing the specific step number.
+            latest = run_dir / "latest.pt"
+            import shutil as _shutil
+            _shutil.copyfile(ckpt_path, latest)
+            log.info("[%s] saved checkpoint: %s (also latest.pt)", tag, ckpt_path)
+        except Exception as e:
+            log.exception("[%s] failed to save checkpoint: %s", tag, e)
+
+    # Signal-based clean shutdown: set a flag on Ctrl+C so the training loop
+    # can finish the current rollout gracefully, save a final checkpoint, and
+    # exit. Without this, Ctrl+C throws KeyboardInterrupt mid-loop and any
+    # progress since the last scheduled checkpoint is lost.
+    _shutdown_requested = {"flag": False}
+    def _on_sigint(signum, frame):
+        if not _shutdown_requested["flag"]:
+            log.warning("Ctrl+C received — finishing current rollout then saving. Press Ctrl+C again to force-exit.")
+            _shutdown_requested["flag"] = True
+        else:
+            log.warning("Second Ctrl+C — aborting immediately (progress since last save WILL be lost)")
+            raise KeyboardInterrupt()
+    try:
+        _prev_sigint = signal.signal(signal.SIGINT, _on_sigint)
+    except (ValueError, AttributeError):
+        # Not on main thread or platform doesn't support — fall back to default.
+        _prev_sigint = None
 
     while global_step < cfg.total_env_steps:
         # --- collect rollout -------------------------------------------
@@ -344,16 +405,24 @@ def train(cfg: PPOConfig) -> None:
 
         # --- checkpoint -------------------------------------------------
         if global_step and (global_step // max(1, cfg.checkpoint_every) > (global_step - cfg.n_envs * cfg.rollout_steps) // max(1, cfg.checkpoint_every)):
-            ckpt = run_dir / "ckpts" / f"step_{global_step}.pt"
-            torch.save({
-                "policy": policy.state_dict(),
-                "rnd_predictor": rnd.predictor.state_dict() if rnd is not None else None,
-                "rnd_target": rnd.target.state_dict() if rnd is not None else None,
-                "optim": optim.state_dict(),
-                "cfg": asdict(cfg),
-                "global_step": global_step,
-            }, ckpt)
-            log.info("saved checkpoint: %s", ckpt)
+            _save_ckpt("scheduled")
+
+        # --- clean-shutdown check ----------------------------------------
+        if _shutdown_requested["flag"]:
+            log.info("clean shutdown requested — saving final checkpoint and exiting training loop")
+            _save_ckpt("interrupted")
+            break
+
+    # Normal completion (hit total_env_steps) OR clean shutdown OR exhausted loop.
+    if not _shutdown_requested["flag"] and global_step >= cfg.total_env_steps:
+        _save_ckpt("complete")
+
+    # Restore original SIGINT handler on the way out.
+    if _prev_sigint is not None:
+        try:
+            signal.signal(signal.SIGINT, _prev_sigint)
+        except (ValueError, AttributeError):
+            pass
 
     log.info("training complete")
     env.close()
