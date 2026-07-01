@@ -48,7 +48,12 @@ local function build_enemies(room, player, tl, br)
                 rvx / 10.0, rvy / 10.0,
                 hp / max_hp,
                 (npc:IsBoss() and 1) or 0,
-                (e:HasEntityFlags(EntityFlag.FLAG_FLYING) and 1) or 0,
+                -- Flying detection: Isaac has NO `EntityFlag.FLAG_FLYING` — that
+                -- reference throws 'bad argument #1 (number expected, got nil)'
+                -- and blows up the whole Obs.build. Flying entities are
+                -- identified by their grid-collision class: flyers use
+                -- GRIDCOLL_NONE (value 0) so they don't collide with rocks/pits.
+                ((e.GridCollisionClass or 5) == 0 and 1) or 0,
                 (npc:IsChampion() and 1) or 0,
                 type_idx,
                 npc.State or 0,
