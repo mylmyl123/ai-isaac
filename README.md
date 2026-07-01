@@ -327,15 +327,36 @@ Bump `n_envs` in the YAML for more instances. Each extra instance costs ~1 CPU c
 
 ## Troubleshooting
 
+### Isaac opens then immediately closes
+
+Run the launch diagnostic — it tries 5 different launch strategies and prints the tail of every `log.txt` it can find, so you can see exactly what Isaac wrote before exiting:
+
+```powershell
+python tools\test_launch.py --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe"
+```
+
+Before running the diagnostic, make sure:
+
+- **Steam is running** (tray icon present): `Get-Process steam -ErrorAction SilentlyContinue`
+- **Isaac has been launched through Steam at least once** on this account — do this by double-clicking Isaac in your Steam library, wait for the title screen, close it. This caches the Repentance DLC ownership.
+- **Verify game files** in Steam → Right-click Isaac → Properties → Installed Files → Verify integrity, if you suspect a broken install.
+- **Repentogon users:** tell the diagnostic which flag your version needs (or launch through Repentogon's launcher first once). Some Repentogon builds refuse `--luadebug` unless combined with `-repentogon`.
+
+The diagnostic's summary line tells you which launch strategy works. Once one succeeds, that's what `train.py` should be doing. Paste the output if all 5 fail — Isaac's own log will name the failure (missing DLC, DRM refusal, asset load error, etc.).
+
+### Other issues
+
 | Symptom | Fix |
 |---|---|
-| `require('socket') failed` in Isaac log | Missing `--luadebug`. Always launch through `tools/launch_isaac.py`. |
+| `require('socket') failed` in Isaac log | Missing `--luadebug`. Always launch through `tools/launch_isaac.py` or `train.py`. |
 | `[Errno 48] Address already in use` (or `[WinError 10048]`) | Prior server still bound. PowerShell: `Get-NetTCPConnection -LocalPort 9500` then `Stop-Process -Id <pid>`. Or just use a different `--port`. |
-| Trainer hangs on `listening for Isaac` | Isaac isn't loading the mod. Confirm it's enabled in the Mods menu and check the log for `[isaac-rl-bridge] mod loaded`. |
-| Handshake succeeds but no step logs | Isaac is on the main menu. Start any run. |
-| Character doesn't move despite step logs | Another input mod is capturing `MC_INPUT_ACTION`. Disable other mods. |
-| `torch.cuda.is_available()` False | You installed CPU torch. Reinstall with the CUDA index URL for your CUDA version. |
-| Trainer OOMs | Drop `minibatch_size` or `policy.trunk_dim`, or reduce `n_envs`. |
+| Trainer hangs on `listening for Isaac` | Isaac isn't loading the mod. Confirm it's enabled in the Mods menu and check `.\.isaac-instances\port_9500\log.txt` for `[isaac-rl-bridge] mod loaded`. |
+| Handshake succeeds but no step logs | Isaac is on the main menu. Use `--auto-start-stage 1` (the default) or click New Run. |
+| Character doesn't move despite step logs | Another input mod is capturing `MC_INPUT_ACTION`. Disable all mods except Isaac RL Bridge. |
+| Ctrl-C doesn't stop the trainer | Fixed on `main` — `pull` if you haven't recently. Socket recv now uses 1s timeouts so Python can process signals. |
+| `torch.cuda.is_available()` False | You installed CPU torch. `pip uninstall torch -y` then reinstall with the CUDA index URL for your CUDA version. |
+| Trainer OOMs (CUDA) | Drop `minibatch_size`, `policy.trunk_dim`, or `n_envs` in the config YAML. |
+| CPU pegged at 100%, Isaac windows stuttering | Too many instances for your box. Drop `n_envs` (default is 2). |
 
 ---
 
