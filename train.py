@@ -87,27 +87,75 @@ def resolve_isaac_binary(explicit: str | None, from_cfg: str | None) -> str | No
 class IsaacFleet:
     """A collection of Isaac child processes, one per port. Cleans itself up on exit."""
 
-    def __init__(self, binary: str, base_port: int, n_envs: int, extra_args: list[str] | None = None):
+    def __init__(
+        self,
+        binary: str,
+        base_port: int,
+        n_envs: int,
+        extra_args: list[str] | None = None,
+        auto_start_stage: int | None = 1,
+    ):
         self.binary = binary
         self.base_port = base_port
         self.n_envs = n_envs
         self.extra_args = extra_args or []
+        self.auto_start_stage = auto_start_stage
         self.procs: list[subprocess.Popen] = []
 
-    def spawn(self, stagger_s: float = 2.0) -> None:
+    def _instance_workdir(self, i: int) -> Path:
+        """Isolated per-instance working directory.
+
+        Steam / Isaac otherwise fight over the same log.txt, save files, and
+        lock files, and Steam's DRM will collapse two launches into one window.
+        Giving each Isaac its own cwd (and copying the mod there) makes them
+        fully independent.
+        """
+        d = Path.cwd() / ".isaac-instances" / f"port_{self.base_port + i}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def spawn(self, stagger_s: float = 3.0) -> None:
         for i in range(self.n_envs):
             port = self.base_port + i
             env = os.environ.copy()
             env["ISAAC_RL_PORT"] = str(port)
-            cmd = [self.binary, "--luadebug", *self.extra_args]
-            log.info("[isaac %d/%d] launching on port %d — %s", i + 1, self.n_envs, port, " ".join(cmd))
+            # Bypass Steam's single-instance lock: point SteamAppId at a
+            # dummy AppID so the DRM check treats each launch as separate.
+            # (Isaac itself doesn't care; the launch flag is what matters.)
+            env["SteamAppId"] = "250900"
+            env["SteamGameId"] = "250900"
+
+            cmd = [self.binary, "--luadebug"]
+            if self.auto_start_stage is not None:
+                # Boot straight into a run at this stage — no title-screen click.
+                cmd += ["--set-stage", str(self.auto_start_stage)]
+            cmd += self.extra_args
+
+            workdir = self._instance_workdir(i)
+
+            log.info("[isaac %d/%d] port=%d cwd=%s cmd=%s",
+                     i + 1, self.n_envs, port, workdir, " ".join(cmd))
+
             creationflags = 0
             if platform.system() == "Windows":
-                # New window per instance so you can watch each individually.
-                creationflags = subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0
-            proc = subprocess.Popen(cmd, env=env, creationflags=creationflags)
+                # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP so each child is
+                # fully independent of this Python process's console. Without
+                # NEW_PROCESS_GROUP, Ctrl-C in this terminal would also kill Isaac
+                # BEFORE our signal handler can shut them down gracefully.
+                creationflags = (
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                cwd=str(workdir),
+                creationflags=creationflags,
+            )
             self.procs.append(proc)
-            time.sleep(stagger_s)   # stagger so instances don't fight for CPU during load
+            # Stagger so the OS doesn't spike CPU on N simultaneous cold starts.
+            time.sleep(stagger_s)
 
     def shutdown(self) -> None:
         for i, p in enumerate(self.procs):
@@ -154,6 +202,11 @@ def main() -> int:
     ap.add_argument("--base-port", type=int, default=None, help="Override base_port from the config")
     ap.add_argument("--no-launch-isaac", action="store_true",
                     help="Don't spawn Isaac processes; expect them to be started manually.")
+    ap.add_argument("--no-auto-start", action="store_true",
+                    help="Don't auto-boot into a run. You'll have to click 'New Run' in each window.")
+    ap.add_argument("--auto-start-stage", type=int, default=1,
+                    help="Stage passed to --set-stage on first launch (default: 1). Only affects the first run; "
+                         "subsequent resets are driven by the trainer via Isaac.ExecuteCommand.")
     ap.add_argument("--tensorboard", action="store_true", help="Also start TensorBoard in the background at :6006")
     ap.add_argument("--override", nargs="*", default=[], help="Extra config overrides: key=value")
     args = ap.parse_args()
@@ -218,13 +271,24 @@ def main() -> int:
                 "or use --no-launch-isaac and start Isaac yourself."
             )
             return 2
-        fleet = IsaacFleet(binary=binary, base_port=cfg.base_port, n_envs=cfg.n_envs)
+        fleet = IsaacFleet(
+            binary=binary,
+            base_port=cfg.base_port,
+            n_envs=cfg.n_envs,
+            auto_start_stage=None if args.no_auto_start else args.auto_start_stage,
+        )
         fleet.spawn()
 
-    log.info(
-        "waiting for %d Isaac(s) to connect on ports %d..%d — click 'New Run' in each window.",
-        cfg.n_envs, cfg.base_port, cfg.base_port + cfg.n_envs - 1,
-    )
+    if args.no_auto_start:
+        log.info(
+            "waiting for %d Isaac(s) to connect on ports %d..%d — click 'New Run' in each window.",
+            cfg.n_envs, cfg.base_port, cfg.base_port + cfg.n_envs - 1,
+        )
+    else:
+        log.info(
+            "waiting for %d Isaac(s) to boot into stage %d and connect on ports %d..%d",
+            cfg.n_envs, args.auto_start_stage, cfg.base_port, cfg.base_port + cfg.n_envs - 1,
+        )
 
     # Hand off to the trainer. Its build_vec_env() will open the server sockets
     # and block until each Isaac connects. Ctrl-C during accept() surfaces as
