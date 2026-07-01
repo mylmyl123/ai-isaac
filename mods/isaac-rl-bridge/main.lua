@@ -27,6 +27,11 @@ local tick = 0
 -- MC_POST_UPDATE returns immediately without calling exchange(), preventing us
 -- from iterating entity pointers that Isaac is currently tearing down.
 local reset_cooldown = 0
+-- Applied on the NEXT MC_POST_GAME_STARTED. Lets us defer `stage N` / `seed N`
+-- console commands until the new run is fully initialized, avoiding races
+-- with `restart 0`.
+local pending_stage = nil
+local pending_seed = nil
 
 -- Per-run state that Python's reward shaper wants to know about.
 local run_state = {
@@ -130,16 +135,21 @@ local function exchange()
         return
     end
     if action.reset then
-        if action.seed then Isaac.ExecuteCommand("seed " .. tostring(action.seed)) end
-        if action.stage then Isaac.ExecuteCommand("stage " .. tostring(action.stage)) end
+        -- Order matters: `restart 0` must run FIRST. It works from any game state
+        -- (in-run, death animation, 'You Died' screen, game over). If we run
+        -- `stage N` first while the player is dead, Isaac can freeze or crash
+        -- because the stage command teleports a corpse rather than starting a
+        -- new run.
         Isaac.ExecuteCommand("restart 0")
-        -- After firing restart, skip several ticks of exchange() so Isaac has
-        -- time to tear down and rebuild the run's entity state. Calling
-        -- Isaac.GetRoomEntities() / FindByType() / GetPlayer() during that
-        -- transition window is what makes the Lua VM segfault in
-        -- Lua5.3.3r.dll (exception 0xc0000005 access violation — verified via
-        -- Windows Event Viewer). 20 game ticks ≈ 0.67s at 30 Hz, which is
-        -- comfortably longer than a normal restart transition.
+        -- Only touch stage if we want something other than the default (1).
+        -- `restart 0` already boots into Basement 1, so a `stage 1` afterward
+        -- is at best redundant and at worst races against the new run's init.
+        if action.stage and tonumber(action.stage) and tonumber(action.stage) ~= 1 then
+            pending_stage = tonumber(action.stage)
+        end
+        if action.seed then
+            pending_seed = tostring(action.seed)
+        end
         reset_cooldown = 20
         return
     end
@@ -151,6 +161,15 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     reset_run_state()
     -- Fresh run: give Isaac a few ticks before we start iterating entities.
     reset_cooldown = 10
+    -- Apply any deferred console commands from the reset that just fired.
+    if pending_seed then
+        Isaac.ExecuteCommand("seed " .. pending_seed)
+        pending_seed = nil
+    end
+    if pending_stage then
+        Isaac.ExecuteCommand("stage " .. tostring(pending_stage))
+        pending_stage = nil
+    end
     if conn then conn:close() end
     conn = Net.connect(HOST, PORT, 0.25)
     local seed = Game():GetSeeds():GetStartSeed()
@@ -268,6 +287,21 @@ local auto_start_fired = false
 local render_frames_on_menu = 0
 local AUTO_START_AFTER_FRAMES = 600   -- ~10s at 60 render Hz — well past logos + intro
 
+-- Death auto-restart. When the player dies, Isaac shows a death animation and
+-- then the 'You Died' screen. During that screen MC_POST_UPDATE stops firing,
+-- which means the mod's exchange() loop stalls — the death event was sent to
+-- Python and Python's reset command is sitting in the socket buffer, but the
+-- mod can't process it. Without a fallback here training deadlocks: game
+-- waits for input, Python waits for the next obs, neither will happen.
+--
+-- Fix: MC_POST_RENDER fires continuously (including during 'You Died'). If we
+-- see the player dead for a fixed number of render frames, fire `restart 0`
+-- ourselves. Python's reset command will still be processed on the new run's
+-- MC_POST_GAME_STARTED handler (which reconnects a fresh socket), so the
+-- trainer stays in lockstep.
+local death_render_frames = 0
+local DEATH_AUTO_RESTART_FRAMES = 120   -- ~2s at 60 render Hz
+
 -- MC_POST_UPDATE fires only during an active, unpaused run. The instant we see
 -- one, we know the run is live and disable the fallback permanently.
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
@@ -277,17 +311,36 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
 end)
 
 mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
-    if auto_start_fired then return end
-    -- Also treat any nonzero game tick as "run active", belt-and-braces.
-    if Game():GetFrameCount() > 0 then
-        auto_start_fired = true
+    -- Menu auto-start branch (only runs before any MC_POST_UPDATE ever fired).
+    if not auto_start_fired then
+        if Game():GetFrameCount() > 0 then
+            auto_start_fired = true
+        else
+            render_frames_on_menu = render_frames_on_menu + 1
+            if render_frames_on_menu == AUTO_START_AFTER_FRAMES then
+                auto_start_fired = true
+                Isaac.DebugString("[isaac-rl-bridge] auto-start fallback firing (main menu detected after intro)")
+                Isaac.ExecuteCommand("restart 0")
+            end
+        end
         return
     end
-    render_frames_on_menu = render_frames_on_menu + 1
-    if render_frames_on_menu == AUTO_START_AFTER_FRAMES then
-        auto_start_fired = true
-        Isaac.DebugString("[isaac-rl-bridge] auto-start fallback firing (main menu detected after intro)")
-        Isaac.ExecuteCommand("restart 0")   -- 0 = Isaac
+
+    -- Death auto-restart branch (only relevant after a run has been active).
+    local ok, player = pcall(Isaac.GetPlayer, 0)
+    if not ok or not player then
+        death_render_frames = 0
+        return
+    end
+    if player:IsDead() then
+        death_render_frames = death_render_frames + 1
+        if death_render_frames == DEATH_AUTO_RESTART_FRAMES then
+            Isaac.DebugString("[isaac-rl-bridge] player dead too long — forcing restart 0")
+            Isaac.ExecuteCommand("restart 0")
+            death_render_frames = 0   -- reset; MC_POST_GAME_STARTED will fire
+        end
+    else
+        death_render_frames = 0
     end
 end)
 
