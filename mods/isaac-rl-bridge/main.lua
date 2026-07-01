@@ -23,6 +23,10 @@ local PORT = tonumber(os.getenv("ISAAC_RL_PORT") or "9500")
 local mod = RegisterMod("isaac-rl-bridge", 1)
 local conn = nil
 local tick = 0
+-- Frames-to-skip counter set after any `restart 0` / big transition. While > 0,
+-- MC_POST_UPDATE returns immediately without calling exchange(), preventing us
+-- from iterating entity pointers that Isaac is currently tearing down.
+local reset_cooldown = 0
 
 -- Per-run state that Python's reward shaper wants to know about.
 local run_state = {
@@ -101,7 +105,16 @@ end
 
 local function exchange()
     local events = collect_events()
-    local obs = Obs.build(tick, events, run_state)
+    -- Wrap Obs.build in pcall. It calls into Isaac's C bindings (GetRoomEntities,
+    -- FindByType, player methods, etc.) which can throw Lua-level errors when
+    -- called during game state transitions. Without pcall, a Lua error here
+    -- would abort the callback and could crash the interpreter on the next
+    -- tick when it retries against still-invalid state.
+    local ok_obs, obs = pcall(Obs.build, tick, events, run_state)
+    if not ok_obs then
+        Isaac.DebugString("[isaac-rl-bridge] Obs.build failed: " .. tostring(obs))
+        return
+    end
     local ok, payload = pcall(json.encode, obs)
     if not ok then
         Isaac.DebugString("[isaac-rl-bridge] json.encode failed: " .. tostring(payload))
@@ -120,6 +133,14 @@ local function exchange()
         if action.seed then Isaac.ExecuteCommand("seed " .. tostring(action.seed)) end
         if action.stage then Isaac.ExecuteCommand("stage " .. tostring(action.stage)) end
         Isaac.ExecuteCommand("restart 0")
+        -- After firing restart, skip several ticks of exchange() so Isaac has
+        -- time to tear down and rebuild the run's entity state. Calling
+        -- Isaac.GetRoomEntities() / FindByType() / GetPlayer() during that
+        -- transition window is what makes the Lua VM segfault in
+        -- Lua5.3.3r.dll (exception 0xc0000005 access violation — verified via
+        -- Windows Event Viewer). 20 game ticks ≈ 0.67s at 30 Hz, which is
+        -- comfortably longer than a normal restart transition.
+        reset_cooldown = 20
         return
     end
     apply_action(action)
@@ -128,6 +149,8 @@ end
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     tick = 0
     reset_run_state()
+    -- Fresh run: give Isaac a few ticks before we start iterating entities.
+    reset_cooldown = 10
     if conn then conn:close() end
     conn = Net.connect(HOST, PORT, 0.25)
     local seed = Game():GetSeeds():GetStartSeed()
@@ -142,6 +165,8 @@ mod:AddCallback(ModCallbacks.MC_POST_NEW_LEVEL, function()
     }
     Reward.reset_room()
     run_state.last_stage = stage
+    -- Level transitions also invalidate entity iteration for a few ticks.
+    reset_cooldown = math.max(reset_cooldown, 10)
 end)
 
 mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
@@ -162,12 +187,23 @@ mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
     run_state.frames_since_room = 0
     run_state.last_room_clear = room:IsClear()
     Reward.reset_room()
+    -- Skip a few ticks so entity refs from the previous room are fully released.
+    reset_cooldown = math.max(reset_cooldown, 5)
 end)
 
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     tick = tick + 1
     run_state.frames_since_room = run_state.frames_since_room + 1
     run_state.frames_since_hit = run_state.frames_since_hit + 1
+
+    -- After a `restart 0` we spend a fixed number of ticks NOT calling exchange().
+    -- Iterating entities via Isaac.GetRoomEntities()/FindByType() during the
+    -- game's teardown/rebuild triggers Lua5.3.3r.dll access-violation crashes
+    -- (0xc0000005). Room/level transitions also skip their exchange to be safe.
+    if reset_cooldown > 0 then
+        reset_cooldown = reset_cooldown - 1
+        return
+    end
 
     -- Detect room-clear transition (false -> true).
     local room = Game():GetRoom()
@@ -182,11 +218,15 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
 
     -- Detect death this frame (Python turns it into terminated=True).
     local player = Isaac.GetPlayer(0)
-    if player:IsDead() then
+    if player and player:IsDead() then
         run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
     end
 
     if (tick % FRAME_SKIP) == 0 and conn then
+        -- Extra safety: room must have ticked at least once so its entity
+        -- lists are populated, and the player must exist.
+        if not player then return end
+        if room:GetFrameCount() < 2 then return end
         exchange()
     end
 end)
