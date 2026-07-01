@@ -30,6 +30,7 @@ import atexit
 import logging
 import os
 import platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -166,6 +167,39 @@ class IsaacFleet:
             self.procs.append(proc)
         self.procs[i] = proc
 
+    def _capture_isaac_log(self, port: int) -> None:
+        """Copy Isaac's log.txt to a timestamped file on the user's Desktop.
+
+        Isaac truncates log.txt on every launch, which means the moment we
+        respawn a fresh Isaac we lose all evidence of what the crashed one
+        was doing. Capture the log BEFORE respawn so its available for
+        post-mortem analysis. Best-effort — never raises.
+
+        Written to: %USERPROFILE%/Desktop/isaac_crash_<port>_<timestamp>.txt
+        """
+        try:
+            home = os.path.expanduser("~")
+            src = os.path.join(
+                home, "Documents", "My Games",
+                "Binding of Isaac Repentance", "log.txt",
+            )
+            if not os.path.exists(src):
+                # Try Rebirth path as fallback (non-Repentance installs).
+                src = os.path.join(
+                    home, "Documents", "My Games",
+                    "Binding of Isaac Rebirth", "log.txt",
+                )
+                if not os.path.exists(src):
+                    return
+            desktop = os.path.join(home, "Desktop")
+            os.makedirs(desktop, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            dst = os.path.join(desktop, f"isaac_crash_{port}_{ts}.txt")
+            shutil.copyfile(src, dst)
+            log.info("respawn(port=%d): saved crashed Isaac's log to %s", port, dst)
+        except Exception as e:
+            log.warning("respawn(port=%d): failed to capture Isaac log: %s", port, e)
+
     def respawn(self, port: int) -> None:
         """Kill the Isaac child owning `port` (if any) and launch a fresh one.
 
@@ -177,6 +211,9 @@ class IsaacFleet:
             log.error("respawn(port=%d): port not owned by this fleet (base=%d, n=%d)",
                       port, self.base_port, self.n_envs)
             return
+
+        # Capture the crashed Isaacs log BEFORE anything overwrites it.
+        self._capture_isaac_log(port)
 
         # Kill the current occupant (may already be dead if it crashed on its own).
         if i < len(self.procs):
