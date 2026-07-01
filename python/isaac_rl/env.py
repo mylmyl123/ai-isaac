@@ -237,26 +237,87 @@ class SocketIsaacEnv(gym.Env):
         }
         return obs, reward, terminated, truncated, info
 
+    def _try_accept_after_close(self, wait_s: float = 3.0) -> dict[str, Any] | None:
+        """Try to accept a NEW client connection after the current one closed.
+
+        Isaacs mod closes its socket during in-process restarts (character
+        died -> mod runs `restart` -> MC_POST_GAME_STARTED closes+reconnects
+        the socket). The mod is STILL ALIVE and will reconnect within a few
+        game frames — typically 100-500ms. If we treat that socket close as
+        a crash and call fleet.respawn(), we KILL the alive Isaac process.
+
+        This helper tries to accept a new client on our server socket with a
+        short timeout. If Isaac reconnects within wait_s, it means the mod
+        did an in-process restart and were golden — just read the handshake
+        + first obs and return. Return None if no reconnection happens in
+        time (real crash, caller falls back to fleet.respawn).
+        """
+        assert self._server is not None
+        import time as _time
+        deadline = _time.time() + wait_s
+        self._server.settimeout(0.5)
+        while _time.time() < deadline:
+            try:
+                client, addr = self._server.accept()
+            except socket.timeout:
+                continue
+            except (ConnectionError, OSError):
+                return None
+            # New connection arrived — configure it, read handshake + obs.
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+            except OSError:
+                pass
+            try:
+                hello = recv_frame(client)
+                self._last_seed = hello.get("seed")
+                log.info("port %d: mod reconnected (in-process restart), handshake: %s", self.port, hello)
+                raw = recv_frame(client)
+            except (ConnectionError, OSError) as e:
+                log.warning("port %d: reconnected client failed handshake: %s", self.port, e)
+                try: client.close()
+                except OSError: pass
+                return None
+            self._client = client
+            return raw
+        return None
+
     def _handle_crash_and_reaccept(self, read_first_obs: bool = True) -> dict[str, Any]:
         """Respawn Isaac and re-accept its connection on our server socket.
 
         Called when a recv/send on the client socket raises ConnectionError /
-        OSError. Returns the raw obs dict from the new Isaac's first exchange,
-        or a synthetic crash-terminal dict if read_first_obs=False (or if the
+        OSError. First tries to detect an in-process restart (mod is alive,
+        just cycled its socket) via _try_accept_after_close. Only if that
+        fails does it actually kill Isaac and launch a fresh one.
+
+        Returns the raw obs dict from the new Isaac's first exchange, or a
+        synthetic crash-terminal dict if read_first_obs=False (or if the
         respawn itself failed after all retries).
 
-        This method must NEVER propagate an exception — doing so would kill the
-        whole training loop the moment a single Isaac has a bad boot. On total
-        failure we return a crash-obs and leave self._client = None so the
-        trainer's next reset() attempts another respawn.
+        This method must NEVER propagate an exception — doing so would kill
+        the whole training loop the moment a single Isaac has a bad boot. On
+        total failure we return a crash-obs and leave self._client = None so
+        the trainer's next reset() attempts another respawn.
         """
-        # Close the (already-dead) client socket.
+        # Close the (already-dead-from-our-perspective) client socket.
         if self._client is not None:
             try:
                 self._client.close()
             except OSError:
                 pass
             self._client = None
+
+        # First: is Isaac actually dead, or did the mod just cycle its socket
+        # during an in-process restart? Wait a moment for a reconnection
+        # BEFORE killing the process. If Isaac is fine and just restarted,
+        # this saves us from murdering a healthy child process.
+        raw = self._try_accept_after_close(wait_s=3.0)
+        if raw is not None:
+            log.info("port %d: skipping respawn — Isaac was alive and reconnected after mod restart", self.port)
+            return raw
+
+        log.warning("port %d: no reconnection within 3s — assuming real crash, respawning", self.port)
 
         MAX_RESPAWN_ATTEMPTS = 3
         for attempt in range(1, MAX_RESPAWN_ATTEMPTS + 1):
