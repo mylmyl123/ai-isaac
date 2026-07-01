@@ -27,7 +27,15 @@ function Net.connect(host, port, timeout_s)
     local self = setmetatable({}, Net)
     self.host = host or "127.0.0.1"
     self.port = port or 9500
-    self.timeout_s = timeout_s or 0.25
+    -- Short recv timeout is CRITICAL for smooth gameplay under RL training.
+    -- The mod's exchange() blocks inside MC_POST_UPDATE waiting for Python's
+    -- next action. Isaac's game loop is frozen while we're in that recv.
+    -- If Python is mid-PPO-update it won't respond for several seconds
+    -- — with a 250ms timeout we'd stack up 10+ back-to-back 250ms blocks
+    -- per PPO update, giving a visible ~30s stutter every rollout. A short
+    -- 50ms timeout keeps Isaac responsive; on timeout we just re-use the
+    -- previous action for one tick, which is invisible to training.
+    self.timeout_s = timeout_s or 0.05
     self.sock = nil
     self:_reconnect()
     return self

@@ -160,7 +160,8 @@ local function exchange()
         if action.seed then
             pending_seed = tostring(action.seed)
         end
-        reset_cooldown = 20
+        -- Long cooldown: see the death-handler comment. 2s is safe.
+        reset_cooldown = 60
         return
     end
     apply_action(action)
@@ -180,7 +181,7 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     tick = 0
     reset_run_state()
     -- Fresh run: give Isaac a few ticks before we start iterating entities.
-    reset_cooldown = 10
+    reset_cooldown = 30
     death_announced = false   -- new run, player is alive again
     -- Apply any deferred console commands from the reset that just fired.
     if pending_seed then
@@ -192,7 +193,7 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
         pending_stage = nil
     end
     if conn then conn:close() end
-    conn = Net.connect(HOST, PORT, 0.25)
+    conn = Net.connect(HOST, PORT, 0.05)   -- see net.lua for why 50 ms
     local seed = Game():GetSeeds():GetStartSeed()
     conn:send(json.encode({hello = true, schema = 1, seed = seed, is_continued = is_continued}))
     Isaac.DebugString("[isaac-rl-bridge] connected to trainer on port " .. tostring(PORT))
@@ -294,16 +295,27 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
             end
             Isaac.DebugString("[isaac-rl-bridge] player died, issuing 'restart' (mid-run, in-process)")
             Isaac.ExecuteCommand("restart")
-            reset_cooldown = 20
+            -- Isaac's restart tears down and rebuilds the whole run. On slower
+            -- machines the tail of that teardown can take a full second, and
+            -- iterating entities during it crashes isaac-ng.exe itself
+            -- (0xc0000005 access-violation deep in the engine, not Lua). Give
+            -- it a much longer cushion than the game-tick rate suggests. 60
+            -- ticks ≈ 2s at 30 Hz.
+            reset_cooldown = 60
         end
         return
     end
 
     if (tick % FRAME_SKIP) == 0 and conn then
         -- Extra safety: room must have ticked at least once so its entity
-        -- lists are populated, and the player must exist.
+        -- lists are populated, and the player must exist. Bumped from 2 to 10
+        -- so post-teardown entity churn has fully settled by the time we
+        -- iterate. Isaac's engine has been observed to crash at 0xc0000005
+        -- inside isaac-ng.exe (not Lua) when reading half-initialized entity
+        -- state right after a restart; this is a defense-in-depth guard on
+        -- top of reset_cooldown.
         if not player then return end
-        if room:GetFrameCount() < 2 then return end
+        if room:GetFrameCount() < 10 then return end
         exchange()
     end
 end)
