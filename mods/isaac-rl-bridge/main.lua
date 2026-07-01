@@ -76,6 +76,14 @@ local cached_action = {
     [ButtonAction.ACTION_DROP] = false,
 }
 
+local function clear_cached_action()
+    -- Called on death and reset so a fresh run doesn't inherit half-pressed
+    -- inputs from the previous life (SHOOTRIGHT stuck at true, ITEM held
+    -- down, etc.). Held inputs bleeding across a restart destabilises Isaac's
+    -- game-state transition and has been observed to trigger engine crashes.
+    for k in pairs(cached_action) do cached_action[k] = false end
+end
+
 -- Decode MultiDiscrete([9, 5, 2, 2, 2]) into ButtonAction booleans.
 local mv_table = {
     [1] = {up = true},                       [2] = {up = true, right = true},
@@ -140,6 +148,7 @@ local function exchange()
         return
     end
     if action.reset then
+        clear_cached_action()   -- release any held inputs before restart
         -- Use bare `restart` (equivalent to pressing R in-game), NOT `restart 0`.
         -- Difference: `restart` restarts the CURRENT run in place — the process
         -- stays alive and Isaac tears down + rebuilds the run state internally.
@@ -183,6 +192,7 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     -- Fresh run: give Isaac a few ticks before we start iterating entities.
     reset_cooldown = 30
     death_announced = false   -- new run, player is alive again
+    clear_cached_action()     -- new run, start with no buttons held
     -- Apply any deferred console commands from the reset that just fired.
     if pending_seed then
         Isaac.ExecuteCommand("seed " .. pending_seed)
@@ -273,6 +283,10 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     if player and player:IsDead() then
         if not death_announced then
             death_announced = true
+            -- Zero all cached button state so no stale 'shoot right' / 'item'
+            -- press bleeds from the death tick into the game-over screen or
+            -- the next run's first frames.
+            clear_cached_action()
             run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
             -- Send a minimal terminal obs. No entity iteration — same schema
             -- keys as the full obs so Python's encode_obs() can zero-fill
@@ -321,7 +335,14 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
 end)
 
 mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, hook, action)
-    if entity and entity:ToPlayer() == nil then return nil end
+    -- Only inject cached inputs into a valid PLAYER entity. Isaac's input
+    -- system also queries with entity=nil for menu / transition / You-Died-
+    -- screen contexts. Feeding those stale gameplay inputs (SHOOTRIGHT, ITEM,
+    -- etc.) from the last live action into menu code has been observed to
+    -- push isaac-ng.exe into an unrecoverable state (0xc0000005 access
+    -- violation deep in the engine, offset 0x3a93b5). Skip all of those.
+    if not entity then return nil end
+    if entity:ToPlayer() == nil then return nil end
     local pressed = cached_action[action]
     if pressed == nil then return nil end
     if hook == InputHook.IS_ACTION_PRESSED or hook == InputHook.IS_ACTION_TRIGGERED then
