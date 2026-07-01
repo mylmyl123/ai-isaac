@@ -166,6 +166,16 @@ local function exchange()
         return
     end
     if action.reset then
+        -- If we've already announced a death this run and fired 'restart', the
+        -- Python reset command is redundant — Isaac is already in mid-restart.
+        -- Firing a second 'restart' on top of the queued one exits Isaacs
+        -- process cleanly on some Repentance builds (window closes, no crash
+        -- dump). Skip the duplicate.
+        if death_announced then
+            Isaac.DebugString("[isaac-rl-bridge] reset command received but restart already queued (death_announced=true), skipping duplicate")
+            reset_cooldown = 60
+            return
+        end
         clear_cached_action()   -- release any held inputs before restart
         -- Use bare `restart` (equivalent to pressing R in-game), NOT `restart 0`.
         -- Difference: `restart` restarts the CURRENT run in place — the process
@@ -454,20 +464,25 @@ mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
     end
 
     -- Death auto-restart branch (only relevant after a run has been active).
+    -- CRITICAL: never fire here if death_announced is already true. That flag
+    -- means MC_POST_UPDATE's death handler already ran Isaac.ExecuteCommand
+    -- ('restart') for this death. Firing a SECOND restart on top of the queued
+    -- one has been observed to trigger Isaac's full-shutdown path in some
+    -- Repentance builds — the game exits cleanly (no Application Error, no
+    -- crash dump) but the window closes and Python sees a socket RST. Only
+    -- fire from here if the update-side handler somehow missed the death
+    -- (MC_POST_UPDATE stopped firing before it could detect IsDead()=true).
     local ok, player = pcall(Isaac.GetPlayer, 0)
     if not ok or not player then
         death_render_frames = 0
         return
     end
-    if player:IsDead() then
+    if player:IsDead() and not death_announced then
         death_render_frames = death_render_frames + 1
         if death_render_frames == DEATH_AUTO_RESTART_FRAMES then
-            Isaac.DebugString("[isaac-rl-bridge] player dead too long — issuing 'restart'")
-            -- See the reset-handler comment: bare `restart` (press-R equivalent)
-            -- keeps the process alive across the tear-down. `restart 0` in some
-            -- Repentance builds closes the window instead.
+            Isaac.DebugString("[isaac-rl-bridge] render-watchdog: player dead 2s with no MC_POST_UPDATE handling, forcing 'restart'")
             Isaac.ExecuteCommand("restart")
-            death_render_frames = 0   -- reset; MC_POST_GAME_STARTED will fire
+            death_render_frames = 0
         end
     else
         death_render_frames = 0
