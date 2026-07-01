@@ -32,6 +32,11 @@ local reset_cooldown = 0
 -- with `restart 0`.
 local pending_stage = nil
 local pending_seed = nil
+-- Set to true on the FIRST MC_POST_UPDATE tick where player:IsDead() is true.
+-- Prevents us from calling Isaac.GetRoomEntities() / FindByType() again during
+-- the death animation — that combination is exactly what causes the
+-- Lua5.3.3r.dll 0xc0000005 crash that closes the Isaac window.
+local death_announced = false
 
 -- Per-run state that Python's reward shaper wants to know about.
 local run_state = {
@@ -176,6 +181,7 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     reset_run_state()
     -- Fresh run: give Isaac a few ticks before we start iterating entities.
     reset_cooldown = 10
+    death_announced = false   -- new run, player is alive again
     -- Apply any deferred console commands from the reset that just fired.
     if pending_seed then
         Isaac.ExecuteCommand("seed " .. pending_seed)
@@ -250,10 +256,47 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     end
     run_state.last_room_clear = is_clear
 
-    -- Detect death this frame (Python turns it into terminated=True).
+    -- Player death handling. When the player's HP reaches 0 Isaac starts a
+    -- death animation and then transitions to the 'You Died' screen. During
+    -- BOTH those phases the game is tearing down / has torn down its entity
+    -- lists, and any call to Isaac.GetRoomEntities() / FindByType() / player
+    -- methods can dereference freed C++ pointers — which crashes the Isaac
+    -- process (Lua5.3.3r.dll 0xc0000005, verified via Event Viewer). The
+    -- window closing on death was this crash, not our `restart` command.
+    --
+    -- Fix: on the FIRST tick of death, send Python a minimal terminal-obs
+    -- (no entity iteration), swallow whatever it sends back, then fire
+    -- `restart` immediately. All subsequent ticks skip exchange entirely
+    -- until MC_POST_GAME_STARTED clears the death_announced flag.
     local player = Isaac.GetPlayer(0)
     if player and player:IsDead() then
-        run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
+        if not death_announced then
+            death_announced = true
+            run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
+            -- Send a minimal terminal obs. No entity iteration — same schema
+            -- keys as the full obs so Python's encode_obs() can zero-fill
+            -- the missing fields without any special-case handling.
+            if conn then
+                local minimal = {
+                    schema = 1,
+                    tick = tick,
+                    player = { is_dead = true, hp_red = 0 },
+                    events = { { kind = "death" } },
+                }
+                local ok_send = pcall(function()
+                    conn:send(json.encode(minimal))
+                end)
+                if ok_send then
+                    -- Consume Python's reset command so the socket buffer
+                    -- doesn't hold a stale message across MC_POST_GAME_STARTED.
+                    pcall(function() conn:recv() end)
+                end
+            end
+            Isaac.DebugString("[isaac-rl-bridge] player died, issuing 'restart' (mid-run, in-process)")
+            Isaac.ExecuteCommand("restart")
+            reset_cooldown = 20
+        end
+        return
     end
 
     if (tick % FRAME_SKIP) == 0 and conn then
