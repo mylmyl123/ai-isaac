@@ -217,27 +217,34 @@ Reward.attach(mod)
 -- `--set-stage=N` launch flag wasn't passed or Isaac ignored it), issue a
 -- `restart 0` from the menu to boot into a run.
 --
--- IMPORTANT: this must NOT fire during the studio-logo splash or the intro
--- cinematic — running `restart 0` there crashes the game. We wait a long
--- time (~10s of render frames) and additionally require the game to have
--- been in the "no active run" state consistently, which excludes cutscenes
--- where the game frame counter briefly ticks.
---
--- Prefer setting the `--set-stage=1` launch flag over relying on this path.
-local menu_wait_frames = 0
+-- IMPORTANT: this must NOT fire during an active run. We use MC_POST_UPDATE
+-- to definitively decide "a run is active" — that callback only fires while a
+-- run is running (not on the menu, not during the intro cinematic, and
+-- critically NOT while the game is paused-on-focus-loss). Using MC_POST_RENDER
+-- alone is unsafe: render frames keep advancing while the game is paused, so
+-- a purely-render-based watchdog will eventually fire `restart 0` on top of a
+-- live run whose owner just tabbed away, killing the socket.
 local auto_start_fired = false
+local render_frames_on_menu = 0
 local AUTO_START_AFTER_FRAMES = 600   -- ~10s at 60 render Hz — well past logos + intro
+
+-- MC_POST_UPDATE fires only during an active, unpaused run. The instant we see
+-- one, we know the run is live and disable the fallback permanently.
+mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
+    if not auto_start_fired then
+        auto_start_fired = true
+    end
+end)
+
 mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
     if auto_start_fired then return end
-    -- Once a run is active, the game-tick counter advances. Skip the
-    -- callback entirely so we don't try to restart mid-run.
+    -- Also treat any nonzero game tick as "run active", belt-and-braces.
     if Game():GetFrameCount() > 0 then
-        menu_wait_frames = 0
-        auto_start_fired = true   -- run is active; disable the fallback
+        auto_start_fired = true
         return
     end
-    menu_wait_frames = menu_wait_frames + 1
-    if menu_wait_frames == AUTO_START_AFTER_FRAMES then
+    render_frames_on_menu = render_frames_on_menu + 1
+    if render_frames_on_menu == AUTO_START_AFTER_FRAMES then
         auto_start_fired = true
         Isaac.DebugString("[isaac-rl-bridge] auto-start fallback firing (main menu detected after intro)")
         Isaac.ExecuteCommand("restart 0")   -- 0 = Isaac
