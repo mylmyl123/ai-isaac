@@ -1,0 +1,229 @@
+[INFO] - timeBeginPeriod( 1 )
+[INFO] - OpenGL version 4.6.0 NVIDIA 576.02
+[INFO] - GLSL version 4.60 NVIDIA
+[INFO] - Framebuffer ID: 1
+[INFO] - Renderbuffer ID: 1 size 1024x1024
+[INFO] - Initializing theoraplayer with theora support.
+[INFO] - Initializing Theoraplayer Video Playback Library (2.0)
+  - libtheora version: Xiph.Org libtheora 1.2.0alpha 20100924 (Ptalarbvorm)
+  - libvorbis version: Xiph.Org libVorbis 1.3.4
+------------------------------------
+[INFO] - Changing number of worker threads to: 1
+[INFO] - Successfully reserved 1073741824 bytes of memory for Lua
+[WARN] - Running Lua in debug mode...
+[INFO] - Running Lua Script: resources/scripts/enums.lua
+[INFO] - Lua mem usage: 747 KB and 598 bytes
+[INFO] - Running Lua Script: resources/scripts/main.lua
+[INFO] - Lua mem usage: 805 KB and 856 bytes
+[INFO] - Binding of Isaac: Repentance v1.7.9b.J835
+[INFO] - load archives: 4797 milliseconds
+[INFO] - Initialize ColorOffset Shader
+[INFO] - Initialize Pixelation Shader
+[INFO] - Initialize Bloom Shader
+[INFO] - Initialize Color Correction Shader
+[INFO] - Initialize HQ4X Shader
+[INFO] - Initialize Shockwave Shader
+[INFO] - Initialize OldTV Shader
+[INFO] - Initialize Water Surface Shader
+[INFO] - Initialize Water Surface V2 Shader
+[INFO] - Initialize Hallucination Shader
+[INFO] - Initialize Colormod Shader
+[INFO] - Initialize Color Offset Champion Shader
+[INFO] - Initialize Background Shader
+[INFO] - Initialize Water Overlay Shader
+[INFO] - Initialize Color Offset Dogma Shader
+[INFO] - Initialize Color Offset Gold Shader
+[INFO] - Initialize Dizzy Shader
+[INFO] - Initialize Heat Wave Shader
+[INFO] - Initialize Mirror Shader
+[INFO] - Setting PersistentGameData ReadOnly to False
+[INFO] - Viewport: 960x540
+[INFO] - Framebuffer Width: 960 
+ Render Width: 960 
+ Window Width: 960 
+ Multiplier: 2.250010 
+ DP per point: 1.000000 
+ Point Scale: 1.000000 
+[INFO] - Viewport: 480x270
+[INFO] - Framebuffer Width: 480 
+ Render Width: 480 
+ Window Width: 480 
+ Multiplier: 1.125010 
+ DP per point: 1.000000 
+ Point Scale: 1.000000 
+[INFO] - begin list mods
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/!!! (rep) improved chargebar_2851861015/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/angels-drop-items_840107435/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/better coop item pedestals_2491785532/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/betterishstart_2444327747/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/boss rush wave counter_2492654252/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/car battery synergies_2916599212/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/color stat hud icons_834317560/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/damage-multiplier-stat_2729900570/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/debug_mode_834434536/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/dr fetus synergies_2887600656/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/enhanced boss bars_2635267643/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/epiphany_3012430463/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/external item descriptions_836319872/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/garrys mod death animation_2788453409/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/giant_props_2846951982/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/giant_props_ff_collab_2960638213/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/goodtrip_1630477831/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/improved chargebars_2851861015/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/instant fires and poops_2833146105/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/instant-restart_2501774931/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/isaac-rl-bridge/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/items in spawn repentance_2498845105/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mama_fart_2608267058/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mei_842051906/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/minimapi_1978904635/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mom's knife synergies_2903016019/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mother continue_2493403665/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/neptunus synergies_2965292371/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/planetarium chance_2489006943/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/regret pedestals_2766379837/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/restart_until_special_room_2917382429/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/revelations_2880387531/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/rift_2608057054/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/slower glitched crown reroll_2861846873/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/specialistforgooditems_2575911103/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/spirit sword synergies_2890628387/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/stageapi15_1348031964/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/stats-plus_2729900570/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/taintedtreasure_2818356312/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/tboi-reshaken-vol1_3134600246/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/timemachine_2617557401/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/truecooptreasure_1686448496/content/
+[INFO] - HQX4 size: 480x270
+[INFO] - Running Lua Script: C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth/mods/isaac-rl-bridge/main.lua
+[INFO] - Lua Debug: [isaac-rl-bridge] NO_ONESHOT=1 — pill_card, drop_bomb, use_active will be ignored
+[INFO] - Lua Debug: [isaac-rl-bridge] mod loaded (port 9500, frame skip 2)
+[INFO] - Lua mem usage: 909 KB and 554 bytes
+[INFO] - Viewport: 480x270
+[INFO] - Framebuffer Width: 480 
+ Render Width: 480 
+ Window Width: 480 
+ Multiplier: 1.125010 
+ DP per point: 1.000000 
+ Point Scale: 1.000000 
+[INFO] - Updating mod 'Stats+'
+[INFO] - Updating mod '!!! (REP+) Improved Chargebars'
+[INFO] - HQX4 size: 480x270
+[INFO] - Lua is resetting!
+[WARN] - Running Lua in debug mode...
+[INFO] - Running Lua Script: resources/scripts/enums.lua
+[INFO] - Lua mem usage: 747 KB and 598 bytes
+[INFO] - Running Lua Script: resources/scripts/main.lua
+[INFO] - Lua mem usage: 805 KB and 856 bytes
+[INFO] - begin list mods
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/!!! (rep) improved chargebar_2851861015/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/angels-drop-items_840107435/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/better coop item pedestals_2491785532/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/betterishstart_2444327747/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/boss rush wave counter_2492654252/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/car battery synergies_2916599212/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/color stat hud icons_834317560/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/damage-multiplier-stat_2729900570/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/debug_mode_834434536/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/dr fetus synergies_2887600656/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/enhanced boss bars_2635267643/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/epiphany_3012430463/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/external item descriptions_836319872/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/garrys mod death animation_2788453409/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/giant_props_2846951982/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/giant_props_ff_collab_2960638213/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/goodtrip_1630477831/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/improved chargebars_2851861015/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/instant fires and poops_2833146105/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/instant-restart_2501774931/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/isaac-rl-bridge/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/items in spawn repentance_2498845105/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mama_fart_2608267058/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mei_842051906/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/minimapi_1978904635/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mom's knife synergies_2903016019/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/mother continue_2493403665/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/neptunus synergies_2965292371/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/planetarium chance_2489006943/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/regret pedestals_2766379837/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/restart_until_special_room_2917382429/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/revelations_2880387531/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/rift_2608057054/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/slower glitched crown reroll_2861846873/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/specialistforgooditems_2575911103/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/spirit sword synergies_2890628387/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/stageapi15_1348031964/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/stats-plus_2729900570/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/taintedtreasure_2818356312/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/tboi-reshaken-vol1_3134600246/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/timemachine_2617557401/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/truecooptreasure_1686448496/content/
+[INFO] - Running Lua Script: C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth/mods/isaac-rl-bridge/main.lua
+[INFO] - Lua Debug: [isaac-rl-bridge] NO_ONESHOT=1 — pill_card, drop_bomb, use_active will be ignored
+[INFO] - Lua Debug: [isaac-rl-bridge] mod loaded (port 9500, frame skip 2)
+[INFO] - Lua mem usage: 909 KB and 554 bytes
+[INFO] - Setting PersistentGameData ReadOnly to True
+[INFO] - Preload sound 0.
+[INFO] - Initialized player with Variant 0 and Subtype 0
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 3690194333
+[INFO] - delete 0 generated rooms.
+[INFO] - [RoomConfig] load stage 1: Basement (mode 0)
+[INFO] - allocate 1181 rooms.
+[INFO] - [ModManager] load stage 1: Basement (mode 0)
+[INFO] - [RoomConfig] load stage 0: Special Rooms (mode 0)
+[INFO] - allocate 1300 rooms.
+[INFO] - [ModManager] load stage 0: Special Rooms (mode 0)
+[INFO] - generate...
+[INFO] - place_room: shape 7
+[INFO] - place_room: shape 7
+[INFO] - 9 rooms in 6 loops
+[INFO] - placing rooms...
+[INFO] - [RoomConfig] load stage 13: ??? (mode 0)
+[INFO] - allocate 30 rooms.
+[INFO] - [ModManager] load stage 13: ??? (mode 0)
+[INFO] - Map Generated in 1 Loops
+[INFO] - CURRENT ROOM INDEX 84 5f530104
+[INFO] - Room 1.2(Start Room)
+[INFO] - SpawnRNG seed: 2155531930
+[INFO] - Lua mem usage: 909 KB and 482 bytes
+[INFO] - Adding collectible 105 (The D6) to player 0 (Isaac)
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Queued Path music/Diptera Layer.ogg
+[INFO] - Queued Path music/Diptera Sonata(Basement).ogg
+[INFO] - Room 4.8()
+[INFO] - SpawnRNG seed: 1744512069
+[INFO] - Spawn Entity with Type(33), Variant(0), Pos(320.00,200.00)
+[INFO] - Spawn Entity with Type(33), Variant(0), Pos(240.00,240.00)
+[INFO] - Spawn Entity with Type(33), Variant(0), Pos(400.00,240.00)
+[INFO] - Spawn Entity with Type(5), Variant(100), Pos(320.00,280.00)
+[INFO] - Lua mem usage: 931 KB and 510 bytes
+[INFO] - music stopped playing
+[INFO] - Room 1.2(Start Room)
+[INFO] - SpawnRNG seed: 2155531930
+[INFO] - Lua mem usage: 925 KB and 170 bytes
+[INFO] - Room 1.712(New Room)
+[INFO] - SpawnRNG seed: 1109149960
+[INFO] - Spawn Entity with Type(10), Variant(0), Pos(800.00,240.00)
+[INFO] - Spawn Entity with Type(10), Variant(0), Pos(360.00,320.00)
+[INFO] - Lua mem usage: 917 KB and 854 bytes
+[INFO] - Lua Debug: [isaac-rl-bridge] player died, issuing 'restart' (mid-run, in-process)
+[INFO] - Saving PersistentGameData to Steam Cloud: .
+[INFO] - Setting PersistentGameData ReadOnly to False
+[INFO] - CPU time spent on enemy queries: 0.00 seconds.
+[INFO] - Setting PersistentGameData ReadOnly to True
+[INFO] - Initialized player with Variant 0 and Subtype 0
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 970901485
+[INFO] - delete 0 generated rooms.
+[INFO] - generate...
+[INFO] - place_room: shape 8
+[INFO] - 9 rooms in 7 loops
+[INFO] - not enough dead ends, trying to make new one
+[INFO] - not enough dead ends, trying to make new one
+[INFO] - placing rooms...
+[INFO] - Map Generated in 1 Loops
+[INFO] - CURRENT ROOM INDEX 84 5f530104
+[INFO] - Room 1.2(Start Room)
+[INFO] - SpawnRNG seed: 3538756714
+[INFO] - Lua mem usage: 920 KB and 930 bytes
+[INFO] - Adding collectible 105 (The D6) to player 0 (Isaac)
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
