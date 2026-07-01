@@ -172,11 +172,40 @@ If that works, the bridge is proven end-to-end.
 
 ## Training
 
-### Stage 1 — single-room combat
+### Option 0 — one-line unified launcher (recommended)
 
-The config in `python\isaac_rl\configs\stage1_single_room.yaml` uses 4 Isaac instances on ports 9500–9503. Two options:
+`train.py` at the repo root does everything: reads the config, launches Isaac instances, waits for them to connect, runs training, and cleans up on Ctrl-C.
 
-**Option A — let the trainer launch Isaac** (works on Windows, Linux). Edit the YAML:
+```powershell
+.\.venv\Scripts\Activate.ps1
+python train.py --config python\isaac_rl\configs\stage1_single_room.yaml `
+                --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe" `
+                --tensorboard
+```
+
+What happens:
+
+1. The trainer opens 4 server sockets on ports 9500–9503 (from the config's `n_envs`).
+2. Four Isaac windows open — each with `--luadebug` and `ISAAC_RL_PORT` set to its port.
+3. **Click "New Run" (or press Start) in each Isaac window.** The mod fires `MC_POST_GAME_STARTED` and connects the socket. After this, resets happen automatically for the rest of training.
+4. Training runs in the same terminal. `Ctrl-C` gracefully kills every Isaac child before exiting.
+5. TensorBoard opens at http://localhost:6006 (if `--tensorboard`).
+
+Useful overrides without editing the YAML:
+
+```powershell
+python train.py --config python\isaac_rl\configs\stage1_single_room.yaml `
+                --n-envs 2 --base-port 9600 `
+                --override total_env_steps=1000000 ent_coef=0.03
+```
+
+If auto-detect finds your Steam Isaac install (it looks in the usual places on Windows), you can omit `--isaac` entirely.
+
+### Manual multi-window setup (fallback)
+
+If `train.py` doesn't fit your workflow, you can run the pieces separately. Two options:
+
+**Option A — let the trainer launch Isaac itself** (works on Windows, Linux). Edit the YAML:
 
 ```yaml
 launch_isaac: true
