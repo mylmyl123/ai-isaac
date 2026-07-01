@@ -1,12 +1,12 @@
 # Stage 1 — single-room combat on Basement 1.
-# Default fleet: 2 Isaac instances (fits 3060 Ti / 4-6 core desktops).
-# Bump n_envs to 4-8 on a beefier box; also raise minibatch_size proportionally.
+# Default fleet: 1 Isaac instance (safest — stable on any box).
+# Bump n_envs to 2-8 on a beefier box; raise minibatch_size proportionally.
 
 run_name: stage1_single_room
-n_envs: 2
+n_envs: 1
 rollout_steps: 256
 total_env_steps: 20_000_000
-minibatch_size: 256           # n_envs * rollout_steps / 2 → 2 minibatches per epoch
+minibatch_size: 128           # n_envs * rollout_steps / 2 → 2 minibatches per epoch
 n_epochs: 4
 lr: 3.0e-4
 lr_decay: true

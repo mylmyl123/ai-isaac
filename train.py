@@ -41,6 +41,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "python"))
 
+from isaac_rl.env import register_on_crash  # noqa: E402
 from isaac_rl.ppo import PPOConfig, _cfg_from_yaml, train  # noqa: E402
 
 
@@ -126,57 +127,75 @@ class IsaacFleet:
 
     def spawn(self, stagger_s: float = 3.0) -> None:
         self._ensure_steam_appid()
-        install_dir = self._install_dir()
         for i in range(self.n_envs):
-            port = self.base_port + i
-            env = os.environ.copy()
-            env["ISAAC_RL_PORT"] = str(port)
-
-            cmd = [self.binary, "--luadebug"]
-            if self.auto_start_stage is not None:
-                # Isaac's launch-arg parser uses `=` (NOT space) as separator:
-                # https://bindingofisaacrebirth.wiki.gg/wiki/Launch_Options
-                # `--set-stage=1` boots straight into a run as Isaac on Basement 1,
-                # skipping both the studio logos and the main menu entirely.
-                # Do NOT also pass --set-stage-type; the default (0 = normal) is
-                # what we want and some Repentance versions crash if you set it
-                # explicitly to certain values.
-                cmd += [f"--set-stage={self.auto_start_stage}"]
-            cmd += self.extra_args
-
-            log.info("[isaac %d/%d] port=%d cwd=%s cmd=%s",
-                     i + 1, self.n_envs, port, install_dir, " ".join(cmd))
-
-            creationflags = 0
-            if platform.system() == "Windows":
-                # New console per instance so each Isaac has its own window
-                # decorations (helpful for arranging on-screen). NEW_PROCESS_GROUP
-                # keeps Ctrl-C in our parent shell from killing Isaac before
-                # our cleanup runs.
-                #
-                # ABOVE_NORMAL_PRIORITY_CLASS is critical for multi-instance
-                # training: Windows 10/11 aggressively demotes the priority of
-                # unfocused windows ("background throttling" / EcoQoS). At normal
-                # priority the unfocused Isaac's Lua tick loop starves, the mod's
-                # socket exchange backs up, and the game eventually crashes
-                # trying to catch up on frames. Above-normal priority is enough
-                # to defeat the throttle without starving the OS itself.
-                creationflags = (
-                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                    | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
-                )
-
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                # cwd MUST be the Isaac install dir so the game finds
-                # resources/, packed/, shaders/ etc. via its relative paths.
-                cwd=str(install_dir),
-                creationflags=creationflags,
-            )
-            self.procs.append(proc)
+            self._launch_one(i)
             time.sleep(stagger_s)
+
+    def _launch_one(self, i: int) -> None:
+        """Spawn Isaac child at index i. Used by both initial spawn and respawn."""
+        install_dir = self._install_dir()
+        port = self.base_port + i
+        env = os.environ.copy()
+        env["ISAAC_RL_PORT"] = str(port)
+
+        cmd = [self.binary, "--luadebug"]
+        if self.auto_start_stage is not None:
+            cmd += [f"--set-stage={self.auto_start_stage}"]
+        cmd += self.extra_args
+
+        log.info("[isaac %d/%d] port=%d cwd=%s cmd=%s",
+                 i + 1, self.n_envs, port, install_dir, " ".join(cmd))
+
+        creationflags = 0
+        if platform.system() == "Windows":
+            creationflags = (
+                getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
+            )
+
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            cwd=str(install_dir),
+            creationflags=creationflags,
+        )
+        # Keep self.procs indexed by slot i. Grow the list on first spawn,
+        # replace in place on respawn.
+        while len(self.procs) <= i:
+            self.procs.append(proc)
+        self.procs[i] = proc
+
+    def respawn(self, port: int) -> None:
+        """Kill the Isaac child owning `port` (if any) and launch a fresh one.
+
+        Registered as the SocketIsaacEnv on-crash callback so a dying Isaac
+        gets automatically replaced without human intervention.
+        """
+        i = port - self.base_port
+        if i < 0 or i >= self.n_envs:
+            log.error("respawn(port=%d): port not owned by this fleet (base=%d, n=%d)",
+                      port, self.base_port, self.n_envs)
+            return
+
+        # Kill the current occupant (may already be dead if it crashed on its own).
+        if i < len(self.procs):
+            old = self.procs[i]
+            if old.poll() is None:
+                log.info("respawn(port=%d): terminating existing pid %d", port, old.pid)
+                try:
+                    old.terminate()
+                    try:
+                        old.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        old.kill()
+                except Exception as e:
+                    log.warning("respawn(port=%d): terminate failed: %s", port, e)
+            else:
+                log.info("respawn(port=%d): existing child already exited (rc=%s)", port, old.returncode)
+
+        log.info("respawn(port=%d): launching replacement Isaac", port)
+        self._launch_one(i)
 
     def shutdown(self) -> None:
         for i, p in enumerate(self.procs):
@@ -308,6 +327,13 @@ def main() -> int:
             n_envs=cfg.n_envs,
             auto_start_stage=None if args.no_auto_start else args.auto_start_stage,
         )
+        # Wire the fleet's respawn method into each env's crash hook BEFORE we
+        # call train() (which builds the SocketIsaacEnvs). When any Isaac dies
+        # mid-training its env will invoke this callback, we'll kill the zombie
+        # process and launch a fresh Isaac on the same port, the env re-accepts
+        # the new socket, and training resumes with terminated=True on that env.
+        for i in range(cfg.n_envs):
+            register_on_crash(cfg.base_port + i, fleet.respawn)
         fleet.spawn()
 
     if args.no_auto_start:

@@ -6,13 +6,18 @@ Design notes:
 - `reset()` sends a `reset` command down the wire; Lua runs `restart 0` on the
   next tick and reconnects on MC_POST_GAME_STARTED.
 - `step()` is synchronous: send action → wait for next obs frame → shape reward.
+- If Isaac dies mid-step (socket closed), we invoke the crash callback
+  registered for our port (usually IsaacFleet.respawn), wait for the new
+  Isaac to reconnect on the same server socket, and surface the crash to the
+  trainer as terminated=True with a small penalty so PPO gracefully starts a
+  fresh episode. Training then continues without human intervention.
 """
 from __future__ import annotations
 
 import logging
 import socket
 import time
-from typing import Any
+from typing import Any, Callable
 
 import gymnasium as gym
 import numpy as np
@@ -29,6 +34,38 @@ from .spaces import (
 
 
 log = logging.getLogger(__name__)
+
+
+# Per-port crash callback registry. train.py fills this with the IsaacFleet's
+# respawn method for every port it manages, BEFORE build_vec_env constructs the
+# SocketIsaacEnvs. When an env detects its Isaac has died it looks up the port
+# here and invokes the callback. Decoupling this from the env constructor lets
+# build_vec_env stay callback-agnostic.
+_ON_CRASH: dict[int, Callable[[int], None]] = {}
+
+
+def register_on_crash(port: int, cb: Callable[[int], None]) -> None:
+    """Register a callable(port) -> None that respawns Isaac for the given port.
+
+    The callback must be idempotent w.r.t. leftover Isaac processes on that
+    port (i.e. it should kill any zombie child before launching a new one).
+    """
+    _ON_CRASH[port] = cb
+
+
+def _crash_penalty_obs(port: int) -> dict[str, Any]:
+    """Build a minimal raw-obs dict for a crash-induced terminal step.
+
+    We surface a synthetic 'crash' event so RewardShaper can penalize + terminate
+    without needing the mod to have sent us anything. The obs itself is
+    zero-filled downstream by encode_obs when fields are missing.
+    """
+    return {
+        "schema": 1,
+        "tick": 0,
+        "player": {"is_dead": True, "hp_red": 0},
+        "events": [{"kind": "crash", "port": port}],
+    }
 
 
 class SocketIsaacEnv(gym.Env):
@@ -114,21 +151,34 @@ class SocketIsaacEnv(gym.Env):
 
         if self._client is None:
             self._accept()
-            raw = recv_frame(self._client)
+            try:
+                raw = recv_frame(self._client)
+            except (ConnectionError, OSError) as e:
+                log.warning("port %d: crash during initial obs (%s) — respawning", self.port, e)
+                raw = self._handle_crash_and_reaccept()
         else:
             payload: dict[str, Any] = {"reset": True}
             if seed is not None:
                 payload["seed"] = int(seed)
             if self.reset_stage is not None:
                 payload["stage"] = int(self.reset_stage)
-            send_frame(self._client, payload)
             try:
-                self._client.close()
-            except OSError:
-                pass
-            self._client = None
-            self._accept()
-            raw = recv_frame(self._client)
+                send_frame(self._client, payload)
+            except (ConnectionError, OSError) as e:
+                log.warning("port %d: crash while sending reset (%s) — respawning", self.port, e)
+                raw = self._handle_crash_and_reaccept()
+            else:
+                try:
+                    self._client.close()
+                except OSError:
+                    pass
+                self._client = None
+                self._accept()
+                try:
+                    raw = recv_frame(self._client)
+                except (ConnectionError, OSError) as e:
+                    log.warning("port %d: crash during post-reset obs (%s) — respawning", self.port, e)
+                    raw = self._handle_crash_and_reaccept()
 
         self._steps = 0
         self._last_action[:] = 0
@@ -139,8 +189,29 @@ class SocketIsaacEnv(gym.Env):
     def step(self, action):
         assert self._client is not None, "reset() must be called before step()"
         a = np.asarray(action, dtype=np.int64).reshape(-1)
-        send_frame(self._client, encode_action(a))
-        raw = recv_frame(self._client)
+        try:
+            send_frame(self._client, encode_action(a))
+            raw = recv_frame(self._client)
+        except (ConnectionError, OSError) as e:
+            log.warning("port %d: Isaac died mid-step (%s) — respawning", self.port, e)
+            # Kick off respawn and wait for the new Isaac to reconnect so the
+            # NEXT reset() (which the trainer will call because terminated=True)
+            # can just read the handshake+obs immediately.
+            self._handle_crash_and_reaccept(read_first_obs=False)
+            # Terminal step with penalty. Rewards from the shaper are optional
+            # here; we hardcode a fixed penalty so training sees a clear signal
+            # 'don't do whatever led to this'. It's small enough not to dominate.
+            self._last_action = a
+            self._steps += 1
+            obs = encode_obs(_crash_penalty_obs(self.port), last_action=self._last_action)
+            info: dict[str, Any] = {
+                "raw": _crash_penalty_obs(self.port),
+                "steps": self._steps,
+                "reward_breakdown": {"crash_penalty": -1.0},
+                "crashed": True,
+            }
+            return obs, -1.0, True, False, info
+
         self._last_action = a
         self._steps += 1
         obs = encode_obs(raw, last_action=self._last_action)
@@ -153,6 +224,49 @@ class SocketIsaacEnv(gym.Env):
             "reward_breakdown": breakdown,
         }
         return obs, reward, terminated, truncated, info
+
+    def _handle_crash_and_reaccept(self, read_first_obs: bool = True) -> dict[str, Any]:
+        """Respawn Isaac and re-accept its connection on our server socket.
+
+        Called when a recv/send on the client socket raises ConnectionError /
+        OSError. Returns the raw obs dict from the new Isaac's first exchange,
+        or a synthetic crash-terminal dict if read_first_obs=False.
+        """
+        # Close the (already-dead) client socket.
+        if self._client is not None:
+            try:
+                self._client.close()
+            except OSError:
+                pass
+            self._client = None
+
+        # Invoke the registered respawn callback if any. Without one, the caller
+        # gets stuck waiting for a manual restart — which is acceptable in the
+        # `python -m isaac_rl.env` smoke-test path.
+        cb = _ON_CRASH.get(self.port)
+        if cb is not None:
+            try:
+                cb(self.port)
+            except Exception as e:
+                log.exception("port %d: respawn callback failed: %s", self.port, e)
+        else:
+            log.warning(
+                "port %d: no on_crash callback registered; waiting for a manual Isaac restart",
+                self.port,
+            )
+
+        # Block on accept() again — the new Isaac will connect back into the
+        # same server socket, run MC_POST_GAME_STARTED, and send its handshake.
+        self._accept()
+        if not read_first_obs:
+            return _crash_penalty_obs(self.port)
+        try:
+            return recv_frame(self._client)
+        except (ConnectionError, OSError) as e:
+            # If it dies AGAIN immediately after respawn, don't infinite-loop —
+            # surface a crash-terminal and let the trainer's next reset try once more.
+            log.warning("port %d: respawned Isaac died again immediately (%s)", self.port, e)
+            return _crash_penalty_obs(self.port)
 
 
 def wait_for_isaac(port: int = 9500, **kwargs) -> SocketIsaacEnv:
