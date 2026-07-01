@@ -107,11 +107,17 @@ class IsaacFleet:
 
         Steam / Isaac otherwise fight over the same log.txt, save files, and
         lock files, and Steam's DRM will collapse two launches into one window.
-        Giving each Isaac its own cwd (and copying the mod there) makes them
-        fully independent.
+        Giving each Isaac its own cwd makes them independent.
+
+        We also drop a steam_appid.txt into this cwd — that file tells the
+        Steamworks DRM stub "yes, we were legitimately launched, don't relaunch
+        under Steam." Without it, Isaac exits within a couple seconds.
         """
         d = Path.cwd() / ".isaac-instances" / f"port_{self.base_port + i}"
         d.mkdir(parents=True, exist_ok=True)
+        appid_file = d / "steam_appid.txt"
+        if not appid_file.exists():
+            appid_file.write_text("250900\n", encoding="utf-8")
         return d
 
     def spawn(self, stagger_s: float = 3.0) -> None:
@@ -119,11 +125,10 @@ class IsaacFleet:
             port = self.base_port + i
             env = os.environ.copy()
             env["ISAAC_RL_PORT"] = str(port)
-            # Bypass Steam's single-instance lock: point SteamAppId at a
-            # dummy AppID so the DRM check treats each launch as separate.
-            # (Isaac itself doesn't care; the launch flag is what matters.)
-            env["SteamAppId"] = "250900"
-            env["SteamGameId"] = "250900"
+            # NOTE: do NOT set SteamAppId / SteamGameId here — Repentance's
+            # DRM stub reads them and refuses if they don't match a real
+            # Steam context. The steam_appid.txt in the cwd is the right
+            # mechanism (created in _instance_workdir).
 
             cmd = [self.binary, "--luadebug"]
             if self.auto_start_stage is not None:
@@ -251,6 +256,16 @@ def main() -> int:
 
     atexit.register(cleanup)
 
+    # Signal handling notes for Windows:
+    #   - Ctrl-C in the console raises KeyboardInterrupt in Python code at the
+    #     next opportunity. It does NOT reach our SIGINT handler while a
+    #     blocking syscall is running.
+    #   - We work around that by setting short timeouts on socket recv/accept
+    #     (see protocol.py and env.py) so the interpreter regularly gets a
+    #     chance to raise the exception.
+    #   - The Isaac children were spawned with CREATE_NEW_PROCESS_GROUP so
+    #     Ctrl-C in our console doesn't reach them — cleanup() terminates
+    #     them explicitly.
     def handle_signal(signum, frame):
         log.info("caught signal %d, shutting down", signum)
         cleanup()

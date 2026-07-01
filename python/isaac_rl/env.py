@@ -77,8 +77,19 @@ class SocketIsaacEnv(gym.Env):
 
     def _accept(self) -> None:
         assert self._server is not None
-        self._server.settimeout(self.accept_timeout_s)
-        client, addr = self._server.accept()
+        # Short timeout so KeyboardInterrupt is observable while we wait for Isaac to connect.
+        # Total wait budget is self.accept_timeout_s.
+        import time as _time
+        deadline = _time.time() + self.accept_timeout_s
+        self._server.settimeout(1.0)
+        while True:
+            try:
+                client, addr = self._server.accept()
+                break
+            except socket.timeout:
+                if _time.time() > deadline:
+                    raise TimeoutError(f"Isaac did not connect on port {self.port} within {self.accept_timeout_s}s")
+                continue
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         log.info("Isaac connected from %s", addr)
         self._client = client

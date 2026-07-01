@@ -13,6 +13,12 @@ from typing import Any
 
 LEN_STRUCT = struct.Struct(">I")
 
+# On Windows, socket.recv() blocks indefinitely and ignores Python signals
+# (Ctrl-C only fires after the syscall returns). We use a short timeout so
+# recv wakes up periodically, giving the interpreter a chance to raise
+# KeyboardInterrupt. The trainer's step loop retries transparently.
+_RECV_TIMEOUT_S = 1.0
+
 
 def send_frame(sock: socket.socket, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -20,9 +26,15 @@ def send_frame(sock: socket.socket, payload: dict[str, Any]) -> None:
 
 
 def recv_exact(sock: socket.socket, n: int) -> bytes:
+    """Read exactly n bytes. Retries through timeout wake-ups so signals get processed."""
+    sock.settimeout(_RECV_TIMEOUT_S)
     buf = bytearray()
     while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+        try:
+            chunk = sock.recv(n - len(buf))
+        except socket.timeout:
+            # Wake up, let Python check signals, keep waiting.
+            continue
         if not chunk:
             raise ConnectionError("socket closed while reading frame")
         buf.extend(chunk)
