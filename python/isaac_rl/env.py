@@ -230,7 +230,13 @@ class SocketIsaacEnv(gym.Env):
 
         Called when a recv/send on the client socket raises ConnectionError /
         OSError. Returns the raw obs dict from the new Isaac's first exchange,
-        or a synthetic crash-terminal dict if read_first_obs=False.
+        or a synthetic crash-terminal dict if read_first_obs=False (or if the
+        respawn itself failed after all retries).
+
+        This method must NEVER propagate an exception — doing so would kill the
+        whole training loop the moment a single Isaac has a bad boot. On total
+        failure we return a crash-obs and leave self._client = None so the
+        trainer's next reset() attempts another respawn.
         """
         # Close the (already-dead) client socket.
         if self._client is not None:
@@ -240,33 +246,71 @@ class SocketIsaacEnv(gym.Env):
                 pass
             self._client = None
 
-        # Invoke the registered respawn callback if any. Without one, the caller
-        # gets stuck waiting for a manual restart — which is acceptable in the
-        # `python -m isaac_rl.env` smoke-test path.
-        cb = _ON_CRASH.get(self.port)
-        if cb is not None:
-            try:
-                cb(self.port)
-            except Exception as e:
-                log.exception("port %d: respawn callback failed: %s", self.port, e)
-        else:
-            log.warning(
-                "port %d: no on_crash callback registered; waiting for a manual Isaac restart",
-                self.port,
-            )
+        MAX_RESPAWN_ATTEMPTS = 3
+        for attempt in range(1, MAX_RESPAWN_ATTEMPTS + 1):
+            cb = _ON_CRASH.get(self.port)
+            if cb is None:
+                log.warning(
+                    "port %d: no on_crash callback registered; waiting for manual Isaac restart",
+                    self.port,
+                )
+            else:
+                try:
+                    cb(self.port)
+                except Exception as e:
+                    log.exception("port %d: respawn callback failed: %s", self.port, e)
 
-        # Block on accept() again — the new Isaac will connect back into the
-        # same server socket, run MC_POST_GAME_STARTED, and send its handshake.
-        self._accept()
-        if not read_first_obs:
-            return _crash_penalty_obs(self.port)
-        try:
-            return recv_frame(self._client)
-        except (ConnectionError, OSError) as e:
-            # If it dies AGAIN immediately after respawn, don't infinite-loop —
-            # surface a crash-terminal and let the trainer's next reset try once more.
-            log.warning("port %d: respawned Isaac died again immediately (%s)", self.port, e)
-            return _crash_penalty_obs(self.port)
+            # Try to accept the new Isaac's connection + handshake. _accept()
+            # blocks on the server socket up to self.accept_timeout_s (default
+            # 300s), then reads the handshake frame.
+            try:
+                self._accept()
+            except (ConnectionError, OSError, TimeoutError) as e:
+                # Includes ConnectionResetError (WinError 10054) when Isaac
+                # accepts the TCP handshake and then dies before sending the
+                # bridge handshake frame. Try again.
+                log.warning(
+                    "port %d: respawn attempt %d/%d failed at accept/handshake: %s",
+                    self.port, attempt, MAX_RESPAWN_ATTEMPTS, e,
+                )
+                if self._client is not None:
+                    try:
+                        self._client.close()
+                    except OSError:
+                        pass
+                    self._client = None
+                # Small backoff before firing the callback again so Isaac's
+                # per-process cleanup can settle.
+                time.sleep(2.0)
+                continue
+
+            # Accept + handshake succeeded. Optionally read the first obs.
+            if not read_first_obs:
+                return _crash_penalty_obs(self.port)
+            try:
+                return recv_frame(self._client)
+            except (ConnectionError, OSError) as e:
+                log.warning(
+                    "port %d: respawned Isaac died during first obs (%s); attempt %d/%d",
+                    self.port, e, attempt, MAX_RESPAWN_ATTEMPTS,
+                )
+                if self._client is not None:
+                    try:
+                        self._client.close()
+                    except OSError:
+                        pass
+                    self._client = None
+                time.sleep(2.0)
+                continue
+
+        # All retries exhausted. Leave client=None so the trainer's next reset()
+        # will trigger another respawn cycle. Surface a crash-terminal so the
+        # current step/reset returns a valid obs shape.
+        log.error(
+            "port %d: %d respawn attempts all failed; returning crash-terminal, will retry on next reset",
+            self.port, MAX_RESPAWN_ATTEMPTS,
+        )
+        return _crash_penalty_obs(self.port)
 
 
 def wait_for_isaac(port: int = 9500, **kwargs) -> SocketIsaacEnv:

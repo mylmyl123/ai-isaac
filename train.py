@@ -189,10 +189,17 @@ class IsaacFleet:
                         old.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         old.kill()
+                        old.wait(timeout=5)
                 except Exception as e:
                     log.warning("respawn(port=%d): terminate failed: %s", port, e)
             else:
                 log.info("respawn(port=%d): existing child already exited (rc=%s)", port, old.returncode)
+
+        # Isaac holds a singleton lock file for a few seconds after exit. If we
+        # relaunch too quickly the new process either fails silently or connects
+        # its socket and then instantly RSTs during boot (WinError 10054 on the
+        # trainer side). Sleep past that window before spawning.
+        time.sleep(3.0)
 
         log.info("respawn(port=%d): launching replacement Isaac", port)
         self._launch_one(i)
