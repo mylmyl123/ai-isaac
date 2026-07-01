@@ -381,6 +381,7 @@ The diagnostic's summary line tells you which launch strategy works. Once one su
 
 | Symptom | Fix |
 |---|---|
+| One Isaac window is fine, the OTHER lags heavily and eventually crashes | Windows 10/11 background-window throttling. `PauseOnFocusLost=0` doesn't defeat this — it's an OS-level priority cut. `train.py` now spawns children with `ABOVE_NORMAL_PRIORITY_CLASS` which is enough to defeat it. If you're launching Isaac manually, run `Get-Process isaac-ng \| ForEach-Object { $_.PriorityClass = 'AboveNormal' }` after they start. Keep every Isaac window visible on screen (not minimized) — minimized windows get an additional GPU/render throttle no priority class can override. |
 | Isaac boots to intro / main menu and won't auto-start | `--set-stage=N` **requires** the `=` (Isaac's parser doesn't accept a space). `train.py` uses the correct syntax; if you're launching manually, use `isaac-ng.exe --luadebug --set-stage=1 --set-stage-type=0`. That skips both the studio logos and the menu. |
 | Game crashes the instant a run starts | Almost always the Lua auto-start firing `restart 0` during the intro cinematic. Fixed on `main` — the fallback now waits ~10s and won't fire once the run is active. If you're on an older checkout, `git pull`. Also make sure the launch flag above is set so the fallback never triggers. |
 | `require('socket') failed` in Isaac log | Missing `--luadebug`. Always launch through `tools/launch_isaac.py` or `train.py`. |

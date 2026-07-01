@@ -153,9 +153,18 @@ class IsaacFleet:
                 # decorations (helpful for arranging on-screen). NEW_PROCESS_GROUP
                 # keeps Ctrl-C in our parent shell from killing Isaac before
                 # our cleanup runs.
+                #
+                # ABOVE_NORMAL_PRIORITY_CLASS is critical for multi-instance
+                # training: Windows 10/11 aggressively demotes the priority of
+                # unfocused windows ("background throttling" / EcoQoS). At normal
+                # priority the unfocused Isaac's Lua tick loop starves, the mod's
+                # socket exchange backs up, and the game eventually crashes
+                # trying to catch up on frames. Above-normal priority is enough
+                # to defeat the throttle without starving the OS itself.
                 creationflags = (
                     getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
                 )
 
             proc = subprocess.Popen(
