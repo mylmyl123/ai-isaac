@@ -185,8 +185,8 @@ python train.py --config python\isaac_rl\configs\stage1_single_room.yaml `
 
 What happens:
 
-1. The trainer opens 4 server sockets on ports 9500–9503 (from the config's `n_envs`).
-2. Four Isaac windows open — each with `--luadebug` and `ISAAC_RL_PORT` set to its port.
+1. The trainer opens 2 server sockets on ports 9500–9501 (from the config's `n_envs`). Bump `n_envs` in the YAML for more instances.
+2. Two Isaac windows open — each with `--luadebug` and `ISAAC_RL_PORT` set to its port.
 3. **Click "New Run" (or press Start) in each Isaac window.** The mod fires `MC_POST_GAME_STARTED` and connects the socket. After this, resets happen automatically for the rest of training.
 4. Training runs in the same terminal. `Ctrl-C` gracefully kills every Isaac child before exiting.
 5. TensorBoard opens at http://localhost:6006 (if `--tensorboard`).
@@ -226,10 +226,10 @@ python -m isaac_rl.ppo --config python\isaac_rl\configs\stage1_single_room.yaml
 python tools\launch_isaac.py --port 9500
 ```
 
-Repeat for `9501`, `9502`, `9503` in three more PowerShells. Or spawn all 4 from one:
+Repeat for `9501` in one more PowerShell (or more, matching the `n_envs` in your config). Or spawn N from one shell:
 
 ```powershell
-9500..9503 | ForEach-Object {
+9500..9501 | ForEach-Object {
     Start-Process powershell -ArgumentList "-NoExit","-Command","python tools\launch_isaac.py --port $_"
 }
 ```
@@ -304,15 +304,15 @@ Note: PowerShell continues lines with a backtick (`` ` ``), not backslash. Print
 
 ## Wall-clock expectations
 
-At 15 Hz control and 4 Isaac instances, you get ~60 env-steps/second. Training budgets (from the plan):
+At 15 Hz control, each Isaac instance produces ~15 env-steps/second. The default config uses 2 instances (~30 sps).
 
-| Stage | env-steps | wall-clock @ 60 sps |
-|---|---|---|
-| Stage 1 | 20M | ~4 days |
-| Stage 2 | 50M | ~10 days |
-| Stage 4 | 500M | ~3 months |
+| Stage | env-steps | @ 2 envs (30 sps) | @ 4 envs (60 sps) | @ 8 envs (120 sps) |
+|---|---|---|---|---|
+| Stage 1 | 20M | ~8 days | ~4 days | ~2 days |
+| Stage 2 | 50M | ~20 days | ~10 days | ~5 days |
+| Stage 4 | 500M | ~6 months | ~3 months | ~6 weeks |
 
-Bumping to 8 instances roughly halves wall-clock. If you can get a speedhack working (2×), halve it again.
+Bump `n_envs` in the YAML for more instances. Each extra instance costs ~1 CPU core and ~500 MB RAM. If you can get a speedhack working (2×), halve wall-clock again.
 
 ---
 

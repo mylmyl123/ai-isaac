@@ -1,9 +1,10 @@
 # Stage 4 — full six-floor run to Mom. Serious training run.
+# Default fleet: 2 instances. Bump to 8 for real production runs.
 run_name: stage4_full_run
-n_envs: 8
+n_envs: 2
 rollout_steps: 256
 total_env_steps: 500_000_000
-minibatch_size: 1024
+minibatch_size: 256
 n_epochs: 4
 lr: 2.0e-4
 lr_decay: true
