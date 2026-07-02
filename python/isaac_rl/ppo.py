@@ -86,6 +86,9 @@ class PPOConfig:
 
     # Policy net
     policy: dict = field(default_factory=dict)
+    # Reward config (see reward.py RewardConfig). Any field name in RewardConfig can
+    # be overridden here to tune reward shaping without editing code.
+    reward: dict = field(default_factory=dict)
 
 
 def _load_yaml(path: str) -> dict:
@@ -128,6 +131,16 @@ def train(cfg: PPOConfig) -> None:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
+    # --- reward config from YAML overrides -----------------------------
+    from .reward import RewardConfig
+    reward_cfg = RewardConfig()
+    for k, v in (cfg.reward or {}).items():
+        if hasattr(reward_cfg, k):
+            setattr(reward_cfg, k, v)
+            log.info("reward override: %s = %s", k, v)
+        else:
+            log.warning("unknown reward field in config: %s", k)
+
     # --- vec env --------------------------------------------------------
     env = build_vec_env(
         n_envs=cfg.n_envs,
@@ -137,6 +150,7 @@ def train(cfg: PPOConfig) -> None:
         isaac_binary=cfg.isaac_binary,
         launch_isaac=cfg.launch_isaac,
         accept_timeout_s=cfg.accept_timeout_s,
+        reward_config=reward_cfg,
     )
     log.info("vec env ready with %d workers", cfg.n_envs)
 

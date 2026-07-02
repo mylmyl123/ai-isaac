@@ -228,7 +228,7 @@ class SocketIsaacEnv(gym.Env):
         self._steps += 1
         obs = encode_obs(raw, last_action=self._last_action)
 
-        reward, terminated, breakdown = self.reward_shaper(raw)
+        reward, terminated, breakdown = self.reward_shaper(raw, action=a)
         truncated = self._steps >= self.max_steps
         info: dict[str, Any] = {
             "raw": raw,

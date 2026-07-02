@@ -1,6 +1,10 @@
 # Stage 1 — single-room combat on Basement 1.
 # Default fleet: 1 Isaac instance (safest — stable on any box).
 # Bump n_envs to 2-8 on a beefier box; raise minibatch_size proportionally.
+#
+# Reward shaping is AGGRESSIVE by default — dense per-tick signals guide the
+# policy toward productive behavior fast, which matters when compute is limited.
+# See python/isaac_rl/reward.py for the full RewardConfig field list.
 
 run_name: stage1_single_room
 n_envs: 1
@@ -34,7 +38,7 @@ device: cuda
 seed: 42
 checkpoint_dir: runs
 checkpoint_every: 500_000
-log_every: 10
+log_every: 1
 
 policy:
   entity_dim: 128
@@ -42,3 +46,39 @@ policy:
   pickup_dim: 64
   trunk_dim: 512
   gru_dim: 512
+
+# Reward tuning — aggressive dense shaping for fast learning on limited compute.
+# All fields optional; unset falls back to RewardConfig defaults in reward.py.
+reward:
+  # Base per-step cost: bigger than the original -0.001 so idling/wandering hurts.
+  r_step: -0.003
+
+  # Boosted room/exploration rewards to make progress more attractive.
+  r_room_clear: 2.0
+  r_new_room: 0.2
+  r_room_clear_speed_bonus: 1.0     # bonus if room cleared in < 200 ticks (~13s)
+  r_room_clear_no_damage: 1.5       # bonus for clean clears
+
+  # NEW: dense per-tick shaping.
+  # Aim alignment: turn random shooting into guided combat exploration.
+  r_aim_at_enemy: 0.03
+  r_shoot_when_enemy_visible: 0.005
+
+  # Engagement distance: reward staying at kiting distance.
+  r_at_kite_dist_tick: 0.005
+  kite_dist_min: 100.0
+  kite_dist_max: 300.0
+
+  # HP preservation: proactive dodging incentive.
+  r_full_hp_tick: 0.005
+
+  # Anti-idle: prevent "stand still" local optimum.
+  r_idle_penalty: -0.01
+  idle_speed_threshold: 0.5
+
+  # PBRS approach potential (provably policy-invariant).
+  r_pbrs_scale: 0.1
+  pbrs_gamma: 0.99                  # keep synced with training gamma
+  pbrs_ideal_dist: 200.0
+  pbrs_decay: 200.0
+
