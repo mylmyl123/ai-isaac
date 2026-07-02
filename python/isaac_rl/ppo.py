@@ -82,7 +82,7 @@ class PPOConfig:
     checkpoint_dir: str = "runs"
     checkpoint_every: int = 500_000
     resume_from: str | None = None   # path to a .pt checkpoint to resume from
-    log_every: int = 10
+    log_every: int = 1   # log a progress line every N PPO updates. Default 1 = once per rollout (~17s at n_envs=4).
 
     # Policy net
     policy: dict = field(default_factory=dict)
@@ -228,7 +228,15 @@ def train(cfg: PPOConfig) -> None:
         # Not on main thread or platform doesn't support — fall back to default.
         _prev_sigint = None
 
+    _last_heartbeat = time.time()
     while global_step < cfg.total_env_steps:
+        # Heartbeat: print a short activity line if the last log line was more
+        # than 30s ago. Long rollouts can otherwise appear frozen — the trainer
+        # is silently collecting steps but nothing new prints until the update.
+        if time.time() - _last_heartbeat > 30.0:
+            sps = global_step / max(1e-6, time.time() - t_start)
+            log.info("... collecting rollout (step=%s, sps=%.0f)", f"{global_step:,}", sps)
+            _last_heartbeat = time.time()
         # --- collect rollout -------------------------------------------
         rollout_obs: list[dict[str, torch.Tensor]] = []
         rollout_actions: list[torch.Tensor] = []
@@ -380,22 +388,38 @@ def train(cfg: PPOConfig) -> None:
 
         # --- logging ----------------------------------------------------
         if updates % cfg.log_every == 0:
+            _last_heartbeat = time.time()   # reset heartbeat since we're logging a full line now
             sps = global_step / max(1e-6, time.time() - t_start)
             recent = completed_rewards[-32:] or [0.0]
             recent_lens = completed_lens[-32:] or [0]
+            recent_r = float(np.mean(recent))
+            recent_len = float(np.mean(recent_lens))
+            # Progress percentage and ETA.
+            pct = 100.0 * global_step / max(1, cfg.total_env_steps)
+            steps_left = max(0, cfg.total_env_steps - global_step)
+            eta_s = steps_left / max(1e-6, sps)
+            eta_h, rem = divmod(int(eta_s), 3600)
+            eta_m, eta_sec = divmod(rem, 60)
+            eta_str = f"{eta_h}h{eta_m:02d}m" if eta_h else f"{eta_m}m{eta_sec:02d}s"
+            # Best reward so far (across the whole run).
+            best_r = max(completed_rewards) if completed_rewards else 0.0
+            n_eps = len(completed_rewards)
             log.info(
-                "upd %d step %d %.0f sps ep_r=%.2f ep_len=%.0f pol=%.3f val=%.3f ent=%.3f",
-                updates, global_step, sps,
-                float(np.mean(recent)), float(np.mean(recent_lens)),
+                "[step %s/%s %.1f%%] sps=%.0f ep=%d ep_r=%+.2f (best %+.2f) ep_len=%.0f | pol=%.3f val=%.3f ent=%.3f | ETA %s",
+                f"{global_step:,}", f"{cfg.total_env_steps:,}", pct, sps,
+                n_eps, recent_r, best_r, recent_len,
                 float(np.mean(losses["policy"] or [0])),
                 float(np.mean(losses["value"] or [0])),
                 float(np.mean(losses["entropy"] or [0])),
+                eta_str,
             )
             if writer is not None:
                 writer.add_scalar("perf/sps", sps, global_step)
                 writer.add_scalar("perf/env_step", global_step, updates)
-                writer.add_scalar("rollout/ep_reward", float(np.mean(recent)), global_step)
-                writer.add_scalar("rollout/ep_length", float(np.mean(recent_lens)), global_step)
+                writer.add_scalar("rollout/ep_reward", recent_r, global_step)
+                writer.add_scalar("rollout/ep_reward_best", best_r, global_step)
+                writer.add_scalar("rollout/ep_length", recent_len, global_step)
+                writer.add_scalar("rollout/n_episodes", n_eps, global_step)
                 for k, vs in losses.items():
                     if vs:
                         writer.add_scalar(f"loss/{k}", float(np.mean(vs)), global_step)
