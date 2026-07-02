@@ -82,6 +82,13 @@ class PPOConfig:
     checkpoint_dir: str = "runs"
     checkpoint_every: int = 500_000
     resume_from: str | None = None   # path to a .pt checkpoint to resume from
+
+    # Heuristic + BC bootstrap (see heuristic.py / bc.py):
+    collect_demos_n: int | None = None      # if set, collect this many heuristic demo steps before PPO
+    bc_pretrain_file: str | None = None     # if set, load this .npz and BC-pretrain the policy first
+    bc_epochs: int = 10                     # BC epochs
+    bc_batch_size: int = 256                # BC minibatch size
+    bc_lr: float = 3.0e-4                   # BC learning rate
     log_every: int = 1   # log a progress line every N PPO updates. Default 1 = once per rollout (~17s at n_envs=4).
 
     # Policy net
@@ -199,6 +206,57 @@ def train(cfg: PPOConfig) -> None:
                 rnd.target.load_state_dict(ckpt["rnd_target"])
             global_step = int(ckpt.get("global_step", 0))
             log.info("resume: continuing from step %d", global_step)
+
+    # ---- Demo collection (heuristic) ----------------------------------
+    # If --collect-demos N was passed, run the heuristic policy for N steps
+    # across all envs and save the trajectories to runs/demos/<timestamp>.npz.
+    # If --bc-pretrain-file was NOT also passed, we short-circuit and use this
+    # freshly-written file for BC. Either way, if only --collect-demos was set
+    # (no BC, no PPO), we exit after saving.
+    demos_path: Path | None = None
+    if getattr(cfg, "collect_demos_n", None):
+        from .heuristic import HeuristicPolicy
+        from .bc import collect_demos
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        demos_path = Path(cfg.checkpoint_dir) / "demos" / f"heuristic_{ts}.npz"
+        heur = HeuristicPolicy()
+        collect_demos(env, heur, int(cfg.collect_demos_n), demos_path)
+        # If user didn't also ask for BC pretraining, we're done — exit before PPO.
+        if not getattr(cfg, "bc_pretrain_file", None) and cfg.bc_epochs <= 0:
+            log.info("demo collection complete; --bc-* not requested. Exiting.")
+            env.close()
+            return
+        # Otherwise chain: use the freshly-collected demos as the BC input.
+        if not getattr(cfg, "bc_pretrain_file", None):
+            cfg.bc_pretrain_file = str(demos_path)
+            log.info("chaining: BC pretrain will use just-collected demos at %s", demos_path)
+
+    # ---- BC pretraining ------------------------------------------------
+    if getattr(cfg, "bc_pretrain_file", None):
+        from .bc import bc_pretrain
+        bc_file = Path(cfg.bc_pretrain_file).expanduser()
+        if not bc_file.exists():
+            log.warning("BC pretrain file %s does not exist — skipping BC step", bc_file)
+        elif cfg.bc_epochs <= 0:
+            log.info("bc_epochs=%d — skipping BC step", cfg.bc_epochs)
+        else:
+            log.info("BC pretraining from %s for %d epochs", bc_file, cfg.bc_epochs)
+            bc_pretrain(
+                policy, bc_file,
+                epochs=cfg.bc_epochs,
+                batch_size=cfg.bc_batch_size,
+                lr=cfg.bc_lr,
+                device=device,
+            )
+            # Save a post-BC checkpoint so users can resume from a pretrained state
+            # without having to re-run BC every time.
+            bc_ckpt = run_dir / "bc_pretrained.pt"
+            torch.save({
+                "policy": policy.state_dict(),
+                "cfg": asdict(cfg),
+                "global_step": global_step,
+            }, bc_ckpt)
+            log.info("saved BC-pretrained checkpoint: %s", bc_ckpt)
 
     # Helper: save a checkpoint at the current state. Called every
     # cfg.checkpoint_every steps AND on any exit (Ctrl+C, exception, normal

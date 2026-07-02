@@ -302,6 +302,19 @@ def main() -> int:
     ap.add_argument("--resume", type=str, default=None, metavar="CKPT.pt",
                     help="Resume training from a checkpoint. Point at a .pt file (e.g. runs/<run>/<timestamp>/latest.pt "
                          "or runs/<run>/<timestamp>/ckpts/step_1000000.pt). Loads policy, RND, optimizer, and step count.")
+    ap.add_argument("--collect-demos", type=int, default=None, metavar="N",
+                    help="Run the heuristic policy for N steps (across all envs) and save the (obs, action) "
+                         "trajectories to runs/demos/<timestamp>.npz. Exits after collection unless --bc-epochs "
+                         "is also provided (in which case BC pretraining runs on the fresh demos, then PPO starts).")
+    ap.add_argument("--bc-pretrain-file", type=str, default=None, metavar="NPZ",
+                    help="Path to a demos .npz file. Runs supervised BC pretraining on the policy network before "
+                         "starting PPO. Compatible with --resume (BC applies to the resumed weights).")
+    ap.add_argument("--bc-epochs", type=int, default=10,
+                    help="Number of BC pretraining epochs (default 10). Ignored if no demos are involved.")
+    ap.add_argument("--bc-batch-size", type=int, default=256,
+                    help="BC minibatch size (default 256).")
+    ap.add_argument("--bc-lr", type=float, default=3.0e-4,
+                    help="BC learning rate (default 3e-4).")
     ap.add_argument("--override", nargs="*", default=[], help="Extra config overrides: key=value")
     args = ap.parse_args()
 
@@ -316,6 +329,13 @@ def main() -> int:
     if args.resume is not None:
         cfg.resume_from = args.resume
         log.info("will resume training from checkpoint: %s", args.resume)
+
+    # Wire BC / demo-collection args onto the config so ppo.py can act on them.
+    cfg.collect_demos_n = args.collect_demos
+    cfg.bc_pretrain_file = args.bc_pretrain_file
+    cfg.bc_epochs = args.bc_epochs
+    cfg.bc_batch_size = args.bc_batch_size
+    cfg.bc_lr = args.bc_lr
     for kv in args.override:
         k, _, v = kv.partition("=")
         try:
