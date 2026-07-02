@@ -172,3 +172,26 @@ def test_room_clear_no_damage_bonus():
     _, _, bd = r({"player": {"hp_red": 3, "hp_max": 3, "vx": 5.0, "vy": 0.0},
                   "events": [{"kind": "room_clear"}]})
     assert bd.get("room_clear_no_damage") == r.cfg.r_room_clear_no_damage
+
+
+def test_stationary_penalty_fires_when_camping():
+    r = RewardShaper()
+    # Feed enough ticks at nearly the same position to trigger stationary_window.
+    obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 1.0, "vy": 0.0,
+                       "x": 100.0, "y": 100.0}, "events": []}
+    for _ in range(r.cfg.stationary_window):
+        r(obs)
+    # Next tick should fire the stationary penalty.
+    _, _, bd = r(obs)
+    assert bd.get("stationary_penalty") == r.cfg.r_stationary_penalty
+
+
+def test_stationary_penalty_absent_when_moving_around():
+    r = RewardShaper()
+    # Move by more than stationary_radius over the window.
+    for i in range(r.cfg.stationary_window + 5):
+        obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 5.0, "vy": 0.0,
+                          "x": float(i * 10), "y": 100.0}, "events": []}
+        _, _, bd = r(obs)
+    # Final tick shouldn't be penalised.
+    assert "stationary_penalty" not in bd

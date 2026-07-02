@@ -84,6 +84,16 @@ class RewardConfig:
     r_idle_penalty: float = -0.01
     idle_speed_threshold: float = 0.5      # velocity magnitude below this = idle
 
+    # ---- NEW: Anti-camping (position-based) ----------------------------
+    # Even with the idle penalty, PPO can find local optima where the bot
+    # oscillates within a tiny radius ("wiggles" in a corner while shooting).
+    # The idle penalty misses this because velocity is briefly non-zero. This
+    # tracks the bots position over the last stationary_window ticks and
+    # penalises staying inside a small radius — works even for wigglers.
+    r_stationary_penalty: float = -0.02
+    stationary_radius: float = 40.0        # world units
+    stationary_window: int = 45            # ticks (~3s at 15Hz)
+
     # ---- NEW: PBRS approach potential ----------------------------------
     # Potential-based reward shaping: F = gamma*Phi(s') - Phi(s) with
     # Phi(s) = 1.0 when at ideal distance, decaying with |dist - ideal|.
@@ -116,6 +126,7 @@ class RewardState:
     damage_this_room_red: float = 0.0      # for no-damage clear bonus
     damage_this_room_other: float = 0.0
     prev_potential: float | None = None    # PBRS: previous state potential
+    pos_history: list = field(default_factory=list)  # rolling position window
 
 
 class RewardShaper:
@@ -300,6 +311,21 @@ class RewardShaper:
             # Anti-idle penalty.
             if speed < cfg.idle_speed_threshold:
                 add("idle_penalty", cfg.r_idle_penalty)
+
+            # Anti-camping (position-based). Tracks bots position over a rolling
+            # window; if the max displacement across the window is below
+            # stationary_radius, the bot is effectively camping and pays the
+            # penalty. Fires even when the bot wiggles (idle_penalty would miss).
+            cur_pos = (float(player.get("x", 0) or 0), float(player.get("y", 0) or 0))
+            st.pos_history.append(cur_pos)
+            if len(st.pos_history) > cfg.stationary_window:
+                st.pos_history.pop(0)
+            if len(st.pos_history) >= cfg.stationary_window:
+                xs = [p[0] for p in st.pos_history]
+                ys = [p[1] for p in st.pos_history]
+                span = max(max(xs) - min(xs), max(ys) - min(ys))
+                if span < cfg.stationary_radius:
+                    add("stationary_penalty", cfg.r_stationary_penalty)
 
             # Nearest-enemy dependent shaping (aim, kite distance, PBRS).
             enemy = self._nearest_enemy(raw_obs)

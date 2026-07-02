@@ -18,7 +18,7 @@ gamma: 0.99            # short episodes; discount can be lower than the 6-floor 
 gae_lambda: 0.95
 clip: 0.2
 vf_coef: 0.5
-ent_coef: 0.02
+ent_coef: 0.05         # bumped from 0.02 to encourage more exploration — escapes corner-camping local optima
 max_grad_norm: 0.5
 
 use_rnd: true
@@ -49,36 +49,52 @@ policy:
 
 # Reward tuning — aggressive dense shaping for fast learning on limited compute.
 # All fields optional; unset falls back to RewardConfig defaults in reward.py.
+#
+# 2026-07-02: adjusted after observing bot corner-camping local optimum at 700K
+# steps. Bigger idle penalty + smaller passive HP/kite rewards flip camping
+# from +0.007/tick (rewarded) to -0.025/tick (actively costs reward). Combined
+# with higher entropy coefficient, bot should escape the corner attractor over
+# the next few hundred thousand steps.
 reward:
-  # Base per-step cost: bigger than the original -0.001 so idling/wandering hurts.
+  # Base per-step cost.
   r_step: -0.003
 
   # Boosted room/exploration rewards to make progress more attractive.
   r_room_clear: 2.0
   r_new_room: 0.2
-  r_room_clear_speed_bonus: 1.0     # bonus if room cleared in < 200 ticks (~13s)
-  r_room_clear_no_damage: 1.5       # bonus for clean clears
+  r_room_clear_speed_bonus: 1.0
+  r_room_clear_no_damage: 1.5
 
-  # NEW: dense per-tick shaping.
-  # Aim alignment: turn random shooting into guided combat exploration.
+  # Aim alignment: still the main combat driver, kept as-is.
   r_aim_at_enemy: 0.03
   r_shoot_when_enemy_visible: 0.005
 
-  # Engagement distance: reward staying at kiting distance.
-  r_at_kite_dist_tick: 0.005
+  # Engagement distance — REDUCED because it accidentally rewarded corner-camping
+  # (enemies wander into range while bot stays still). Small enough to still
+  # nudge good positioning but not enough to make idling profitable.
+  r_at_kite_dist_tick: 0.001    # was 0.005
   kite_dist_min: 100.0
   kite_dist_max: 300.0
 
-  # HP preservation: proactive dodging incentive.
-  r_full_hp_tick: 0.005
+  # HP preservation — REDUCED for same reason: full-HP is easy in a corner where
+  # nothing can reach the bot. Kept slightly positive so proactive dodging is
+  # still incentivised, but not enough to reward camping.
+  r_full_hp_tick: 0.001         # was 0.005
 
-  # Anti-idle: prevent "stand still" local optimum.
-  r_idle_penalty: -0.01
+  # Anti-idle — TRIPLED. This is the primary lever forcing bot out of corners.
+  r_idle_penalty: -0.03         # was -0.01
   idle_speed_threshold: 0.5
+
+  # Anti-camping (position-based). Catches "wiggle in corner" behaviour that
+  # bypasses the velocity-based idle penalty. If the bot doesn't move outside
+  # a 40-unit radius over ~3 seconds, it pays this per tick.
+  r_stationary_penalty: -0.02
+  stationary_radius: 40.0
+  stationary_window: 45
 
   # PBRS approach potential (provably policy-invariant).
   r_pbrs_scale: 0.1
-  pbrs_gamma: 0.99                  # keep synced with training gamma
+  pbrs_gamma: 0.99
   pbrs_ideal_dist: 200.0
   pbrs_decay: 200.0
 
