@@ -33,6 +33,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .spaces import flatten_dict_obs
+
 log = logging.getLogger(__name__)
 
 
@@ -67,20 +69,17 @@ def collect_demos(
 
     obs_list, infos = env.reset()
 
-    # Buffers accumulate across ticks. Each obs is a dict of ndarrays. We stack
-    # by field at the end.
+    # Buffers accumulate across ticks. Each obs is flattened via
+    # flatten_dict_obs() to expose enemies_feats / enemies_mask / etc as flat
+    # keys — same layout the policy network expects. We accumulate per-key
+    # numpy arrays and stack at the end.
     per_field_stacks: dict[str, list[np.ndarray]] = {}
-    per_field_nested: dict[str, dict[str, list[np.ndarray]]] = {}
     action_stack: list[np.ndarray] = []
 
     def _accumulate_obs(o: dict[str, Any]) -> None:
-        for k, v in o.items():
-            if isinstance(v, dict):
-                per_field_nested.setdefault(k, {})
-                for kk, vv in v.items():
-                    per_field_nested[k].setdefault(kk, []).append(np.asarray(vv))
-            else:
-                per_field_stacks.setdefault(k, []).append(np.asarray(v))
+        flat = flatten_dict_obs(o)
+        for k, v in flat.items():
+            per_field_stacks.setdefault(k, []).append(np.asarray(v))
 
     total_steps = 0
     t_start = time.time()
@@ -104,7 +103,7 @@ def collect_demos(
             sps = total_steps / max(1e-6, elapsed)
             log.info("[demos] step %s/%s  sps=%.0f", f"{total_steps:,}", f"{n_steps:,}", sps)
 
-    # Stack all buffers into arrays. Save as .npz with flattened keys.
+    # Stack all buffers into arrays. Save as .npz with flat keys.
     log.info("[demos] stacking %d transitions...", len(action_stack))
     save_dict: dict[str, np.ndarray] = {
         "actions": np.stack(action_stack),
@@ -112,9 +111,6 @@ def collect_demos(
     }
     for k, buf in per_field_stacks.items():
         save_dict[f"obs__{k}"] = np.stack(buf)
-    for k, nested in per_field_nested.items():
-        for kk, buf in nested.items():
-            save_dict[f"obs__{k}__{kk}"] = np.stack(buf)
 
     np.savez_compressed(save_path, **save_dict)
     log.info(
@@ -130,47 +126,43 @@ def collect_demos(
 def _load_demos_to_tensors(demos_path: str | Path, device: torch.device) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     """Load a .npz demo file and return (obs_dict, actions) as tensors on `device`.
 
-    The obs dict is reconstructed to match the encode_obs output shape:
-    top-level keys carry non-dict values; keys with __ separators reconstruct
-    the nested {"enemies": {"feats": ..., "mask": ...}, ...} structure.
+    Handles both:
+      * Flat keys: obs__enemies_feats, obs__enemies_mask, obs__player, ...
+        (current format, matches flatten_dict_obs output)
+      * Nested keys: obs__enemies__feats, obs__enemies__mask, ...
+        (legacy format from older commits — auto-converted to flat)
     """
     log.info("loading demos from %s", demos_path)
     data = np.load(demos_path)
     keys = list(data.keys())
 
     actions = torch.as_tensor(np.asarray(data["actions"]), dtype=torch.long, device=device)
-    obs: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {}
+    obs: dict[str, torch.Tensor] = {}
 
     for key in keys:
-        if key in ("actions", "n_transitions"):
-            continue
-        if not key.startswith("obs__"):
+        if key in ("actions", "n_transitions") or not key.startswith("obs__"):
             continue
         parts = key.split("__")
         arr = np.asarray(data[key])
-        t = torch.as_tensor(arr, dtype=torch.float32, device=device)
+        # Cast mask fields to float32 (encode_obs uses int8 but model expects float32).
+        dtype = torch.float32
         if len(parts) == 2:
-            # obs__<field>
-            obs[parts[1]] = t
+            flat_key = parts[1]
         elif len(parts) == 3:
-            # obs__<field>__<subfield>
-            sub = obs.setdefault(parts[1], {})
-            assert isinstance(sub, dict)
-            sub[parts[2]] = t
+            # Legacy nested layout: obs__enemies__feats -> enemies_feats
+            flat_key = f"{parts[1]}_{parts[2]}"
+        else:
+            log.warning("skipping unrecognized demo key: %s", key)
+            continue
+        obs[flat_key] = torch.as_tensor(arr, dtype=dtype, device=device)
 
-    log.info("loaded %d transitions, obs keys: %s", actions.shape[0], list(obs.keys()))
+    log.info("loaded %d transitions, obs keys: %s", actions.shape[0], sorted(obs.keys()))
     return obs, actions
 
 
-def _slice_obs(obs: dict, idx: torch.Tensor) -> dict:
-    """Index into every leaf tensor in a (possibly nested) obs dict."""
-    out: dict = {}
-    for k, v in obs.items():
-        if isinstance(v, dict):
-            out[k] = {kk: vv[idx] for kk, vv in v.items()}
-        else:
-            out[k] = v[idx]
-    return out
+def _slice_obs(obs: dict[str, torch.Tensor], idx: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Index into every tensor in a flat obs dict."""
+    return {k: v[idx] for k, v in obs.items()}
 
 
 def bc_pretrain(
