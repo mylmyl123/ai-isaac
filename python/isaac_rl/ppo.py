@@ -79,6 +79,11 @@ class PPOConfig:
     # nearest_proj_dist) all normalised. MSE loss added to PPO's total loss
     # with coefficient aux_coef. Set to 0 to disable.
     aux_coef: float = 0.1
+
+    # Early-stop the PPO update loop if approx_kl exceeds this threshold.
+    # Prevents catastrophic single-update drift. Standard value is 0.015-0.03
+    # (Schulman 2017); we use 0.03 as a soft ceiling. Set to 0 to disable.
+    target_kl: float = 0.03
     # Kickstarting (Schmitt et al. 2018): KL divergence penalty toward a
     # frozen BC-pretrained teacher. Prevents catastrophic forgetting of
     # BC behavior during early PPO. Coefficient decays linearly to zero
@@ -317,8 +322,12 @@ def train(cfg: PPOConfig) -> None:
     policy_cfg = PolicyConfig(**cfg.policy)
     policy = IsaacPolicy(policy_cfg).to(device)
     rnd = RND(feat_dim=policy_cfg.trunk_dim).to(device) if cfg.use_rnd else None
-    optim = torch.optim.Adam(policy.parameters(), lr=cfg.lr)
-    rnd_optim = torch.optim.Adam(rnd.predictor.parameters(), lr=cfg.rnd_lr) if rnd is not None else None
+    # Adam optimizer: PPO-tuned parameters (Andrychowicz 2020, Engstrom 2020).
+    # PyTorch's default eps=1e-8 is too small for RL; PPO's official impl
+    # uses 1e-5, which gives a wider effective learning rate range and better
+    # convergence on non-stationary RL objectives.
+    optim = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
+    rnd_optim = torch.optim.Adam(rnd.predictor.parameters(), lr=cfg.rnd_lr, eps=1e-5) if rnd is not None else None
 
     # --- logging --------------------------------------------------------
     run_dir = Path(cfg.checkpoint_dir) / cfg.run_name / time.strftime("%Y%m%d-%H%M%S")
@@ -524,17 +533,35 @@ def train(cfg: PPOConfig) -> None:
 
             action_np = action.cpu().numpy()
             next_obs_np, rewards_np, terms, truncs, infos = env.step(action_np)
-            dones_np = np.logical_or(terms, truncs)
+            # IMPORTANT: for GAE we need to distinguish TRUE terminals from
+            # rollout-boundary truncations. True terminals (death) get no
+            # bootstrap; truncations get bootstrapped from the value network.
+            # We track both separately: dones_np = only true terminals.
+            # trunc_np = only truncations (episode continues in the game world,
+            # we just chose to stop rolling).
+            #
+            # Standard PPO GAE handling (Andrychowicz 2020, Sutton & Barto):
+            #   at truncation: delta = r + gamma * V(s_next) - V(s)  (bootstrap)
+            #   at termination: delta = r - V(s)                     (no bootstrap)
+            dones_np = np.asarray(terms)               # true terminals only
+            trunc_np = np.asarray(truncs)               # truncations only
+            reset_np = np.logical_or(dones_np, trunc_np)   # for hidden-state reset
 
             rewards_t = torch.as_tensor(rewards_np, dtype=torch.float32, device=device) + int_rew
             dones_next = torch.as_tensor(dones_np, dtype=torch.float32, device=device)
+            resets_next = torch.as_tensor(reset_np, dtype=torch.float32, device=device)
             rollout_rewards.append(rewards_t)
             rollout_dones.append(dones_next)
 
             ep_rewards += rewards_np
             ep_lens += 1
+            # Handle episode completions for both TRUE terminations (death) and
+            # truncations (rollout boundary hit game reset). Both cause the
+            # game world to reset, so both count as "episode ended" for
+            # logging. Only true terminations are counted as dones for GAE.
+            episode_ended = np.logical_or(dones_np, trunc_np)
             for i in range(cfg.n_envs):
-                if dones_np[i]:
+                if episode_ended[i]:
                     completed_rewards.append(float(ep_rewards[i]))
                     completed_lens.append(int(ep_lens[i]))
                     ep_rewards[i] = 0.0
@@ -545,7 +572,10 @@ def train(cfg: PPOConfig) -> None:
                         completed_extras.setdefault(k, []).append(float(v))
 
             obs_t = batch_obs_to_tensors(next_obs_np, device)
-            dones_t = dones_next
+            # dones_t is used to reset the GRU hidden state on the NEXT step.
+            # It must fire on ANY episode-end (termination OR truncation)
+            # because both cause the game world to reset.
+            dones_t = resets_next
             global_step += cfg.n_envs
 
         # --- bootstrap value --------------------------------------------
@@ -606,9 +636,12 @@ def train(cfg: PPOConfig) -> None:
         T = cfg.rollout_steps
         B = cfg.n_envs
         n_samples = T * B
-        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": []}
+        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": [], "approx_kl": [], "clip_frac": []}
 
-        for _ in range(cfg.n_epochs):
+        early_stop = False
+        for epoch_i in range(cfg.n_epochs):
+            if early_stop:
+                break
             # Recompute sequence forward each epoch — recurrent PPO can't shuffle timesteps
             # within an env, but we CAN shuffle across envs and split minibatches env-wise.
             # For a single-GPU workhorse we just do full-batch minibatching env-major.
@@ -638,6 +671,18 @@ def train(cfg: PPOConfig) -> None:
                 surr1 = ratio * mb_adv
                 surr2 = torch.clamp(ratio, 1 - cfg.clip, 1 + cfg.clip) * mb_adv
                 policy_loss = -torch.min(surr1, surr2).mean()
+                # Diagnostic: approximate KL divergence between old and new
+                # policy (Schulman 2020 form: k3 = (r-1) - log(r), unbiased,
+                # low-variance estimator). Log this to monitor for policy
+                # drift; if approx_kl grows past ~0.02, PPO is likely
+                # over-updating (consider lowering LR or clip).
+                # Also compute clip fraction (how often the clip actually
+                # engaged). If clip fraction is very high (>0.5), the policy
+                # is trying to make big jumps and clip is holding it back.
+                with torch.no_grad():
+                    log_ratio = new_logp - mb_old_logp
+                    approx_kl = ((log_ratio.exp() - 1) - log_ratio).mean()
+                    clip_frac = ((ratio - 1.0).abs() > cfg.clip).float().mean()
                 # Value function loss with optional clipping (cfg.vf_clip>0).
                 # Prevents big single-update jumps in the value net; standard
                 # PPO trick (paper Schulman 2017 mentions it; widely used).
@@ -715,6 +760,19 @@ def train(cfg: PPOConfig) -> None:
                 if kickstart_loss_val > 0:
                     losses["kickstart"].append(kickstart_loss_val)
                 losses["entropy"].append(float(-entropy_loss.item()))
+                losses["approx_kl"].append(float(approx_kl.item()))
+                losses["clip_frac"].append(float(clip_frac.item()))
+
+                # Early-stop the epoch loop if approx_kl exceeds target_kl.
+                # Standard PPO safety mechanism to prevent catastrophic drift
+                # on a single rollout. Break at the minibatch level so we
+                # don't waste compute after the policy has already shifted
+                # too far.
+                if cfg.target_kl > 0 and float(approx_kl.item()) > cfg.target_kl:
+                    early_stop = True
+                    break
+            if early_stop:
+                break
 
         # --- RND predictor update ---------------------------------------
         if rnd is not None:
