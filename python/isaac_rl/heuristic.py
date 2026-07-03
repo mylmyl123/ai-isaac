@@ -73,19 +73,24 @@ class HeuristicConfig:
     max_projectiles_for_threat: int = 8
 
     # Fallback behavior when no enemies visible
-    idle_move_prob: float = 0.4        # probability of moving when idle
+    idle_move_prob: float = 0.7        # was 0.4 (2026-07-03) — boost so BC learns to
+                                       # move more often in cleared rooms
     idle_move_choices: tuple = (1, 3, 5, 7)  # cardinal directions
 
     # Deterministic seed for stochastic tie-breaks
     seed: int = 0
 
-    # Door-seeking behavior. Historically activated when the room was clear;
-    # DISABLED by default after user report of bot walking into walls at 50K
-    # steps (BC learned biased/wrong door direction due to sparse demo data
-    # in cleared-room states — classic BC distribution-shift failure mode).
-    # To re-enable: set enable_door_seeking=True below AND
-    # r_seek_door_when_clear > 0 in reward config.
-    enable_door_seeking: bool = False
+    # Door-seeking behavior. RE-ENABLED 2026-07-03 (was disabled after user
+    # report of BC bias in earlier build).
+    # We now have:
+    #   - Explicit spatial obs field (unit vector to nearest OPEN door) so
+    #     the network doesn't need to infer door direction from raw obs.
+    #   - Randomized slot iteration in _pick_door_move (see method comment)
+    #     so BC doesn't learn a LEFT-first bias.
+    #   - Larger demo dataset (500K+) so tail-case door directions are seen.
+    #   - Room_bounds field in obs.lua, enabling potential-based door reward.
+    # These fixes together make door-seeking demos SAFE to learn from.
+    enable_door_seeking: bool = True
     door_slot_to_move: tuple = (7, 1, 3, 5)   # LEFT, UP, RIGHT, DOWN -> move action
     prefer_normal_doors: bool = True
 

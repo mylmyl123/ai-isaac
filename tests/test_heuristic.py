@@ -348,11 +348,13 @@ def test_door_selection_spreads_over_multiple_open_doors():
     assert len(picks) >= 3, f"door pick distribution is biased: {picks}"
 
 
-def test_door_seeking_disabled_by_default():
-    """Regression: after user report of wall-hitting, door-seeking is OFF
-    by default in the heuristic. Enable via HeuristicConfig(enable_door_seeking=True).
+def test_door_seeking_enabled_by_default():
+    """Since 2026-07-03, door-seeking is ENABLED by default (see
+    HeuristicConfig.enable_door_seeking). Previously disabled after early
+    user report of wall-hitting, but with improved spatial obs (v2) and
+    larger BC demo pool, BC no longer learns the biased LEFT-first behavior.
     """
-    p = HeuristicPolicy(HeuristicConfig(idle_move_prob=0.0))  # no random wander
+    p = HeuristicPolicy(HeuristicConfig(idle_move_prob=0.0))
     doors = [
         [1, 1, 0, 0, 0, 0],   # LEFT open
         [1, 1, 0, 0, 0, 0],   # UP open
@@ -361,5 +363,7 @@ def test_door_seeking_disabled_by_default():
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
     a = p.act(obs)
-    # With door-seeking disabled AND idle_move_prob=0, should stay idle.
-    assert a[0] == 0
+    # With door-seeking enabled, heuristic picks one of the door directions
+    # (7=LEFT, 1=UP, 3=RIGHT, 5=DOWN). NOT idle (0).
+    assert a[0] != 0
+    assert a[0] in (1, 3, 5, 7)
