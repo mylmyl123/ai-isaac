@@ -187,15 +187,25 @@ class HeuristicPolicy:
         are (exists, is_open, is_locked, is_boss, is_treasure, is_secret).
         Prefers normal doors over special-purpose ones when both are open.
         Returns a movement action (1..8) or None if no viable door.
+
+        RANDOMIZED slot order: if we always iterated 0..3, BC would learn a
+        LEFT-first bias ("go left in every cleared room") because slot 0 is
+        LEFT. In rooms without a LEFT door, the trained network would then
+        walk into the left wall. Shuffling the slot order per call spreads
+        the demo distribution across all four cardinal directions.
         """
         cfg = self.cfg
         doors = raw_obs.get("doors")
         if not doors:
             return None
 
+        n_slots = min(4, len(doors))
+        slot_order = list(range(n_slots))
+        self._rng.shuffle(slot_order)
+
         # Two passes: normal doors first (if prefer_normal_doors), then any open door.
         for pass_idx in (0, 1):
-            for slot in range(min(4, len(doors))):
+            for slot in slot_order:
                 d = doors[slot]
                 if not d or len(d) < 6:
                     continue

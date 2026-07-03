@@ -247,7 +247,7 @@ def _make_obs_with_doors(doors, is_clear=True):
 
 
 def test_seeks_right_door_when_room_clear():
-    """Room clear with only a RIGHT door open -> move right."""
+    """Room clear with only a RIGHT door open -> move right (only option)."""
     p = HeuristicPolicy()
     # slot 2 = RIGHT. Fields: [exists, is_open, is_locked, is_boss, is_treas, is_secret]
     doors = [
@@ -258,10 +258,11 @@ def test_seeks_right_door_when_room_clear():
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
     a = p.act(obs)
-    assert a[0] == 3   # move right
+    assert a[0] == 3   # move right (only viable door)
 
 
 def test_seeks_up_door_when_room_clear():
+    """Only UP door open -> move up."""
     p = HeuristicPolicy()
     doors = [
         [0, 0, 0, 0, 0, 0],
@@ -271,11 +272,11 @@ def test_seeks_up_door_when_room_clear():
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
     a = p.act(obs)
-    assert a[0] == 1   # move up
+    assert a[0] == 1   # move up (only viable door)
 
 
 def test_prefers_normal_door_over_boss_door():
-    """When both normal and boss doors are open, take the normal one."""
+    """When both normal and boss doors are open, take the normal one (regardless of slot order)."""
     p = HeuristicPolicy()
     doors = [
         [1, 1, 0, 1, 0, 0],   # LEFT: boss (is_boss=1)
@@ -284,11 +285,15 @@ def test_prefers_normal_door_over_boss_door():
         [0, 0, 0, 0, 0, 0],
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
-    a = p.act(obs)
-    assert a[0] == 3   # right (normal), not 7 (left, boss)
+    # Try several times to average out the randomized slot order
+    # — all runs should pick RIGHT (normal), never LEFT (boss).
+    for _ in range(20):
+        a = p.act(obs)
+        assert a[0] == 3, f"picked non-normal door: move={a[0]}"
 
 
 def test_skips_locked_doors():
+    """Locked door isn't picked, open unlocked one is."""
     p = HeuristicPolicy()
     doors = [
         [1, 1, 1, 0, 0, 0],   # LEFT: locked
@@ -297,8 +302,9 @@ def test_skips_locked_doors():
         [0, 0, 0, 0, 0, 0],
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
-    a = p.act(obs)
-    assert a[0] == 3   # right (open), not 7 (locked)
+    for _ in range(20):
+        a = p.act(obs)
+        assert a[0] == 3, f"picked locked door: move={a[0]}"
 
 
 def test_no_door_seeking_when_not_clear():
@@ -314,3 +320,24 @@ def test_no_door_seeking_when_not_clear():
     a = p.act(obs)
     # No enemies, no threats, not clear, no idle wander -> should be idle.
     assert a[0] == 0
+
+
+def test_door_selection_spreads_over_multiple_open_doors():
+    """When multiple doors are open, over many calls the heuristic should pick
+    each one at least sometimes (no LEFT-bias)."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0))
+    doors = [
+        [1, 1, 0, 0, 0, 0],   # LEFT open
+        [1, 1, 0, 0, 0, 0],   # UP open
+        [1, 1, 0, 0, 0, 0],   # RIGHT open
+        [1, 1, 0, 0, 0, 0],   # DOWN open
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=True)
+    picks = set()
+    for _ in range(50):
+        a = p.act(obs)
+        picks.add(int(a[0]))
+    # Should have picked at least 3 different directions across 50 samples.
+    # 4 uniform choices, 50 draws, probability of one direction never chosen
+    # is very small.
+    assert len(picks) >= 3, f"door pick distribution is biased: {picks}"
