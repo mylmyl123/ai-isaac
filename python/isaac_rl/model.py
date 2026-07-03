@@ -69,6 +69,22 @@ class PolicyConfig:
     n_attn_heads: int = 4          # was 2; more attention heads
     n_enemy_attn_layers: int = 2
     n_proj_attn_layers: int = 1
+    # B3: Predict-future-rewards aux task horizon (number of future ticks
+    # to predict). N=8 covers ~130ms of game time at 60Hz — enough for
+    # short-term consequence modeling.
+    reward_pred_horizon: int = 8
+    # B4: Latent variable conditioning. Per-episode z ~ N(0, I) is sampled
+    # at reset and fed to the policy as additional obs. Encourages strategic
+    # diversity (aggressive/defensive/exploratory play styles emerge across
+    # episodes). Set z_dim=0 to disable.
+    z_dim: int = 16
+    # B1: Distributional value function (DreamerV3-style twohot categorical).
+    # Instead of predicting a scalar E[V(s)], predict a categorical distribution
+    # over N atoms. Reduces value function variance dramatically.
+    # Set value_atoms=1 to fall back to scalar value.
+    value_atoms: int = 51        # 51 atoms = C51-standard
+    value_v_min: float = -20.0   # min return (in symlog space if using symlog_rewards)
+    value_v_max: float = 20.0    # max return
 
 
 def _mlp(sizes: list[int], activate_final: bool = False, layer_norm: bool = False) -> nn.Sequential:
@@ -196,10 +212,14 @@ class IsaacPolicy(nn.Module):
         # N frames of (nx, ny, vx, vy) to give the network explicit access
         # to short-term dynamics. Redundant with GRU but helps early BC.
         self.player_history_mlp = _mlp([PLAYER_HISTORY_DIM, 48, 48], activate_final=True, layer_norm=True)
+        # B4: Latent variable z MLP. Small dedicated pathway for the
+        # per-episode strategic latent. Zero-dim -> disabled.
+        self.z_mlp = _mlp([c.z_dim, 32, 32], activate_final=True, layer_norm=True) if c.z_dim > 0 else None
+        z_out_dim = 32 if c.z_dim > 0 else 0
 
         # trunk_in is computed from the actual per-stream output sizes rather
         # than hardcoded constants so future capacity changes stay consistent.
-        static_dims = 192 + 96 + 96 + 48 + 48 + 48 + 48   # player + global + passives + last_act + doors + spatial + player_history
+        static_dims = 192 + 96 + 96 + 48 + 48 + 48 + 48 + z_out_dim  # +z_out_dim if z enabled
         trunk_in = static_dims + c.entity_dim + c.proj_dim + c.pickup_dim + gc2
         self.trunk = _mlp([trunk_in, c.trunk_dim, c.trunk_dim], activate_final=True, layer_norm=True)
 
@@ -212,7 +232,13 @@ class IsaacPolicy(nn.Module):
 
         # Factored action heads.
         self.heads = nn.ModuleList([nn.Linear(c.gru_dim, n) for n in ACTION_FACTORS.tolist()])
-        self.value_head = nn.Linear(c.gru_dim, 1)
+        # B1: Distributional value head. Outputs `value_atoms` logits;
+        # softmax -> categorical distribution over returns.
+        # value_atoms=1 falls back to scalar value (backward-compat).
+        self.value_head = nn.Linear(c.gru_dim, c.value_atoms)
+        # Support atoms (registered as buffer so .to(device) transfers them).
+        support = torch.linspace(c.value_v_min, c.value_v_max, c.value_atoms)
+        self.register_buffer("value_support", support, persistent=False)
 
         # Auxiliary regression heads (see aux_labels_from_obs in ppo.py). Each
         # forces the trunk to encode a summary statistic of the current obs as
@@ -223,6 +249,13 @@ class IsaacPolicy(nn.Module):
         #   [1] enemy count normalised by MAX_ENEMIES
         #   [2] nearest-projectile normalised distance
         self.aux_head = nn.Linear(c.gru_dim, 3)
+
+        # B3: Predict-future-rewards aux head (UNREAL-style, Jaderberg 2017).
+        # Predicts the next N tick rewards from the current hidden state.
+        # Forces the trunk to be PREDICTIVE (not just descriptive), which
+        # accelerates value function convergence.
+        # N = c.reward_pred_horizon (default 8). Output shape [B, N].
+        self.reward_pred_head = nn.Linear(c.gru_dim, c.reward_pred_horizon)
 
         # ---- Weight initialization (see module docstring) ------------------
         # Hidden layers (everything except heads): orthogonal, gain=sqrt(2).
@@ -239,9 +272,11 @@ class IsaacPolicy(nn.Module):
         # - Value head: gain=1.0 keeps standard scaling for regression.
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
         nn.init.zeros_(self.value_head.bias)
-        # - Aux head: gain=1.0 like value head (also regression).
+        # Also init the new heads.
         nn.init.orthogonal_(self.aux_head.weight, gain=1.0)
         nn.init.zeros_(self.aux_head.bias)
+        nn.init.orthogonal_(self.reward_pred_head.weight, gain=1.0)
+        nn.init.zeros_(self.reward_pred_head.bias)
 
     # -- encoders -----------------------------------------------------------
 
@@ -269,7 +304,13 @@ class IsaacPolicy(nn.Module):
         spatial = self.spatial_mlp(obs["spatial"])
         player_hist = self.player_history_mlp(obs["player_history"])
 
-        x = torch.cat([player, global_, passives, last_act, enemies, projs, pickups, grid, doors, spatial, player_hist], dim=-1)
+        streams = [player, global_, passives, last_act, enemies, projs, pickups, grid, doors, spatial, player_hist]
+        if self.z_mlp is not None:
+            z = obs.get("z")
+            if z is None:
+                z = torch.zeros(player.shape[0], self.cfg.z_dim, device=player.device)
+            streams.append(self.z_mlp(z))
+        x = torch.cat(streams, dim=-1)
         return self.trunk(x)
 
     # -- rollout step -------------------------------------------------------
@@ -293,10 +334,46 @@ class IsaacPolicy(nn.Module):
         new_hidden = self.gru(h, hidden)
         new_hidden_ln = self.gru_ln(new_hidden)
         logits = [head(new_hidden_ln) for head in self.heads]
-        value = self.value_head(new_hidden_ln).squeeze(-1)
+        value = self._value_from_head(self.value_head(new_hidden_ln))
         # Return the un-normalized hidden state so the GRU sees consistent
         # state across steps (LayerNorm is applied only for the readouts).
         return logits, value, new_hidden
+
+    # B1: distributional value helpers -----------------------------------
+
+    def _value_from_head(self, logits: torch.Tensor) -> torch.Tensor:
+        """Convert value_head output to a scalar E[V].
+
+        If value_atoms == 1: pass-through (scalar mode, backward-compat).
+        Else: softmax + expected value over the support atoms.
+        """
+        if logits.shape[-1] == 1:
+            return logits.squeeze(-1)
+        probs = torch.softmax(logits, dim=-1)
+        return (probs * self.value_support).sum(-1)
+
+    def value_twohot_target(self, returns: torch.Tensor) -> torch.Tensor:
+        """DreamerV3-style twohot encoding of scalar returns.
+
+        Given returns of arbitrary shape [...] produce target distribution
+        [..., value_atoms] with prob mass on the two atoms nearest to the
+        return, split proportionally to distance.
+        """
+        support = self.value_support
+        n_atoms = support.shape[0]
+        if n_atoms == 1:
+            return returns.unsqueeze(-1)
+        r = returns.clamp(support[0], support[-1])
+        delta = (support[-1] - support[0]) / (n_atoms - 1)
+        idx_float = (r - support[0]) / delta
+        idx_lo = idx_float.floor().long().clamp(0, n_atoms - 1)
+        idx_hi = (idx_lo + 1).clamp(0, n_atoms - 1)
+        frac_hi = idx_float - idx_lo.float()
+        frac_lo = 1.0 - frac_hi
+        target = torch.zeros(*r.shape, n_atoms, device=r.device)
+        target.scatter_add_(-1, idx_lo.unsqueeze(-1), frac_lo.unsqueeze(-1))
+        target.scatter_add_(-1, idx_hi.unsqueeze(-1), frac_hi.unsqueeze(-1))
+        return target
 
     def aux_predict(self, hidden: torch.Tensor) -> torch.Tensor:
         """Return auxiliary regression predictions from a hidden state.
@@ -339,9 +416,13 @@ class IsaacPolicy(nn.Module):
         flat_ln = self.gru_ln(flat)
 
         logits = [head(flat_ln) for head in self.heads]
-        values = self.value_head(flat_ln).squeeze(-1)
+        # B1: distributional value. Returns SCALAR expected value for GAE;
+        # for the loss, the trainer accesses .value_head_logits() separately.
+        value_logits = self.value_head(flat_ln)
+        values = self._value_from_head(value_logits)
         aux = self.aux_head(flat_ln)
-        return logits, values, aux
+        reward_pred = self.reward_pred_head(flat_ln)
+        return logits, values, aux, reward_pred, value_logits
 
     # -- action distribution helpers ----------------------------------------
 

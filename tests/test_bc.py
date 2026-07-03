@@ -16,7 +16,7 @@ from isaac_rl.spaces import (
     MAX_ENEMIES, MAX_PICKUPS, MAX_PROJECTILES,
     ENEMY_FEATS, PICKUP_FEATS, PROJ_FEATS,
     PLAYER_DIM, GLOBAL_DIM, PASSIVES_K, ROOM_H, ROOM_W,
-    SPATIAL_DIM, PLAYER_HISTORY_DIM,
+    SPATIAL_DIM, PLAYER_HISTORY_DIM, Z_DIM,
     ACTION_FACTORS,
     flatten_dict_obs,
 )
@@ -46,6 +46,7 @@ def _fake_encoded_obs() -> dict:
         "last_action": np.zeros(len(ACTION_FACTORS_LEN), dtype=np.int8),
         "spatial": np.zeros(SPATIAL_DIM, dtype=np.float32),
         "player_history": np.zeros(PLAYER_HISTORY_DIM, dtype=np.float32),
+        "z": np.zeros(Z_DIM, dtype=np.float32),
     }
 
 

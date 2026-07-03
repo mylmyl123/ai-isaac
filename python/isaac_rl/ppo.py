@@ -33,6 +33,8 @@ try:
 except ImportError:
     SummaryWriter = None
 
+from .bc import _load_demos_to_tensors, bc_pretrain
+from .curriculum import CurriculumScheduler
 from .model import IsaacPolicy, PolicyConfig
 from .rnd import RND
 from .spaces import ACTION_FACTORS, MAX_ENEMIES, MAX_PROJECTILES, flatten_dict_obs
@@ -79,6 +81,10 @@ class PPOConfig:
     # nearest_proj_dist) all normalised. MSE loss added to PPO's total loss
     # with coefficient aux_coef. Set to 0 to disable.
     aux_coef: float = 0.1
+    # B3: Predict-future-rewards aux task coefficient. Model predicts next
+    # N tick rewards from current hidden state. Forces PREDICTIVE
+    # representations (not just descriptive). Set to 0 to disable.
+    reward_pred_coef: float = 0.05
 
     # Early-stop the PPO update loop if approx_kl exceeds this threshold.
     # Prevents catastrophic single-update drift. Standard value is 0.015-0.03
@@ -91,6 +97,15 @@ class PPOConfig:
     # competent and we don't want to destroy it with huge early gradients.
     # Set to 0 to disable warmup entirely.
     lr_warmup_updates: int = 100
+
+    # B4: Latent variable conditioning (Gaussian per-episode z). z_dim>0
+    # enables. Auto-syncs with PolicyConfig.z_dim.
+
+    # B2: Curriculum learning stages. Each stage is a dict with
+    # 'until_step' and 'overrides' keys. Applied by CurriculumScheduler.
+    # See python/isaac_rl/curriculum.py for supported overrides.
+    # Empty list disables curriculum entirely.
+    curriculum: list = field(default_factory=list)
 
     # Weight decay (AdamW instead of Adam). Small L2 regularisation.
     # Prevents overfitting to demo distribution, encourages generalisation.
@@ -463,6 +478,13 @@ def train(cfg: PPOConfig) -> None:
                         teacher_ckpt_path)
             cfg.kickstart_coef = 0.0
 
+    # ---- B2: Curriculum scheduler ----------------------------------------
+    # Applies stage-based hyperparameter overrides (entropy coef, LR,
+    # reward-shaping weights) based on global_step. Empty list = disabled.
+    curriculum = CurriculumScheduler(cfg.curriculum)
+    if curriculum.stages:
+        log.info("curriculum enabled: %d stages", len(curriculum.stages))
+
     # Helper: save a checkpoint at the current state. Called every
     # cfg.checkpoint_every steps AND on any exit (Ctrl+C, exception, normal
     # completion) via the finally-block below. Also copies to latest.pt for
@@ -638,6 +660,23 @@ def train(cfg: PPOConfig) -> None:
         # Reassemble sequenced obs by key.
         seq_obs = stack_time_batch(rollout_obs)  # each value [T, B, ...]
 
+        # B2: apply curriculum overrides for the current global_step. This
+        # runs BEFORE the LR schedule so curriculum-adjusted cfg.lr is
+        # respected by warmup / decay computations.
+        if curriculum.stages:
+            # Note: reward_overrides are ignored here since we don't have
+            # per-env access to reward_shapers through vec_env. Only
+            # cfg.ent_coef and cfg.lr are applied. See docs/FUTURE_WORK.md
+            # for full environment-curriculum implementation plan.
+            stage_changed = curriculum.apply(cfg, reward_shaper=None, global_step=global_step)
+            if stage_changed:
+                stage = curriculum.current_stage(global_step)
+                if stage is not None:
+                    log.info("curriculum -> stage until_step=%d overrides=%s",
+                             stage.until_step, stage.overrides)
+                else:
+                    log.info("curriculum -> past all stages, using cfg defaults")
+
         # LR schedule: warmup + decay. Warmup ramps LR from 0 to cfg.lr
         # linearly over the first lr_warmup_updates PPO updates. This
         # protects BC-pretrained weights from being blown out by the very
@@ -658,7 +697,7 @@ def train(cfg: PPOConfig) -> None:
         T = cfg.rollout_steps
         B = cfg.n_envs
         n_samples = T * B
-        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": [], "approx_kl": [], "clip_frac": []}
+        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": [], "approx_kl": [], "clip_frac": [], "reward_pred": []}
 
         early_stop = False
         for epoch_i in range(cfg.n_epochs):
@@ -674,9 +713,10 @@ def train(cfg: PPOConfig) -> None:
                     continue
                 mb_seq_obs = {k: v[:, mb_envs] for k, v in seq_obs.items()}
                 mb_dones = dones_seq[:, mb_envs]
+                mb_rewards = rewards_seq[:, mb_envs]   # for B3 future-reward prediction
                 mb_init = init_hidden[mb_envs]
 
-                logits_list, values_new, aux_pred = policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
+                logits_list, values_new, aux_pred, reward_pred, value_logits = policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
 
                 # Flatten targets for this minibatch (T, |mb|).
                 idx_flat = ((torch.arange(T, device=device)[:, None] * B) + mb_envs[None, :]).reshape(-1)
@@ -705,10 +745,18 @@ def train(cfg: PPOConfig) -> None:
                     log_ratio = new_logp - mb_old_logp
                     approx_kl = ((log_ratio.exp() - 1) - log_ratio).mean()
                     clip_frac = ((ratio - 1.0).abs() > cfg.clip).float().mean()
-                # Value function loss with optional clipping (cfg.vf_clip>0).
-                # Prevents big single-update jumps in the value net; standard
-                # PPO trick (paper Schulman 2017 mentions it; widely used).
-                if cfg.vf_clip > 0:
+                # Value function loss. B1: if value_atoms>1, use distributional
+                # cross-entropy loss (DreamerV3-style twohot target). Else
+                # fall back to scalar MSE (backward-compat).
+                if policy.cfg.value_atoms > 1:
+                    with torch.no_grad():
+                        # Twohot-encode the target returns into a categorical
+                        # distribution over value_support atoms.
+                        target_dist = policy.value_twohot_target(mb_ret)
+                    log_probs = F.log_softmax(value_logits, dim=-1)
+                    # Cross-entropy: -sum(target * log_prob).
+                    value_loss = -(target_dist * log_probs).sum(-1).mean()
+                elif cfg.vf_clip > 0:
                     values_clipped = mb_old_values + torch.clamp(
                         values_new - mb_old_values, -cfg.vf_clip, cfg.vf_clip
                     )
@@ -732,12 +780,56 @@ def train(cfg: PPOConfig) -> None:
                     aux_loss = F.mse_loss(aux_pred, aux_targets)
                     loss = loss + cfg.aux_coef * aux_loss
                     aux_loss_val = float(aux_loss.item())
+                # B3: Predict-future-rewards aux task. For each (t, env) in the
+                # minibatch, predict the next N tick rewards. Target is built
+                # from the rollout's reward sequence with zero-padding at
+                # episode boundaries (masked out of the loss).
+                reward_pred_loss_val = 0.0
+                if cfg.reward_pred_coef > 0:
+                    N = policy.cfg.reward_pred_horizon
+                    # mb_rewards has shape [T, B_mb]. We need future rewards
+                    # for each (t, env) with N-tick lookahead. Also mask
+                    # out targets that cross episode boundaries.
+                    T_mb, B_mb = mb_rewards.shape
+                    fut_targets = torch.zeros(T_mb, B_mb, N, device=device)
+                    fut_mask = torch.zeros(T_mb, B_mb, N, device=device)
+                    for k in range(1, N + 1):
+                        # Shift rewards forward by k; positions past T_mb-1 stay zero.
+                        if k < T_mb:
+                            fut_targets[:T_mb - k, :, k - 1] = mb_rewards[k:, :]
+                            fut_mask[:T_mb - k, :, k - 1] = 1.0
+                        # Zero the mask across episode-end (dones) boundaries.
+                    # Also mask past dones: any k where an episode ended between
+                    # t and t+k should have mask 0. Compute done-cumsum along T.
+                    done_cum = torch.zeros(T_mb, B_mb, device=device)
+                    for k in range(1, N + 1):
+                        if k < T_mb:
+                            # Whether any done occurred in (t, t+k].
+                            any_done = (mb_dones[1:k+1].sum(0) if k > 0 else torch.zeros_like(mb_dones[0]))
+                            # simpler: compute cumulative dones
+                    # simpler mask: only positions where the next k steps have no dones
+                    cum_done_after = torch.cumsum(mb_dones, dim=0)
+                    for k in range(1, N + 1):
+                        if k < T_mb:
+                            # dones between t+1 and t+k inclusive
+                            future_done_count = cum_done_after[k:, :] - cum_done_after[:-k, :]
+                            first_done = (future_done_count > 0).float()
+                            # If any done in (t, t+k], mask this slot.
+                            fut_mask[:T_mb - k, :, k - 1] *= (1.0 - first_done[:T_mb - k, :])
+                    fut_targets_flat = fut_targets.reshape(-1, N)
+                    fut_mask_flat = fut_mask.reshape(-1, N)
+                    # Masked MSE. Denominator uses mask.sum() to normalize
+                    # only over valid slots. Add small epsilon.
+                    sq_err = (reward_pred - fut_targets_flat) ** 2 * fut_mask_flat
+                    reward_pred_loss = sq_err.sum() / (fut_mask_flat.sum() + 1e-8)
+                    loss = loss + cfg.reward_pred_coef * reward_pred_loss
+                    reward_pred_loss_val = float(reward_pred_loss.item())
                 # Kickstarting: KL(current || teacher) added to loss with
                 # linearly-decaying coefficient. Prevents BC forgetting.
                 kickstart_loss_val = 0.0
                 if teacher_policy is not None:
                     with torch.no_grad():
-                        t_logits, _, _ = teacher_policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
+                        t_logits, _, _, _, _ = teacher_policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
                     # Compute per-head KL and sum across factored heads.
                     kl_total = torch.zeros(logits_list[0].shape[0], device=logits_list[0].device)
                     for i, (student_logits, teacher_logits) in enumerate(zip(logits_list, t_logits)):
@@ -779,6 +871,8 @@ def train(cfg: PPOConfig) -> None:
                 losses["value"].append(float(value_loss.item()))
                 if aux_loss_val > 0:
                     losses["aux"].append(aux_loss_val)
+                if reward_pred_loss_val > 0:
+                    losses["reward_pred"].append(reward_pred_loss_val)
                 if kickstart_loss_val > 0:
                     losses["kickstart"].append(kickstart_loss_val)
                 losses["entropy"].append(float(-entropy_loss.item()))

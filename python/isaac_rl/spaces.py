@@ -56,6 +56,10 @@ HISTORY_FRAMES = 4
 HISTORY_FEATS = 4                                    # (nx, ny, vx, vy)
 PLAYER_HISTORY_DIM = HISTORY_FRAMES * HISTORY_FEATS  # 4 * 4 = 16
 
+# B4: Per-episode latent variable z ~ N(0, I). Sampled at reset,
+# constant for the whole episode. Encourages strategic diversity.
+Z_DIM = 16
+
 
 def observation_space() -> spaces.Dict:
     return spaces.Dict({
@@ -82,6 +86,9 @@ def observation_space() -> spaces.Dict:
         # Player history (frame stacking, added 2026-07-02). Last N frames
         # of [nx, ny, vx, vy] flattened. Bootstrapped by the env wrapper.
         "player_history": spaces.Box(-np.inf, np.inf, shape=(PLAYER_HISTORY_DIM,), dtype=np.float32),
+        # B4: Per-episode latent variable (Gaussian). Same across all steps
+        # in the episode; changes at reset. Injected by the env wrapper.
+        "z": spaces.Box(-np.inf, np.inf, shape=(Z_DIM,), dtype=np.float32),
     })
 
 
@@ -314,6 +321,7 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         "spatial": obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)),
         # Player history (frame stacking). Backward compat: zeros if missing.
         "player_history": obs.get("player_history", np.zeros(PLAYER_HISTORY_DIM, dtype=np.float32)),
+        "z": obs.get("z", np.zeros(Z_DIM, dtype=np.float32)),
     }
     for key in ("enemies", "projectiles", "pickups"):
         out[f"{key}_feats"] = obs[key]["feats"]

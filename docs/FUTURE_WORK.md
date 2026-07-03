@@ -312,10 +312,10 @@ dense-reward so this is low priority.
 | A | A4 | Extended BC + demos | config | Better BC baseline | ✅ Documented |
 | A | A5 | LR warmup | 20min | Prevents early instability | ✅ Done |
 | A | A6 | Weight decay (AdamW) | 5min | Mild regularisation | ✅ Done |
-| **B** | B1 | Distributional value (C51) | 1 day | Medium (variance) | If B1 needed |
-| **B** | B2 | Curriculum learning | 2 days | 2-5x sample eff | High-ROI |
-| **B** | B3 | Predict-future-rewards aux | 1 day | Small-medium | Optional |
-| **B** | B4 | Latent variable (AlphaStar) | 1-2 days | Strategy diversity | Optional |
+| B | B1 | Distributional value (twohot categorical) | 1 day | Medium (variance) | ✅ Done |
+| B | B2 | Curriculum learning (reward-shaping curriculum) | 2 days | 2-5x sample eff | ✅ Done (MVP) |
+| B | B3 | Predict-future-rewards aux | 1 day | Small-medium | ✅ Done |
+| B | B4 | Latent variable (AlphaStar) | 1-2 days | Strategy diversity | ✅ Done |
 | **C** | C1 | Learned world model | 2-3 weeks | **5-20x sample eff** | Transformative |
 | **C** | C2 | Transformer policy | 1-2 weeks | Small | Not recommended |
 | **D** | D1 | NGU episodic novelty | 2 days | Small (dense rewards) | Low priority |
@@ -326,16 +326,15 @@ dense-reward so this is low priority.
 
 ## Which items would we implement NEXT if we continued?
 
-If we picked up this work again, the order I'd recommend:
+Phase A and B are complete. The remaining big items:
 
-1. **B2 (Curriculum)** — highest ROI, well-documented gains, moderate effort.
-2. **B1 (Distributional value)** — if value loss stays high after B2.
-3. **C1 (World model)** — if we have 3-4 weeks and want transformative
-   sample efficiency.
-
-**Skip unless specific symptom hits**: B3 (unless representations feel weak),
-B4 (unless we need strategic diversity), C2 (unless long-horizon reasoning
-fails), D1-D3 (unless exploration is stuck).
+1. **C1 (World model)** — the transformative one. 2-3 weeks. Only pursue if
+   Phase B still leaves us sample-inefficient after significant training.
+2. **B2 full environment curriculum** — the current B2 is a reward-shaping
+   curriculum (Python-only). A full environment curriculum requires Lua
+   mod changes to control room spawns. ~1 week extra work.
+3. **D2 (Population-Based Training)** — automated hyperparameter search.
+   Only useful if we have surplus compute (4-8x n_envs).
 
 ---
 

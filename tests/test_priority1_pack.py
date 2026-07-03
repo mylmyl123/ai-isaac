@@ -166,6 +166,7 @@ def _random_batch(B: int = 2) -> dict[str, torch.Tensor]:
         "doors":             torch.zeros(B, 4, 6),
         "spatial":           torch.zeros(B, SPATIAL_DIM),
         "player_history":    torch.zeros(B, PLAYER_HISTORY_DIM),
+        "z":                 torch.zeros(B, 16),   # B4: latent variable
     }
 
 

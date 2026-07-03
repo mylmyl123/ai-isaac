@@ -106,6 +106,11 @@ class SocketIsaacEnv(gym.Env):
         # Zeroed on reset. Updated each step from the incoming obs's player
         # position + velocity.
         self._player_history = np.zeros((HISTORY_FRAMES, HISTORY_FEATS), dtype=np.float32)
+        # B4: Per-episode latent variable z ~ N(0, I). Sampled at reset,
+        # constant for the whole episode. Encourages strategic diversity.
+        # z_dim=0 disables (self._z remains a zero vector).
+        self._z_dim = 16
+        self._z = np.zeros(self._z_dim, dtype=np.float32)
 
         self.reward_shaper = RewardShaper(reward_config)
 
@@ -148,9 +153,10 @@ class SocketIsaacEnv(gym.Env):
             self._player_history[-1] = new_frame
 
     def _build_obs(self, raw: dict) -> dict[str, Any]:
-        """encode_obs + inject frame-stacked player_history field."""
+        """encode_obs + inject frame-stacked player_history and latent z."""
         obs = encode_obs(raw, last_action=self._last_action)
         obs["player_history"] = self._player_history.reshape(-1).copy()
+        obs["z"] = self._z.copy()   # B4: episode-level latent
         return obs
 
     # -- lifecycle --------------------------------------------------------
@@ -245,6 +251,9 @@ class SocketIsaacEnv(gym.Env):
 
         self._steps = 0
         self._last_action[:] = 0
+        # B4: Sample new latent z for this episode.
+        if self._z_dim > 0:
+            self._z = np.random.randn(self._z_dim).astype(np.float32)
         # Reset frame-stacking buffer to the initial player state
         # (broadcasts across all 4 slots so no startup transient).
         self._update_player_history(raw, is_reset=True)
