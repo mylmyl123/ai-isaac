@@ -126,8 +126,32 @@ class IsaacFleet:
                     appid, e,
                 )
 
-    def spawn(self, stagger_s: float = 3.0) -> None:
+    def spawn(self, stagger_s: float | None = None) -> None:
+        """Spawn Isaac processes with stagger.
+
+        stagger_s defaults to 3s for small fleets (<=4 envs) and scales up to
+        6s for larger fleets. Isaac's mod compilation + D3D init is CPU-heavy
+        during startup; too-fast staggers cause CPU saturation and some
+        instances fail to reach the RL-bridge init code within the trainer's
+        accept timeout.
+        """
+        if stagger_s is None:
+            # Auto-scale stagger: 3s for <=4 envs, +1s per additional env, cap at 8s.
+            stagger_s = min(8.0, 3.0 + max(0, self.n_envs - 4))
         self._ensure_steam_appid()
+        # CPU-count sanity check: warn if user is over-subscribing cores.
+        cpu_count = os.cpu_count() or 4
+        safe_max = max(1, cpu_count - 1)
+        if self.n_envs > safe_max:
+            log.warning(
+                "n_envs=%d exceeds recommended max (%d = cpu_count - 1 = %d - 1). "
+                "Isaac processes may fail to start within accept_timeout. "
+                "If you see 'Isaac did not connect on port ... within 300s' errors, "
+                "reduce --override n_envs to %d or lower.",
+                self.n_envs, safe_max, cpu_count, safe_max,
+            )
+        log.info("spawning %d Isaac processes with %.1fs stagger (cpu_count=%d)",
+                 self.n_envs, stagger_s, cpu_count)
         for i in range(self.n_envs):
             self._launch_one(i)
             time.sleep(stagger_s)
