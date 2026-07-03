@@ -112,6 +112,20 @@ class PPOConfig:
     # Standard trick from language model / vision transformer training,
     # increasingly common in RL (Cobbe 2020, DreamerV3).
     weight_decay: float = 1e-5
+
+    # Adaptive entropy floor (2026-07-03). Fights entropy collapse: if actual
+    # entropy drops below entropy_floor, ent_coef is doubled (up to
+    # ent_coef_max) for that update. If entropy is above the floor by a
+    # large margin, ent_coef relaxes back to the base cfg.ent_coef.
+    # Prevents the policy from converging to a deterministic "idle" mode.
+    # Set entropy_floor=0 to disable adaptive entropy entirely.
+    #
+    # For our factored (2 heads: move + shoot) MultiDiscrete action space,
+    # summed max entropy = ln(9) + ln(5) = 2.20 + 1.61 = 3.81. A healthy
+    # exploring policy has entropy ~1.5-2.5. If it drops below ~0.8 the
+    # policy is nearly deterministic and can get stuck.
+    entropy_floor: float = 0.8
+    ent_coef_max: float = 0.1
     # Kickstarting (Schmitt et al. 2018): KL divergence penalty toward a
     # frozen BC-pretrained teacher. Prevents catastrophic forgetting of
     # BC behavior during early PPO. Coefficient decays linearly to zero
@@ -697,7 +711,7 @@ def train(cfg: PPOConfig) -> None:
         T = cfg.rollout_steps
         B = cfg.n_envs
         n_samples = T * B
-        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": [], "approx_kl": [], "clip_frac": [], "reward_pred": []}
+        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": [], "approx_kl": [], "clip_frac": [], "reward_pred": [], "ent_coef_eff": []}
 
         early_stop = False
         for epoch_i in range(cfg.n_epochs):
@@ -767,7 +781,18 @@ def train(cfg: PPOConfig) -> None:
                     value_loss = F.mse_loss(values_new, mb_ret)
                 entropy_loss = -entropy.mean()
 
-                loss = policy_loss + cfg.vf_coef * value_loss + cfg.ent_coef * entropy_loss
+                # Adaptive entropy: if measured entropy is below the floor,
+                # boost ent_coef for this update. Fights entropy collapse.
+                # entropy_loss = -entropy.mean(), so entropy.mean() is +entropy.
+                actual_entropy = float(entropy.mean().item())
+                if cfg.entropy_floor > 0 and actual_entropy < cfg.entropy_floor:
+                    # Linear scaling: at entropy_floor -> 1x, at 0 -> ent_coef_max/ent_coef.
+                    scale = 1.0 + (cfg.entropy_floor - actual_entropy) / cfg.entropy_floor * (cfg.ent_coef_max / max(cfg.ent_coef, 1e-6) - 1.0)
+                    ent_coef_effective = min(cfg.ent_coef_max, cfg.ent_coef * scale)
+                else:
+                    ent_coef_effective = cfg.ent_coef
+
+                loss = policy_loss + cfg.vf_coef * value_loss + ent_coef_effective * entropy_loss
                 # Auxiliary supervised loss (representation learning).
                 aux_loss_val = 0.0
                 if cfg.aux_coef > 0:
@@ -876,6 +901,7 @@ def train(cfg: PPOConfig) -> None:
                 if kickstart_loss_val > 0:
                     losses["kickstart"].append(kickstart_loss_val)
                 losses["entropy"].append(float(-entropy_loss.item()))
+                losses["ent_coef_eff"].append(ent_coef_effective)
                 losses["approx_kl"].append(float(approx_kl.item()))
                 losses["clip_frac"].append(float(clip_frac.item()))
 

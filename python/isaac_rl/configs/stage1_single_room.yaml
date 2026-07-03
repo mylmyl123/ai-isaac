@@ -67,8 +67,17 @@ curriculum:
       ent_coef: 0.05       # higher entropy for exploration
   - until_step: 1500000    # 500K-1.5M: balanced
     overrides:
-      ent_coef: 0.02
-  # Past 1.5M: use cfg defaults (ent_coef=0.02 continues)
+      ent_coef: 0.03
+  - until_step: 3000000    # 1.5M-3M: recovery stage — keep entropy up to
+    overrides:               # prevent late-training collapse into idle behavior
+      ent_coef: 0.025
+  # Past 3M: cfg default (0.02)
+
+# Adaptive entropy floor (2026-07-03). Prevents catastrophic entropy collapse.
+# If measured entropy drops below 0.8, ent_coef is auto-boosted up to 0.1.
+# Standard mechanism from SAC / Agent57 / many production RL systems.
+entropy_floor: 0.8
+ent_coef_max: 0.1
 
 # B1 (distributional value) and B4 (latent z) knobs live in policy.* below.
 

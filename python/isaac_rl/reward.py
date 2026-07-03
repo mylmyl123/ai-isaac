@@ -46,7 +46,13 @@ class RewardConfig:
 
     # ---- Room / exploration (BOOSTED from originals) -------------------
     r_room_clear: float = 2.0             # was 1.0 — clearing a room is a big deal
-    r_new_room: float = 0.2               # was 0.05 — encourage exploration
+    r_new_room: float = 3.0               # was 0.2 — dramatically boosted (2026-07-03)
+    # RATIONALE: 0.2 wasn't enough to overcome the risk aversion trap.
+    # Bots learned "cleared room = safe -4.0 discounted idle return; moving
+    # to door = might enter combat = might die (-3.0)" and picked idle.
+    # At r_new_room=3.0, crossing is strongly incentivized even if the next
+    # room has enemies. Combined with r_door_distance_shaping (PBRS),
+    # this gives dense signal both en-route to and at the moment of crossing.
     r_boss_room_first_entry: float = 0.5
     r_room_clear_speed_bonus: float = 1.0 # bonus if room cleared in < speed_clear_ticks
     speed_clear_ticks: int = 200          # ~13s at 15Hz
