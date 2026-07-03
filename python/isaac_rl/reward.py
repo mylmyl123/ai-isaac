@@ -105,8 +105,21 @@ class RewardConfig:
     # per-tick reward when the bot's velocity is aligned with an open door
     # slot's direction. Combined with a boosted r_new_room, this gives a
     # dense gradient guiding the bot to exits.
-    r_seek_door_when_clear: float = 0.02   # per tick, when velocity is toward an open door
-    seek_door_speed_threshold: float = 0.5 # only credit motion when actually moving
+    r_seek_door_when_clear: float = 0.05   # per tick, when velocity is toward an open door
+    seek_door_speed_threshold: float = 0.2 # only credit motion when actually moving
+    # Potential-based shaping on distance-to-nearest-door when room is clear.
+    # Unlike r_seek_door_when_clear (which requires motion), this reward is
+    # STATE-BASED: the bot gets reward simply for BEING closer to a door.
+    # Fires per-tick as (prev_distance - current_distance) * scale. Positive
+    # when closing distance, negative when moving away. Zero when stationary.
+    # This is what breaks the "jitter in cleared room" pathology: the bot
+    # gets clear signal that positions closer to doors are better, even
+    # before it's moving toward one.
+    r_door_distance_shaping: float = 0.3   # scales the delta-distance reward
+    # Bigger idle penalty specifically when room is clear (there's no tactical
+    # reason to hesitate; every idle tick is wasted time). Additive to the
+    # normal idle_penalty.
+    r_clear_room_idle_extra: float = -0.03
 
     # ---- NEW: PBRS approach potential ----------------------------------
     # Potential-based reward shaping: F = gamma*Phi(s') - Phi(s) with
@@ -140,6 +153,7 @@ class RewardState:
     damage_this_room_red: float = 0.0      # for no-damage clear bonus
     damage_this_room_other: float = 0.0
     prev_potential: float | None = None    # PBRS: previous state potential
+    prev_door_dist: float | None = None    # for r_door_distance_shaping
     pos_history: list = field(default_factory=list)  # rolling position window
 
 
@@ -348,6 +362,59 @@ class RewardShaper:
             # to exits after finishing combat. Without it, cleared-room
             # navigation relies on random walk stumbling into a door — slow.
             is_clear = bool((raw_obs.get("global") or {}).get("is_clear", False))
+
+            # ---- Potential-based shaping: distance to nearest open door ---
+            # Fires per-tick as (prev_door_dist - current_door_dist) * scale.
+            # State-based (not motion-based), so it fires even when the bot
+            # is stationary near a door. Combined with r_seek_door_when_clear
+            # (which requires motion), this breaks the "jitter in cleared
+            # room" pathology: bot gets clear signal that door-adjacent
+            # positions are better regardless of whether it's moving.
+            # Only active in cleared rooms; during combat, positioning is
+            # tactical, not door-focused.
+            if is_clear:
+                # Compute distance to nearest open door.
+                doors_pbrs = raw_obs.get("doors") or []
+                bounds_pbrs = raw_obs.get("room_bounds") or {}
+                tl_x_p = float(bounds_pbrs.get("tl_x", 0) or 0)
+                tl_y_p = float(bounds_pbrs.get("tl_y", 0) or 0)
+                br_x_p = float(bounds_pbrs.get("br_x", 1) or 1)
+                br_y_p = float(bounds_pbrs.get("br_y", 1) or 1)
+                door_positions = [
+                    (tl_x_p, (tl_y_p + br_y_p) / 2.0),                # LEFT
+                    ((tl_x_p + br_x_p) / 2.0, tl_y_p),                # UP
+                    (br_x_p, (tl_y_p + br_y_p) / 2.0),                # RIGHT
+                    ((tl_x_p + br_x_p) / 2.0, br_y_p),                # DOWN
+                ]
+                px = float(player.get("x", 0) or 0)
+                py = float(player.get("y", 0) or 0)
+                # Room diagonal for normalization.
+                room_diag = max(1.0, ((br_x_p - tl_x_p) ** 2 + (br_y_p - tl_y_p) ** 2) ** 0.5)
+                min_dist = None
+                for slot in range(min(4, len(doors_pbrs))):
+                    d = doors_pbrs[slot]
+                    if not d or len(d) < 2:
+                        continue
+                    if not bool(d[0]) or not bool(d[1]):  # exists & open
+                        continue
+                    dx_p, dy_p = door_positions[slot]
+                    dist_p = ((px - dx_p) ** 2 + (py - dy_p) ** 2) ** 0.5 / room_diag
+                    if min_dist is None or dist_p < min_dist:
+                        min_dist = dist_p
+                if min_dist is not None:
+                    if st.prev_door_dist is not None:
+                        # Delta reward: positive when closing distance.
+                        delta = st.prev_door_dist - min_dist
+                        add("door_pbrs", cfg.r_door_distance_shaping * delta)
+                    st.prev_door_dist = min_dist
+                # Extra idle penalty in cleared rooms (no reason to hesitate).
+                if speed < cfg.idle_speed_threshold:
+                    add("clear_idle_extra", cfg.r_clear_room_idle_extra)
+            else:
+                # Reset door-dist tracker on entering combat so re-clear
+                # doesn't get a bogus huge delta.
+                st.prev_door_dist = None
+
             if is_clear and speed >= cfg.seek_door_speed_threshold:
                 doors = raw_obs.get("doors") or []
                 # Door slot -> unit velocity direction we want.
