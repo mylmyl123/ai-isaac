@@ -209,3 +209,60 @@ def test_stationary_penalty_absent_when_moving_around():
         _, _, bd = r(obs)
     # Final tick shouldn't be penalised.
     assert "stationary_penalty" not in bd
+
+
+def test_seek_door_reward_fires_when_moving_right_toward_right_door():
+    r = RewardShaper()
+    doors = [
+        [0, 0, 0, 0, 0, 0],   # LEFT: no
+        [0, 0, 0, 0, 0, 0],   # UP: no
+        [1, 1, 0, 0, 0, 0],   # RIGHT: open
+        [0, 0, 0, 0, 0, 0],   # DOWN: no
+    ]
+    obs = {
+        "player": {"hp_red": 3, "hp_max": 3, "vx": 5.0, "vy": 0.0, "x": 100.0, "y": 100.0},
+        "global": {"is_clear": 1},
+        "doors": doors,
+        "events": [],
+    }
+    _, _, bd = r(obs)
+    assert bd.get("seek_door") is not None
+    assert bd["seek_door"] > 0
+
+
+def test_seek_door_reward_absent_when_wrong_direction():
+    """Bot moving left, but only right door is open -> no reward."""
+    r = RewardShaper()
+    doors = [
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],   # RIGHT open
+        [0, 0, 0, 0, 0, 0],
+    ]
+    obs = {
+        "player": {"hp_red": 3, "hp_max": 3, "vx": -5.0, "vy": 0.0, "x": 100.0, "y": 100.0},
+        "global": {"is_clear": 1},
+        "doors": doors,
+        "events": [],
+    }
+    _, _, bd = r(obs)
+    assert "seek_door" not in bd
+
+
+def test_seek_door_reward_absent_when_room_not_clear():
+    """Room not clear -> no door-seeking reward even if moving toward door."""
+    r = RewardShaper()
+    doors = [
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+    ]
+    obs = {
+        "player": {"hp_red": 3, "hp_max": 3, "vx": 5.0, "vy": 0.0, "x": 100.0, "y": 100.0},
+        "global": {"is_clear": 0},   # not clear
+        "doors": doors,
+        "events": [],
+    }
+    _, _, bd = r(obs)
+    assert "seek_door" not in bd

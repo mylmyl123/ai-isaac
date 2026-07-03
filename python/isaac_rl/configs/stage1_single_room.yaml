@@ -72,10 +72,19 @@ reward:
   r_step: -0.003
 
   # Boosted room/exploration rewards to make progress more attractive.
+  # r_new_room was 0.2 — tripled to 1.0 because "finish room, go to next" is
+  # the core loop and needs to feel very rewarding. Combined with the new
+  # r_seek_door_when_clear (dense signal for moving toward exits), this
+  # solves the "circle in cleared room" problem the user observed.
   r_room_clear: 2.0
-  r_new_room: 0.2
+  r_new_room: 1.0                  # was 0.2 — 5x boost, main exploration carrot
   r_room_clear_speed_bonus: 1.0
   r_room_clear_no_damage: 1.5
+
+  # Door-seeking: dense signal for moving toward exits when the room is clear.
+  # Without this, cleared-room navigation relies on random walk. Combined with
+  # boosted r_new_room, gives a smooth gradient toward exits.
+  r_seek_door_when_clear: 0.02
 
   # Aim alignment: still a hint, but reduced from 0.03. Aim reward doesnt
   # mean the tear will hit — enemies move, tears travel slowly. The REAL

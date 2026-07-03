@@ -229,3 +229,88 @@ def test_all_projectile_threats_sorted_by_urgency():
     assert len(threats) == 2
     # threats[0] should be the more urgent one (smaller tti).
     assert threats[0][4] < threats[1][4]
+
+
+# ---- Door-seeking (post-clear navigation) ----------------------------------
+
+
+def _make_obs_with_doors(doors, is_clear=True):
+    """Build an obs with the given door array and is_clear flag."""
+    return {
+        "player": {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0},
+        "enemies": {"feats": [], "mask": [], "count": 0},
+        "projectiles": {"feats": [], "mask": [], "count": 0},
+        "global": {"is_clear": 1 if is_clear else 0},
+        "doors": doors,
+        "events": [],
+    }
+
+
+def test_seeks_right_door_when_room_clear():
+    """Room clear with only a RIGHT door open -> move right."""
+    p = HeuristicPolicy()
+    # slot 2 = RIGHT. Fields: [exists, is_open, is_locked, is_boss, is_treas, is_secret]
+    doors = [
+        [0, 0, 0, 0, 0, 0],   # LEFT: doesn't exist
+        [0, 0, 0, 0, 0, 0],   # UP: doesn't exist
+        [1, 1, 0, 0, 0, 0],   # RIGHT: exists + open
+        [0, 0, 0, 0, 0, 0],   # DOWN: doesn't exist
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=True)
+    a = p.act(obs)
+    assert a[0] == 3   # move right
+
+
+def test_seeks_up_door_when_room_clear():
+    p = HeuristicPolicy()
+    doors = [
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],   # UP open
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=True)
+    a = p.act(obs)
+    assert a[0] == 1   # move up
+
+
+def test_prefers_normal_door_over_boss_door():
+    """When both normal and boss doors are open, take the normal one."""
+    p = HeuristicPolicy()
+    doors = [
+        [1, 1, 0, 1, 0, 0],   # LEFT: boss (is_boss=1)
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],   # RIGHT: normal
+        [0, 0, 0, 0, 0, 0],
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=True)
+    a = p.act(obs)
+    assert a[0] == 3   # right (normal), not 7 (left, boss)
+
+
+def test_skips_locked_doors():
+    p = HeuristicPolicy()
+    doors = [
+        [1, 1, 1, 0, 0, 0],   # LEFT: locked
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],   # RIGHT: open
+        [0, 0, 0, 0, 0, 0],
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=True)
+    a = p.act(obs)
+    assert a[0] == 3   # right (open), not 7 (locked)
+
+
+def test_no_door_seeking_when_not_clear():
+    """When room isn't clear, bot doesn't seek doors even with none-around."""
+    p = HeuristicPolicy(HeuristicConfig(idle_move_prob=0.0))   # no random wander
+    doors = [
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],   # RIGHT open
+        [0, 0, 0, 0, 0, 0],
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=False)
+    a = p.act(obs)
+    # No enemies, no threats, not clear, no idle wander -> should be idle.
+    assert a[0] == 0

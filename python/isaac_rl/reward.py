@@ -94,6 +94,16 @@ class RewardConfig:
     stationary_radius: float = 40.0        # world units
     stationary_window: int = 45            # ticks (~3s at 15Hz)
 
+    # ---- NEW: Door-seeking (post-clear navigation) ---------------------
+    # When the room is clear, the bot has no combat signal. Without this,
+    # PPO only gets +r_new_room (0.2 by default) at the moment of crossing
+    # a door — too sparse for random-walk to find reliably. Fires a small
+    # per-tick reward when the bot's velocity is aligned with an open door
+    # slot's direction. Combined with a boosted r_new_room, this gives a
+    # dense gradient guiding the bot to exits.
+    r_seek_door_when_clear: float = 0.02   # per tick, when velocity is toward an open door
+    seek_door_speed_threshold: float = 0.5 # only credit motion when actually moving
+
     # ---- NEW: PBRS approach potential ----------------------------------
     # Potential-based reward shaping: F = gamma*Phi(s') - Phi(s) with
     # Phi(s) = 1.0 when at ideal distance, decaying with |dist - ideal|.
@@ -326,6 +336,38 @@ class RewardShaper:
                 span = max(max(xs) - min(xs), max(ys) - min(ys))
                 if span < cfg.stationary_radius:
                     add("stationary_penalty", cfg.r_stationary_penalty)
+
+            # ---- Door-seeking when room is clear ------------------------
+            # If room is clear and the bot's velocity is aligned with an open
+            # door direction, give a per-tick reward. Combined with the (now
+            # boosted) r_new_room, this gives a dense signal guiding the bot
+            # to exits after finishing combat. Without it, cleared-room
+            # navigation relies on random walk stumbling into a door — slow.
+            is_clear = bool((raw_obs.get("global") or {}).get("is_clear", False))
+            if is_clear and speed >= cfg.seek_door_speed_threshold:
+                doors = raw_obs.get("doors") or []
+                # Door slot -> unit velocity direction we want.
+                # 0=LEFT (-1,0), 1=UP (0,-1), 2=RIGHT (+1,0), 3=DOWN (0,+1)
+                door_dirs = ((-1.0, 0.0), (0.0, -1.0), (1.0, 0.0), (0.0, 1.0))
+                best_alignment = 0.0
+                for slot in range(min(4, len(doors))):
+                    d = doors[slot]
+                    if not d or len(d) < 2:
+                        continue
+                    exists = bool(d[0])
+                    is_open = bool(d[1])
+                    if not exists or not is_open:
+                        continue
+                    dx_dir, dy_dir = door_dirs[slot]
+                    # Normalized velocity dotted with door direction.
+                    # speed is guaranteed > 0 above.
+                    alignment = (vx * dx_dir + vy * dy_dir) / (speed + 1e-6)
+                    if alignment > best_alignment:
+                        best_alignment = alignment
+                if best_alignment > 0:
+                    # Scale by alignment so straight-line motion gets full reward
+                    # and diagonal motion gets partial credit.
+                    add("seek_door", cfg.r_seek_door_when_clear * best_alignment)
 
             # Nearest-enemy dependent shaping (aim, kite distance, PBRS).
             enemy = self._nearest_enemy(raw_obs)

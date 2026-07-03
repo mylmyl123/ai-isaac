@@ -79,6 +79,15 @@ class HeuristicConfig:
     # Deterministic seed for stochastic tie-breaks
     seed: int = 0
 
+    # Door-seeking behavior (activates when the room is clear).
+    # Isaac door slots (from obs.lua DOOR_SLOTS):
+    #   0 = LEFT, 1 = UP, 2 = RIGHT, 3 = DOWN
+    # Each corresponds to a cardinal movement direction. When the room is
+    # clear and there are no threats, walk toward the first open, unlocked,
+    # non-special door. Teaches BC that "clear room -> exit through door".
+    door_slot_to_move: tuple = (7, 1, 3, 5)   # LEFT, UP, RIGHT, DOWN -> move action
+    prefer_normal_doors: bool = True          # avoid boss/treasure/secret doors when a normal exit exists
+
 
 class HeuristicPolicy:
     """Rule-based Isaac player. Stateless per-tick decisions."""
@@ -98,6 +107,7 @@ class HeuristicPolicy:
 
         enemy = self._nearest_enemy(raw_obs)
         threats = self._all_projectile_threats(raw_obs)
+        is_clear = bool((raw_obs.get("global") or {}).get("is_clear", False))
 
         # ---- Movement decision -----------------------------------------
         move = 0
@@ -139,8 +149,16 @@ class HeuristicPolicy:
                     move = self._angle_to_move(math.atan2(edx, -edy))     # rotate -90°
 
         else:
-            # No enemies, no threats. Wander a bit so we discover new rooms.
-            if self._rng.random() < cfg.idle_move_prob:
+            # No enemies, no threats. If the room is clear and there's an open
+            # door, head toward it (progress to a new room). Otherwise wander
+            # so we discover the layout / trigger enemy spawns.
+            if is_clear:
+                door_move = self._pick_door_move(raw_obs)
+                if door_move is not None:
+                    move = door_move
+                elif self._rng.random() < cfg.idle_move_prob:
+                    move = int(self._rng.choice(cfg.idle_move_choices))
+            elif self._rng.random() < cfg.idle_move_prob:
                 move = int(self._rng.choice(cfg.idle_move_choices))
 
         # ---- Shoot decision (with lead-shot prediction) ------------------
@@ -159,6 +177,40 @@ class HeuristicPolicy:
         # Heuristic outputs a 2-dim action: [move, shoot]. The active/bomb/pill
         # heads were removed from the action space (see spaces.ACTION_FACTORS).
         return np.array([move, shoot], dtype=np.int64)
+
+    # ---- door-seeking (post-clear navigation) --------------------------
+
+    def _pick_door_move(self, raw_obs: dict[str, Any]) -> int | None:
+        """When room is clear, choose a movement direction toward an open door.
+
+        Doors obs is a [4, 6] array: rows are LEFT/UP/RIGHT/DOWN slots, columns
+        are (exists, is_open, is_locked, is_boss, is_treasure, is_secret).
+        Prefers normal doors over special-purpose ones when both are open.
+        Returns a movement action (1..8) or None if no viable door.
+        """
+        cfg = self.cfg
+        doors = raw_obs.get("doors")
+        if not doors:
+            return None
+
+        # Two passes: normal doors first (if prefer_normal_doors), then any open door.
+        for pass_idx in (0, 1):
+            for slot in range(min(4, len(doors))):
+                d = doors[slot]
+                if not d or len(d) < 6:
+                    continue
+                exists = bool(d[0])
+                is_open = bool(d[1])
+                is_locked = bool(d[2])
+                is_boss = bool(d[3])
+                is_treasure = bool(d[4])
+                is_secret = bool(d[5])
+                if not exists or not is_open or is_locked:
+                    continue
+                if pass_idx == 0 and cfg.prefer_normal_doors and (is_boss or is_treasure or is_secret):
+                    continue
+                return cfg.door_slot_to_move[slot]
+        return None
 
     # ---- feature extraction helpers ------------------------------------
 
