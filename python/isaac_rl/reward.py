@@ -31,7 +31,11 @@ class RewardConfig:
     # ---- Terminal rewards (unchanged) ----------------------------------
     r_beat_mom: float = 50.0
     r_floor_cleared: float = 5.0
-    r_death: float = -10.0
+    r_death: float = -3.0                 # was -10.0 — reduced to prevent "delay-via-discount" camping
+    # Note: -10 with gamma=0.99 means delaying death by 200 ticks makes the
+    # discounted penalty 7x less bad (0.99^200 ~= 0.13). Bot exploits this by
+    # camping in unreachable spots to defer death. -3 keeps death painful
+    # without dominating the discounted value calculation.
 
     # ---- Dense combat --------------------------------------------------
     r_damage_dealt_scale: float = 0.1

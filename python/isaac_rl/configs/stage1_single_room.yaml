@@ -18,7 +18,12 @@ gamma: 0.99            # short episodes; discount can be lower than the 6-floor 
 gae_lambda: 0.95
 clip: 0.2
 vf_coef: 0.5
-ent_coef: 0.005        # LOW for BC-warm-started runs (was 0.05 before BC). High ent_coef destroys the pretrained deterministic policy.
+ent_coef: 0.02         # BUMPED from 0.005 after user report of policy collapse at 1M steps.
+                       # Low ent_coef preserves BC weights but risks getting stuck in local
+                       # optima (bot converged to "stand still forever"). 0.02 is a balance:
+                       # BC weights survive early PPO but policy retains enough stochasticity
+                       # to escape degenerate policies. For future runs starting from a
+                       # BC-warm-started policy that's ALREADY collapsed, override to 0.05.
 max_grad_norm: 0.5
 
 # NEW (2026-07-02): PPO best-practice tricks from "What Matters in On-Policy RL"
@@ -121,14 +126,17 @@ reward:
   # still incentivised, but not enough to reward camping.
   r_full_hp_tick: 0.001         # was 0.005
 
-  # Anti-idle — TRIPLED. This is the primary lever forcing bot out of corners.
-  r_idle_penalty: -0.03         # was -0.01
+  # Anti-idle — BUMPED AGAIN. Was -0.03, now -0.1. User report of policy
+  # collapse to "stand still" at 1M steps: bot found a camping spot where
+  # enemies couldn't reach and the -0.03/tick penalty was less painful than
+  # -10 terminal death. Bumping to -0.1 makes idling worth ~-10 present
+  # value at gamma=0.99 (over infinite time), matching death magnitude.
+  r_idle_penalty: -0.1           # was -0.03 (was -0.01)
   idle_speed_threshold: 0.5
 
-  # Anti-camping (position-based). Catches "wiggle in corner" behaviour that
-  # bypasses the velocity-based idle penalty. If the bot doesn't move outside
-  # a 40-unit radius over ~3 seconds, it pays this per tick.
-  r_stationary_penalty: -0.02
+  # Anti-camping (position-based). Also bumped: -0.02 -> -0.08 for same reason
+  # as idle_penalty above. Catches bots that jitter enough to defeat idle_penalty.
+  r_stationary_penalty: -0.08    # was -0.02
   stationary_radius: 40.0
   stationary_window: 45
 

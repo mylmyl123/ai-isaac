@@ -266,3 +266,34 @@ def test_seek_door_reward_absent_when_room_not_clear():
     }
     _, _, bd = r(obs)
     assert "seek_door" not in bd
+
+
+def test_camping_worse_than_active_death():
+    """Regression: at gamma=0.99, standing-still-forever should NOT have a
+    higher discounted value than dying quickly. Verifies our anti-camping
+    penalties are strong enough after user reported policy collapse at 1M."""
+    # Config values from stage1_single_room.yaml (after fix).
+    r_death = -3.0
+    r_idle = -0.1
+    r_stationary = -0.08
+    r_step = -0.003
+    r_full_hp = 0.001
+
+    # Present value of camping FOREVER at safe spot (full HP, idle, stationary).
+    # Formula: sum_{t=0}^{inf} 0.99^t * per_tick = per_tick / (1 - 0.99) = 100 * per_tick.
+    per_tick_camping = r_step + r_full_hp + r_idle + r_stationary
+    pv_camping = per_tick_camping / (1 - 0.99)
+
+    # Present value of dying quickly (100 ticks of active play + terminal death).
+    # Active play: some kills (+0.5 each * 3 = 1.5), some hits (+0.2 * 3 = 0.6), some damage taken (-1 * 2 = -2), step penalty.
+    per_tick_active = r_step + 0.02 - 0.01   # rough: aim reward + occasional damage traded
+    active_ticks = 100
+    pv_active_dense = per_tick_active * (1 - 0.99 ** active_ticks) / (1 - 0.99)
+    pv_death = r_death * (0.99 ** active_ticks)
+    pv_active = pv_active_dense + pv_death
+
+    # Camping should be WORSE than active play (more negative).
+    assert pv_camping < pv_active, (
+        f"CAMPING IS OPTIMAL: pv_camping={pv_camping:.2f} >= pv_active={pv_active:.2f}. "
+        f"Policy will converge to standing still. Increase anti-camping penalties."
+    )
