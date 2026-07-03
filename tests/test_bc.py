@@ -16,8 +16,10 @@ from isaac_rl.spaces import (
     MAX_ENEMIES, MAX_PICKUPS, MAX_PROJECTILES,
     ENEMY_FEATS, PICKUP_FEATS, PROJ_FEATS,
     PLAYER_DIM, GLOBAL_DIM, PASSIVES_K, ROOM_H, ROOM_W,
+    ACTION_FACTORS,
     flatten_dict_obs,
 )
+ACTION_FACTORS_LEN = ACTION_FACTORS   # alias for len() below without misleading name
 
 
 def _fake_encoded_obs() -> dict:
@@ -40,7 +42,7 @@ def _fake_encoded_obs() -> dict:
         "room_grid": np.zeros((4, ROOM_H, ROOM_W), dtype=np.float32),
         "doors": np.zeros((4, 6), dtype=np.float32),
         "global": np.zeros(GLOBAL_DIM, dtype=np.float32),
-        "last_action": np.zeros(5, dtype=np.int8),
+        "last_action": np.zeros(len(ACTION_FACTORS_LEN), dtype=np.int8),
     }
 
 
@@ -53,7 +55,7 @@ def _fake_demo_npz(tmp_path: Path, n_transitions: int = 8) -> Path:
         flat = flatten_dict_obs(o)
         for k, v in flat.items():
             per_field_stacks.setdefault(k, []).append(np.asarray(v))
-        action_stack.append(np.array([1, 2, 0, 0, 0], dtype=np.int64))
+        action_stack.append(np.zeros(len(ACTION_FACTORS_LEN), dtype=np.int64))
 
     save_dict = {
         "actions": np.stack(action_stack),
@@ -78,7 +80,7 @@ def test_load_demos_produces_flat_keys(tmp_path):
     assert "pickups_mask" in obs
     assert "player" in obs
     assert "room_grid" in obs
-    assert actions.shape == (8, 5)
+    assert actions.shape == (8, len(ACTION_FACTORS_LEN))
 
 
 def test_slice_obs_indexes_all_keys(tmp_path):

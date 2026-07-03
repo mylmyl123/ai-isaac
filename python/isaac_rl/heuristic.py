@@ -64,6 +64,13 @@ class HeuristicConfig:
 
     # Speeds
     projectile_speed_min: float = 3.0  # ignore near-stationary projectiles
+    tear_speed: float = 10.0           # rough estimate of Isaac tear speed for lead-shot prediction
+
+    # Multi-projectile threat aggregation: instead of dodging only the most
+    # urgent projectile, sum threat vectors weighted by inverse time-to-impact
+    # so we dodge a direction that avoids multiple projectiles when several
+    # converge on the player at once.
+    max_projectiles_for_threat: int = 8
 
     # Fallback behavior when no enemies visible
     idle_move_prob: float = 0.4        # probability of moving when idle
@@ -90,27 +97,30 @@ class HeuristicPolicy:
         cfg = self.cfg
 
         enemy = self._nearest_enemy(raw_obs)
-        threat = self._most_urgent_projectile_threat(raw_obs)
+        threats = self._all_projectile_threats(raw_obs)
 
         # ---- Movement decision -----------------------------------------
         move = 0
 
-        if threat is not None:
-            # Dodge: move perpendicular to projectile velocity.
-            # Rotate proj velocity 90° to get sideways-relative-to-shot direction.
-            # Pick the perpendicular direction pointing away from the projectile.
-            pvx, pvy, pdx, pdy, _ = threat
-            # Perpendicular = (-vy, vx) or (vy, -vx). Pick whichever has a
-            # component pointing away from the projectile's origin.
-            perp1 = (-pvy, pvx)
-            perp2 = (pvy, -pvx)
-            # Vector from projectile to player = (-pdx, -pdy). Dodge in the
-            # perpendicular that's most aligned with player-away-from-projectile.
-            away_x, away_y = -pdx, -pdy
-            score1 = perp1[0] * away_x + perp1[1] * away_y
-            score2 = perp2[0] * away_x + perp2[1] * away_y
-            perp = perp1 if score1 >= score2 else perp2
-            move = self._angle_to_move(math.atan2(perp[1], perp[0]))
+        if threats:
+            # Multi-projectile dodge: aggregate all threat vectors weighted by
+            # inverse time-to-impact. Escape direction is perpendicular to
+            # the summed threat, pointing away from the centroid of incoming
+            # fire. Handles "crossfire" better than dodging one bullet at a
+            # time.
+            escape_x, escape_y = 0.0, 0.0
+            for pvx, pvy, pdx, pdy, tti in threats:
+                weight = 1.0 / max(0.5, tti)
+                perp_a = (-pvy, pvx)
+                perp_b = (pvy, -pvx)
+                away_x, away_y = -pdx, -pdy
+                score_a = perp_a[0] * away_x + perp_a[1] * away_y
+                score_b = perp_b[0] * away_x + perp_b[1] * away_y
+                perp = perp_a if score_a >= score_b else perp_b
+                escape_x += perp[0] * weight
+                escape_y += perp[1] * weight
+            if escape_x != 0.0 or escape_y != 0.0:
+                move = self._angle_to_move(math.atan2(escape_y, escape_x))
 
         elif enemy is not None:
             edx, edy, edist, _, _ = enemy
@@ -133,14 +143,22 @@ class HeuristicPolicy:
             if self._rng.random() < cfg.idle_move_prob:
                 move = int(self._rng.choice(cfg.idle_move_choices))
 
-        # ---- Shoot decision --------------------------------------------
+        # ---- Shoot decision (with lead-shot prediction) ------------------
+        # Instead of aiming at the enemy's current position, aim at where the
+        # enemy WILL be by the time our tear arrives. Isaac tears travel
+        # slowly (~cfg.tear_speed units/tick) so leading matters a lot for
+        # moving enemies. Predicted position = current + velocity * tti.
         shoot = 0
         if enemy is not None:
-            edx, edy, _, _, _ = enemy
-            shoot = self._angle_to_shoot(math.atan2(edy, edx))
+            edx, edy, edist, evx, evy = enemy
+            tti_tear = edist / max(1.0, cfg.tear_speed)
+            aim_dx = edx + evx * tti_tear
+            aim_dy = edy + evy * tti_tear
+            shoot = self._angle_to_shoot(math.atan2(aim_dy, aim_dx))
 
-        # No use_active / no bomb / no pill for the heuristic.
-        return np.array([move, shoot, 0, 0, 0], dtype=np.int64)
+        # Heuristic outputs a 2-dim action: [move, shoot]. The active/bomb/pill
+        # heads were removed from the action space (see spaces.ACTION_FACTORS).
+        return np.array([move, shoot], dtype=np.int64)
 
     # ---- feature extraction helpers ------------------------------------
 
@@ -165,20 +183,28 @@ class HeuristicPolicy:
     def _most_urgent_projectile_threat(
         self, raw_obs: dict[str, Any]
     ) -> tuple[float, float, float, float, float] | None:
-        """Find the most urgent enemy projectile heading toward the player.
+        """Backward-compat: return single most urgent threat (used by tests)."""
+        threats = self._all_projectile_threats(raw_obs)
+        return threats[0] if threats else None
 
-        Returns (proj_vx, proj_vy, proj_dx, proj_dy, time_to_impact) or None.
+    def _all_projectile_threats(
+        self, raw_obs: dict[str, Any]
+    ) -> list[tuple[float, float, float, float, float]]:
+        """Return threatening projectiles as list of (vx, vy, dx, dy, time_to_impact).
+
         A projectile is threatening if:
           * Within projectile_threat_dist of the player.
           * Moving fast enough (speed > projectile_speed_min).
-          * Its velocity has a positive component pointing at the player
-            (dot(velocity, -displacement) > 0).
+          * Velocity has a positive component pointing at the player.
+
+        Sorted by time-to-impact (most urgent first), truncated to
+        max_projectiles_for_threat.
         """
         cfg = self.cfg
         projectiles = raw_obs.get("projectiles") or {}
         feats = projectiles.get("feats") or []
         mask = projectiles.get("mask") or []
-        best: tuple[float, float, float, float, float] | None = None
+        threats: list[tuple[float, float, float, float, float]] = []
 
         for i, f in enumerate(feats):
             if i >= len(mask) or not mask[i] or not f or len(f) < 6:
@@ -193,18 +219,15 @@ class HeuristicPolicy:
                 continue
             if speed < cfg.projectile_speed_min:
                 continue
-            # Toward-player check: dot(velocity, player_from_projectile).
-            # Player from projectile = -(dx, dy). Projectile heading toward
-            # player when dot(v, -d) > 0 => (-vx * dx) + (-vy * dy) > 0.
             toward_score = -(vx * dx + vy * dy)
             if toward_score <= 0:
                 continue
-            # Time-to-impact (rough): closing distance / closing speed.
             closing_speed = toward_score / max(1.0, dist)
             tti = dist / max(1.0, closing_speed)
-            if best is None or tti < best[4]:
-                best = (vx, vy, dx, dy, tti)
-        return best
+            threats.append((vx, vy, dx, dy, tti))
+
+        threats.sort(key=lambda t: t[4])
+        return threats[:cfg.max_projectiles_for_threat]
 
     # ---- angle -> action helpers ---------------------------------------
 

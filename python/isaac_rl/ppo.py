@@ -35,7 +35,7 @@ except ImportError:
 
 from .model import IsaacPolicy, PolicyConfig
 from .rnd import RND
-from .spaces import ACTION_FACTORS, flatten_dict_obs
+from .spaces import ACTION_FACTORS, MAX_ENEMIES, MAX_PROJECTILES, flatten_dict_obs
 from .torch_utils import batch_obs_to_tensors, stack_time_batch
 from .vec_env import build_vec_env
 
@@ -57,6 +57,20 @@ class PPOConfig:
     lr_decay: bool = True
     clip: float = 0.2
     vf_coef: float = 0.5
+    # Value-function clipping: analogous to policy clipping. Prevents the
+    # value net from taking large single-update steps. Standard PPO trick.
+    # Set to 0 to disable (unclipped MSE loss).
+    vf_clip: float = 0.2
+    # Reward normalization: divide rewards by the running std of returns
+    # before feeding into GAE. Stabilises gradients when rewards span
+    # multiple orders of magnitude (dense +0.005 vs terminal +50). Standard
+    # trick from "What Matters in On-Policy RL" (Andrychowicz 2020).
+    normalize_rewards: bool = True
+    # Auxiliary supervised losses (UNREAL-style representation learning).
+    # For each obs the model predicts (nearest_enemy_dist, enemy_count,
+    # nearest_proj_dist) all normalised. MSE loss added to PPO's total loss
+    # with coefficient aux_coef. Set to 0 to disable.
+    aux_coef: float = 0.1
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
     gamma: float = 0.999
@@ -139,6 +153,86 @@ def compute_gae(rewards, values, dones, next_value, gamma, lam):
     return advantages, returns
 
 
+def aux_labels_from_obs(obs: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Compute auxiliary regression labels from a flat obs dict.
+
+    Returns a [B, 3] tensor of (nearest_enemy_norm_dist, enemy_count_frac,
+    nearest_proj_norm_dist). All values are in a small numerical range so the
+    MSE targets are stable.
+
+    Labels are deterministic functions of the obs — not future information.
+    The point is not to "guess unknowns" but to force the trunk to encode
+    these summary statistics as first-class features (representation-learning
+    regularizer). Cheap and standard technique (Jaderberg et al. 2017).
+    """
+    # Feature layout (see spaces.py / obs.lua):
+    #   feats[..., 2] = dx / 480 (already normalised)
+    #   feats[..., 3] = dy / 270
+    e_feats = obs["enemies_feats"]        # [B, MAX_ENEMIES, ENEMY_FEATS]
+    e_mask = obs["enemies_mask"]          # [B, MAX_ENEMIES], 0/1 float
+    p_feats = obs["projectiles_feats"]    # [B, MAX_PROJ, PROJ_FEATS]
+    p_mask = obs["projectiles_mask"]      # [B, MAX_PROJ]
+
+    # Nearest normalised distance to any masked entity. For invisible entries,
+    # substitute a large value (2.0) so they never win the min. Then clamp
+    # the final min to a stable range.
+    def _nearest_dist(feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        dx = feats[..., 2]                # already normalised (dx / 480)
+        dy = feats[..., 3]                # (dy / 270)
+        dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+        # For unmasked (invisible) entries, force a large distance so min
+        # ignores them. Use 2.0 (well outside the [0,√2] achievable range).
+        big = torch.full_like(dist, 2.0)
+        masked = torch.where(mask.bool(), dist, big)
+        return masked.min(dim=-1)[0].clamp(min=0.0, max=2.0)
+
+    nearest_enemy = _nearest_dist(e_feats, e_mask)
+    nearest_proj = _nearest_dist(p_feats, p_mask)
+    enemy_count = e_mask.sum(dim=-1) / float(MAX_ENEMIES)   # in [0, 1]
+
+    return torch.stack([nearest_enemy, enemy_count, nearest_proj], dim=-1)
+
+
+class RunningMeanStd:
+    """Numerically-stable running mean/variance tracker (Welford / parallel algorithm).
+
+    Used for reward normalization: track the running std of returns and divide
+    incoming rewards by it before feeding into GAE. Stabilises gradients when
+    reward magnitudes span multiple orders (e.g. our dense +0.005 shaping vs
+    terminal +50 mom-kill).
+
+    Standard trick from "What Matters in On-Policy RL" (Andrychowicz 2020).
+    """
+    def __init__(self, epsilon: float = 1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = epsilon
+
+    def update(self, x: torch.Tensor | np.ndarray) -> None:
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+        x = np.asarray(x).reshape(-1)
+        if x.size == 0:
+            return
+        batch_mean = float(x.mean())
+        batch_var = float(x.var())
+        batch_count = int(x.size)
+
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta ** 2 * self.count * batch_count / tot_count
+        self.mean = new_mean
+        self.var = M2 / tot_count
+        self.count = tot_count
+
+    @property
+    def std(self) -> float:
+        return float(np.sqrt(self.var + 1e-8))
+
+
 def train(cfg: PPOConfig) -> None:
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     log.info("device: %s", device)
@@ -196,6 +290,10 @@ def train(cfg: PPOConfig) -> None:
     global_step = 0
     updates = 0
     t_start = time.time()
+
+    # Reward normalization (see cfg.normalize_rewards). Reset per-run since
+    # the running stats are policy-dependent.
+    reward_rms = RunningMeanStd()
 
     # --- resume from checkpoint if requested ----------------------------
     if getattr(cfg, "resume_from", None):
@@ -378,6 +476,24 @@ def train(cfg: PPOConfig) -> None:
         rewards_seq = torch.stack(rollout_rewards, dim=0)              # [T, B]
         values_seq = torch.stack(rollout_values, dim=0)                # [T, B]
         dones_seq = torch.stack(rollout_dones, dim=0)                  # [T, B]
+
+        # Reward normalization: track running std of returns (not raw rewards
+        # — return-based normalization is the version validated in Andrychowicz
+        # 2020) and divide rewards by it before GAE. We compute pseudo-returns
+        # by discounting rewards backward, then update the running stats and
+        # rescale rewards_seq. Skips the first update where running stats are
+        # still at their init.
+        if cfg.normalize_rewards:
+            # Discounted return per rollout tick (backward pass).
+            with torch.no_grad():
+                discounted = torch.zeros_like(rewards_seq)
+                running = torch.zeros(cfg.n_envs, device=device)
+                for t in reversed(range(rewards_seq.shape[0])):
+                    running = rewards_seq[t] + cfg.gamma * running * (1.0 - dones_seq[t])
+                    discounted[t] = running
+                reward_rms.update(discounted)
+            rewards_seq = rewards_seq / (reward_rms.std + 1e-8)
+
         advantages, returns = compute_gae(
             rewards_seq, values_seq, dones_seq, next_value,
             cfg.gamma, cfg.gae_lambda,
@@ -385,6 +501,8 @@ def train(cfg: PPOConfig) -> None:
         adv_flat = advantages.reshape(-1)
         adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
         ret_flat = returns.reshape(-1)
+        # Store old values for value-function clipping (see cfg.vf_clip).
+        old_values_flat = values_seq.reshape(-1).detach()
 
         old_logp_flat = torch.stack(rollout_logprobs, dim=0).reshape(-1).detach()
         actions_flat = torch.stack(rollout_actions, dim=0).reshape(-1, len(ACTION_FACTORS))
@@ -402,7 +520,7 @@ def train(cfg: PPOConfig) -> None:
         T = cfg.rollout_steps
         B = cfg.n_envs
         n_samples = T * B
-        losses = {"policy": [], "value": [], "entropy": [], "rnd": []}
+        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": []}
 
         for _ in range(cfg.n_epochs):
             # Recompute sequence forward each epoch — recurrent PPO can't shuffle timesteps
@@ -417,13 +535,14 @@ def train(cfg: PPOConfig) -> None:
                 mb_dones = dones_seq[:, mb_envs]
                 mb_init = init_hidden[mb_envs]
 
-                logits_list, values_new = policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
+                logits_list, values_new, aux_pred = policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
 
                 # Flatten targets for this minibatch (T, |mb|).
                 idx_flat = ((torch.arange(T, device=device)[:, None] * B) + mb_envs[None, :]).reshape(-1)
                 mb_old_logp = old_logp_flat[idx_flat]
                 mb_adv = adv_flat[idx_flat]
                 mb_ret = ret_flat[idx_flat]
+                mb_old_values = old_values_flat[idx_flat]
                 mb_actions = actions_flat[idx_flat]
 
                 new_logp = policy.log_prob_from_logits(logits_list, mb_actions)
@@ -433,10 +552,33 @@ def train(cfg: PPOConfig) -> None:
                 surr1 = ratio * mb_adv
                 surr2 = torch.clamp(ratio, 1 - cfg.clip, 1 + cfg.clip) * mb_adv
                 policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(values_new, mb_ret)
+                # Value function loss with optional clipping (cfg.vf_clip>0).
+                # Prevents big single-update jumps in the value net; standard
+                # PPO trick (paper Schulman 2017 mentions it; widely used).
+                if cfg.vf_clip > 0:
+                    values_clipped = mb_old_values + torch.clamp(
+                        values_new - mb_old_values, -cfg.vf_clip, cfg.vf_clip
+                    )
+                    v_loss_unclipped = (values_new - mb_ret) ** 2
+                    v_loss_clipped = (values_clipped - mb_ret) ** 2
+                    value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    value_loss = F.mse_loss(values_new, mb_ret)
                 entropy_loss = -entropy.mean()
 
                 loss = policy_loss + cfg.vf_coef * value_loss + cfg.ent_coef * entropy_loss
+                # Auxiliary supervised loss (representation learning).
+                aux_loss_val = 0.0
+                if cfg.aux_coef > 0:
+                    # Compute labels from the flat minibatch obs. mb_seq_obs is
+                    # {[T,B,...]}; we need to compute labels on the same flat
+                    # ordering the model saw. Reshape into T*B rows.
+                    flat_obs = {k: v.reshape(-1, *v.shape[2:]) for k, v in mb_seq_obs.items()}
+                    with torch.no_grad():
+                        aux_targets = aux_labels_from_obs(flat_obs)
+                    aux_loss = F.mse_loss(aux_pred, aux_targets)
+                    loss = loss + cfg.aux_coef * aux_loss
+                    aux_loss_val = float(aux_loss.item())
                 # Value-function warmup: for the first cfg.vf_warmup_updates PPO
                 # updates, ONLY train the value function — zero the policy loss
                 # so the pretrained policy weights don't get overwritten by
@@ -445,6 +587,11 @@ def train(cfg: PPOConfig) -> None:
                 # value function starts random.
                 if updates < cfg.vf_warmup_updates:
                     loss = cfg.vf_coef * value_loss
+                    if cfg.aux_coef > 0 and aux_loss_val > 0:
+                        # Keep training the aux head during warmup too
+                        # — it helps the trunk features stay useful even
+                        # while the policy is frozen.
+                        loss = loss + cfg.aux_coef * F.mse_loss(aux_pred, aux_targets)
                 optim.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
@@ -452,6 +599,8 @@ def train(cfg: PPOConfig) -> None:
 
                 losses["policy"].append(float(policy_loss.item()))
                 losses["value"].append(float(value_loss.item()))
+                if aux_loss_val > 0:
+                    losses["aux"].append(aux_loss_val)
                 losses["entropy"].append(float(-entropy_loss.item()))
 
         # --- RND predictor update ---------------------------------------

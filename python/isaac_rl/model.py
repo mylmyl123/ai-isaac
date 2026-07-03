@@ -144,6 +144,16 @@ class IsaacPolicy(nn.Module):
         self.heads = nn.ModuleList([nn.Linear(c.gru_dim, n) for n in ACTION_FACTORS.tolist()])
         self.value_head = nn.Linear(c.gru_dim, 1)
 
+        # Auxiliary regression heads (see aux_labels_from_obs in ppo.py). Each
+        # forces the trunk to encode a summary statistic of the current obs as
+        # a first-class feature. Style: UNREAL (Jaderberg et al. 2017) but with
+        # obs-derived targets instead of pixel-control.
+        # Targets (3 scalars):
+        #   [0] nearest-enemy normalised distance
+        #   [1] enemy count normalised by MAX_ENEMIES
+        #   [2] nearest-projectile normalised distance
+        self.aux_head = nn.Linear(c.gru_dim, 3)
+
     # -- encoders -----------------------------------------------------------
 
     def encode(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -194,6 +204,14 @@ class IsaacPolicy(nn.Module):
         value = self.value_head(new_hidden).squeeze(-1)
         return logits, value, new_hidden
 
+    def aux_predict(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Return auxiliary regression predictions from a hidden state.
+
+        Shape: [B, 3] — (nearest_enemy_dist, enemy_count, nearest_proj_dist),
+        all normalised. See aux_labels_from_obs() in ppo.py for the targets.
+        """
+        return self.aux_head(hidden)
+
     # -- sequence forward (PPO update) --------------------------------------
 
     def sequence_forward(
@@ -227,7 +245,8 @@ class IsaacPolicy(nn.Module):
 
         logits = [head(flat) for head in self.heads]
         values = self.value_head(flat).squeeze(-1)
-        return logits, values
+        aux = self.aux_head(flat)
+        return logits, values, aux
 
     # -- action distribution helpers ----------------------------------------
 

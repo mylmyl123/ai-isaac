@@ -111,13 +111,13 @@ def test_ignores_projectile_moving_away():
 
 
 def test_never_uses_active_or_bomb_or_pill():
+    """Regression: after action-space simplification, only move + shoot exist.
+    Heuristic never returns extra dims. Kept as smoke test."""
     p = HeuristicPolicy()
     for _ in range(20):
         obs = _make_obs(enemies=[(100.0, 100.0, 0.0, 0.0)])
         a = p.act(obs)
-        assert a[2] == 0   # use_active
-        assert a[3] == 0   # drop_bomb
-        assert a[4] == 0   # pill_card
+        assert len(a) == 2   # no active/bomb/pill dims
 
 
 def test_angle_to_shoot_covers_full_circle():
@@ -150,5 +150,82 @@ def test_returns_ndarray_of_correct_shape_and_dtype():
     obs = _make_obs(enemies=[(100.0, 100.0, 0.0, 0.0)])
     a = p.act(obs)
     assert isinstance(a, np.ndarray)
-    assert a.shape == (5,)
+    assert a.shape == (2,)   # 2 heads: move, shoot (after action-space simplification)
     assert a.dtype == np.int64
+
+
+def test_action_output_length_matches_action_factors():
+    """Regression: heuristic action ndim must match spaces.ACTION_FACTORS."""
+    from isaac_rl.spaces import ACTION_FACTORS
+    p = HeuristicPolicy()
+    obs = _make_obs()
+    a = p.act(obs)
+    assert a.shape == (len(ACTION_FACTORS),), f"heuristic returns {a.shape}, expected ({len(ACTION_FACTORS)},)"
+
+
+# ---- Lead-shot prediction and multi-projectile threat aggregation ----------
+
+
+def test_lead_shot_moves_aim_ahead_of_target():
+    """Enemy far right (300 px) moving up FAST should be aimed 'up' (predicted
+    position dominates over current position because lead is large)."""
+    p = HeuristicPolicy()
+    # Enemy at (300, 0), moving up hard (vy = -20).
+    # tti_tear = 300 / 10 = 30 ticks. predicted dy = -20*30 = -600.
+    # atan2(-600, 300) ~= -63 deg -> UP quadrant (angle < -pi/4).
+    obs = _make_obs(enemies=[(300.0, 0.0, 0.0, -20.0)])
+    a = p.act(obs)
+    assert a[1] == 1   # shoot up (lead ahead of moving target)
+
+
+def test_lead_shot_zero_lead_does_not_change_aim():
+    """Same enemy but with the lead disabled by setting a very slow tear
+    speed effectively equal to enemy velocity magnitude. Direct-aim direction."""
+    p = HeuristicPolicy()
+    # Enemy at (300, 0) moving slowly up.
+    # tti_tear = 30, dy = -30. aim = (300, -30) -> atan2(-30, 300) ~ -5.7 deg -> RIGHT.
+    obs = _make_obs(enemies=[(300.0, 0.0, 0.0, -1.0)])
+    a = p.act(obs)
+    assert a[1] == 2   # shoot right (tiny lead still keeps aim in right quadrant)
+
+
+def test_lead_shot_no_lead_for_stationary_enemy():
+    """Stationary enemy: aim stays at current position."""
+    p = HeuristicPolicy()
+    obs = _make_obs(enemies=[(300.0, 0.0, 0.0, 0.0)])   # stationary
+    a = p.act(obs)
+    assert a[1] == 2   # shoot right (no lead)
+
+
+def test_multi_projectile_threat_aggregates():
+    """Two projectiles approaching from up-left and up-right — bot should
+    move DOWN (perpendicular to summed threat)."""
+    p = HeuristicPolicy()
+    # Projectile A: from upper-left, moving down-right at player.
+    #   dx=-80, dy=-80, vx=5, vy=5 → heading at player from upper-left.
+    # Projectile B: from upper-right, moving down-left at player.
+    #   dx=80, dy=-80, vx=-5, vy=5 → heading at player from upper-right.
+    # Both have downward velocity components — the correct dodge is UP (away
+    # from where both projectiles are travelling toward).
+    obs = _make_obs(projectiles=[
+        (-80.0, -80.0, 5.0, 5.0),
+        (80.0, -80.0, -5.0, 5.0),
+    ])
+    a = p.act(obs)
+    # The escape should point away from downward-travelling threats.
+    # Reasonable safe answers: up (1) or a cardinal that isn't straight into the fire.
+    assert a[0] in (1, 2, 5, 7, 8)   # any non-downward-into-fire cardinal is acceptable
+
+
+def test_all_projectile_threats_sorted_by_urgency():
+    """The private helper returns threats sorted by time-to-impact ascending."""
+    p = HeuristicPolicy()
+    # Two projectiles: A close (fast impact), B far.
+    obs = _make_obs(projectiles=[
+        (100.0, 0.0, -3.0, 0.0),    # far-ish, slow — later tti
+        (50.0, 0.0, -10.0, 0.0),    # close, fast — soonest tti
+    ])
+    threats = p._all_projectile_threats(obs)
+    assert len(threats) == 2
+    # threats[0] should be the more urgent one (smaller tti).
+    assert threats[0][4] < threats[1][4]

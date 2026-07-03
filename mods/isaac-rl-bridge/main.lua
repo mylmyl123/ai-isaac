@@ -177,6 +177,11 @@ local function apply_action(a)
     elseif s == 3 then cached_action[ButtonAction.ACTION_SHOOTDOWN]  = true
     elseif s == 4 then cached_action[ButtonAction.ACTION_SHOOTLEFT]  = true
     end
+    -- Action space (2026-07-02): removed use_active / drop_bomb / pill_card as
+    -- separate policy outputs. They were harmful when triggered by random
+    -- exploration (dropping a bomb hurts the player, random pills are often
+    -- negative). Old JSON payloads may still include those keys; we accept
+    -- them for backward compatibility but the policy no longer emits them.
     cached_action[ButtonAction.ACTION_ITEM]     = (not NO_ONESHOT) and (a.use_active == 1 or a.use_active == true) or false
     cached_action[ButtonAction.ACTION_BOMB]     = (not NO_ONESHOT) and (a.drop_bomb  == 1 or a.drop_bomb  == true) or false
     cached_action[ButtonAction.ACTION_PILLCARD] = (not NO_ONESHOT) and (a.pill_card  == 1 or a.pill_card  == true) or false

@@ -32,9 +32,9 @@ def test_zero_obs_matches_space():
 
 
 def test_encode_action_shape():
-    a = np.array([3, 2, 1, 0, 1], dtype=np.int64)
+    a = np.array([3, 2], dtype=np.int64)
     d = encode_action(a)
-    assert d == {"move": 3, "shoot": 2, "use_active": 1, "drop_bomb": 0, "pill_card": 1}
+    assert d == {"move": 3, "shoot": 2}
 
 
 def test_action_space_shape():
@@ -51,7 +51,7 @@ def test_encode_obs_from_lua_payload():
         "passives": [1, 5, 12],
         "doors": [[1, 1, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [1, 0, 0, 1, 0, 0], [0, 0, 0, 0, 0, 0]],
     }
-    obs = encode_obs(raw, last_action=np.array([1, 2, 0, 0, 0], dtype=np.int64))
+    obs = encode_obs(raw, last_action=np.array([1, 2], dtype=np.int64))
     assert obs["player"][0] == pytest.approx(320.0)
     assert obs["player"][4] == pytest.approx(6.0)     # hp_red
     assert obs["global"][0] == pytest.approx(1.0)     # stage

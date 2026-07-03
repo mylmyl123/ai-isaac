@@ -86,7 +86,7 @@ def test_aim_alignment_reward_fires_when_shooting_at_enemy():
     # Enemy directly to the right of player.
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
     # action[1] = 2 (shoot right)
-    _, _, bd = r(obs, action=[0, 2, 0, 0, 0])
+    _, _, bd = r(obs, action=[0, 2])
     assert bd.get("aim_at_enemy") == r.cfg.r_aim_at_enemy
     assert bd.get("shoot_when_enemy") == r.cfg.r_shoot_when_enemy_visible
 
@@ -95,7 +95,7 @@ def test_aim_alignment_no_reward_wrong_direction():
     r = RewardShaper(RewardConfig(r_shoot_when_enemy_visible=0.005))
     # Enemy right, but shoot left.
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
-    _, _, bd = r(obs, action=[0, 4, 0, 0, 0])   # shoot=4 = left
+    _, _, bd = r(obs, action=[0, 4])   # shoot=4 = left
     assert "aim_at_enemy" not in bd
     # Still gets the "shooting when enemy visible" bonus.
     assert bd.get("shoot_when_enemy") == r.cfg.r_shoot_when_enemy_visible
@@ -108,7 +108,7 @@ def test_shoot_spam_reward_disabled_by_default():
     """
     r = RewardShaper()   # default config
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
-    _, _, bd = r(obs, action=[0, 4, 0, 0, 0])   # shoot wrong direction
+    _, _, bd = r(obs, action=[0, 4])   # shoot wrong direction
     assert "shoot_when_enemy" not in bd
     assert "aim_at_enemy" not in bd
 
@@ -117,14 +117,14 @@ def test_kite_distance_reward_at_ideal_range():
     r = RewardShaper()
     # Enemy 200px right — inside default kite range [100, 300].
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
-    _, _, bd = r(obs, action=[0, 0, 0, 0, 0])
+    _, _, bd = r(obs, action=[0, 0])
     assert bd.get("at_kite_dist") == r.cfg.r_at_kite_dist_tick
 
 
 def test_kite_distance_no_reward_when_too_close():
     r = RewardShaper()
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(50, 0), "events": []}
-    _, _, bd = r(obs, action=[0, 0, 0, 0, 0])
+    _, _, bd = r(obs, action=[0, 0])
     assert "at_kite_dist" not in bd
 
 

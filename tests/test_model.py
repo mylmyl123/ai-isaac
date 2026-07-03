@@ -58,6 +58,7 @@ def test_sequence_forward_shape():
     seq = {k: torch.stack(vs, dim=0) for k, vs in seq.items()}
     dones = torch.zeros(T, B)
     init = policy.initial_hidden(B, torch.device("cpu"))
-    logits, values = policy.sequence_forward(seq, dones, init)
+    logits, values, aux = policy.sequence_forward(seq, dones, init)
+    assert aux.shape == (T * B, 3)   # nearest_enemy, count, nearest_proj
     assert values.shape == (T * B,)
     assert len(logits) == len(ACTION_FACTORS)

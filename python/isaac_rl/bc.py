@@ -65,7 +65,9 @@ def collect_demos(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_envs = env.n
-    log.info("collecting %d heuristic demo steps into %s (%d envs)", n_steps, save_path, n_envs)
+    action_dim = len(env.action_space.nvec) if hasattr(env.action_space, "nvec") else 2
+    log.info("collecting %d heuristic demo steps into %s (%d envs, action_dim=%d)",
+             n_steps, save_path, n_envs, action_dim)
 
     obs_list, infos = env.reset()
 
@@ -85,10 +87,13 @@ def collect_demos(
     t_start = time.time()
     while total_steps < n_steps:
         # One action per env from the heuristic (needs raw obs from info).
-        actions = np.zeros((n_envs, 5), dtype=np.int64)
+        actions = np.zeros((n_envs, action_dim), dtype=np.int64)
         for i in range(n_envs):
             raw = infos[i].get("raw") or {}
-            actions[i] = policy.act(raw)
+            act = policy.act(raw)
+            # Pad or truncate to match env's action dim (heuristic may return
+            # 2-dim under the new action space).
+            actions[i, :min(len(act), action_dim)] = act[:action_dim]
 
         # Record (obs_before_action, action).
         for i in range(n_envs):
@@ -172,7 +177,7 @@ def bc_pretrain(
     batch_size: int = 256,
     lr: float = 3.0e-4,
     device: torch.device | None = None,
-    action_head_weights: tuple[float, ...] = (2.0, 2.0, 0.5, 0.5, 0.5),
+    action_head_weights: tuple[float, ...] | None = None,
     log_every: int = 20,
 ) -> None:
     """Supervised-learning pretraining. Mutates policy_net in place.
@@ -195,15 +200,28 @@ def bc_pretrain(
         log.warning("bc_pretrain: no transitions loaded, skipping")
         return
 
+    # Auto-derive head weights from action dim if not provided. All heads get
+    # equal weight of 1.0. Old default (2.0, 2.0, 0.5, 0.5, 0.5) was for the
+    # legacy 5-head action space; now that the action space is 2 dims, uniform
+    # weights are cleaner.
+    action_dim = actions.shape[1]
+    if action_head_weights is None:
+        action_head_weights = (1.0,) * action_dim
+    if len(action_head_weights) != action_dim:
+        log.warning("action_head_weights length %d != action_dim %d; using uniform weights",
+                    len(action_head_weights), action_dim)
+        action_head_weights = (1.0,) * action_dim
+
     optim = torch.optim.Adam(policy_net.parameters(), lr=lr)
     policy_net.train()
 
-    log.info("BC: %d transitions, %d epochs, batch_size=%d, lr=%.1e", n, epochs, batch_size, lr)
+    log.info("BC: %d transitions, %d epochs, batch_size=%d, lr=%.1e, action_dim=%d, head_weights=%s",
+             n, epochs, batch_size, lr, action_dim, action_head_weights)
 
     for epoch in range(epochs):
         perm = torch.randperm(n, device=device)
         epoch_loss = 0.0
-        epoch_correct = np.zeros(5, dtype=np.int64)
+        epoch_correct = np.zeros(action_dim, dtype=np.int64)
         epoch_total = 0
         n_batches = 0
 
@@ -235,10 +253,9 @@ def bc_pretrain(
 
         avg_loss = epoch_loss / max(1, n_batches)
         acc = epoch_correct / max(1, epoch_total)
-        log.info(
-            "[BC] epoch %d/%d  loss=%.3f  acc: move=%.2f shoot=%.2f act=%.2f bomb=%.2f pill=%.2f",
-            epoch + 1, epochs, avg_loss, *acc,
-        )
+        # Format accuracy per action head dynamically (2 or 5 heads).
+        acc_str = " ".join(f"h{i}={a:.2f}" for i, a in enumerate(acc[:action_dim]))
+        log.info("[BC] epoch %d/%d  loss=%.3f  acc: %s", epoch + 1, epochs, avg_loss, acc_str)
 
     policy_net.eval()
     log.info("[BC] pretraining complete")

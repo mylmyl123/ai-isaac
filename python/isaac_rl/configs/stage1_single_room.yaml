@@ -21,6 +21,13 @@ vf_coef: 0.5
 ent_coef: 0.005        # LOW for BC-warm-started runs (was 0.05 before BC). High ent_coef destroys the pretrained deterministic policy.
 max_grad_norm: 0.5
 
+# NEW (2026-07-02): PPO best-practice tricks from "What Matters in On-Policy RL"
+# and standard implementations. All contribute to sample efficiency and
+# gradient stability.
+vf_clip: 0.2               # value-function clipping (analogous to policy clipping); 0 disables
+normalize_rewards: true    # divide rewards by running std of returns before GAE
+aux_coef: 0.1              # auxiliary supervised loss coefficient (representation learning); 0 disables
+
 use_rnd: true
 rnd_coef: 0.1
 rnd_lr: 1.0e-4

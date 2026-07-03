@@ -13,8 +13,12 @@ from gymnasium import spaces
 SCHEMA_VERSION = 1
 
 # MultiDiscrete factors — mirrored in mods/isaac-rl-bridge/main.lua apply_action().
-ACTION_FACTORS = np.array([9, 5, 2, 2, 2], dtype=np.int64)
-ACTION_KEYS = ("move", "shoot", "use_active", "drop_bomb", "pill_card")
+# Simplified 2026-07-02: removed use_active / drop_bomb / pill_card action heads
+# (they were unused / harmful when triggered by random exploration — dropping
+# a bomb hurts the player, using unknown pills is often negative). Reduces
+# action space from 360 combos to 45 (8x smaller), speeds up convergence.
+ACTION_FACTORS = np.array([9, 5], dtype=np.int64)
+ACTION_KEYS = ("move", "shoot")
 
 
 def action_space() -> spaces.MultiDiscrete:
