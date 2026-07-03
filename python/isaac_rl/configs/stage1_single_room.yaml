@@ -31,7 +31,16 @@ max_grad_norm: 0.5
 # gradient stability.
 vf_clip: 0.2               # value-function clipping (analogous to policy clipping); 0 disables
 normalize_rewards: true    # divide rewards by running std of returns before GAE
+symlog_rewards: true       # DreamerV3-style symlog transformation before RMS (compresses spikes)
 aux_coef: 0.1              # auxiliary supervised loss coefficient (representation learning); 0 disables
+
+# Kickstarting: KL penalty toward frozen BC teacher policy. Prevents
+# catastrophic forgetting of BC behavior during early PPO. Auto-populates
+# kickstart_teacher_path from bc_pretrained.pt if you run with --collect-demos
+# in the same session; you can also point it at a checkpoint from a previous
+# run via YAML: kickstart_teacher_path: /path/to/bc_pretrained.pt
+kickstart_coef: 0.5              # initial KL coefficient (decays linearly to 0)
+kickstart_decay_updates: 500     # number of PPO updates over which the coef decays
 
 use_rnd: true
 rnd_coef: 0.1

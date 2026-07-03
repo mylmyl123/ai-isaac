@@ -10,7 +10,7 @@ import numpy as np
 from gymnasium import spaces
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # MultiDiscrete factors — mirrored in mods/isaac-rl-bridge/main.lua apply_action().
 # Simplified 2026-07-02: removed use_active / drop_bomb / pill_card action heads
@@ -38,6 +38,15 @@ PICKUP_FEATS = 8
 
 PASSIVES_K = 256
 
+# Spatial obs (added schema v2). Preprocessed spatial features derived from
+# player position within the room. Fed as a small dense vector; forces the
+# network to reason about "where am I in this room" without needing to learn
+# it from raw pixel coords. Features (in order):
+#   [0, 1] player position normalized to [-1, 1] within room
+#   [2, 3, 4, 5] normalized distance to each wall (left, up, right, down)
+#   [6, 7] unit vector to nearest OPEN door, or (0, 0) if none open
+SPATIAL_DIM = 8
+
 
 def observation_space() -> spaces.Dict:
     return spaces.Dict({
@@ -59,6 +68,8 @@ def observation_space() -> spaces.Dict:
         }),
         "global":      spaces.Box(-np.inf, np.inf, shape=(GLOBAL_DIM,), dtype=np.float32),
         "last_action": spaces.Box(0.0, 1.0, shape=(len(ACTION_FACTORS),), dtype=np.float32),
+        # Spatial features (added schema v2). See SPATIAL_DIM comment above.
+        "spatial":    spaces.Box(-1.0, 1.0, shape=(SPATIAL_DIM,), dtype=np.float32),
     })
 
 
@@ -133,6 +144,89 @@ def _decode_doors(raw: list | None) -> np.ndarray:
     return out
 
 
+def _compute_spatial(
+    raw: dict[str, Any],
+) -> np.ndarray:
+    """Compute preprocessed spatial features (schema v2).
+
+    Returns an (SPATIAL_DIM,) float32 vector:
+      [0, 1] player position normalized to [-1, 1] within the room
+      [2..5] normalized distance to each wall (L, U, R, D), clipped to [0, 1]
+      [6, 7] unit vector to nearest OPEN door
+
+    All features are zero if room_bounds is missing (backward-compatible with
+    schema v1). The network's spatial_mlp will produce zero-mean features in
+    that case and rely on the other obs paths.
+    """
+    out = np.zeros(SPATIAL_DIM, dtype=np.float32)
+
+    bounds = raw.get("room_bounds")
+    if not bounds:
+        return out
+
+    tl_x = float(bounds.get("tl_x", 0) or 0)
+    tl_y = float(bounds.get("tl_y", 0) or 0)
+    br_x = float(bounds.get("br_x", 1) or 1)
+    br_y = float(bounds.get("br_y", 1) or 1)
+    width = max(1.0, br_x - tl_x)
+    height = max(1.0, br_y - tl_y)
+
+    player = raw.get("player") or {}
+    px = float(player.get("x", 0) or 0)
+    py = float(player.get("y", 0) or 0)
+
+    # Normalized position within room: -1 (top-left) to +1 (bottom-right).
+    nx = 2.0 * (px - tl_x) / width - 1.0
+    ny = 2.0 * (py - tl_y) / height - 1.0
+    out[0] = np.clip(nx, -1.0, 1.0)
+    out[1] = np.clip(ny, -1.0, 1.0)
+
+    # Distance to each wall, normalized by room dimension.
+    dl = np.clip((px - tl_x) / width, 0.0, 1.0)
+    du = np.clip((py - tl_y) / height, 0.0, 1.0)
+    dr = np.clip((br_x - px) / width, 0.0, 1.0)
+    dd = np.clip((br_y - py) / height, 0.0, 1.0)
+    out[2] = dl
+    out[3] = du
+    out[4] = dr
+    out[5] = dd
+
+    # Unit vector to nearest OPEN door. Door slots are LEFT, UP, RIGHT, DOWN.
+    # Approximate door positions at wall midpoints. Filter for exists+open.
+    doors = raw.get("doors") or []
+    door_positions = [
+        (tl_x, (tl_y + br_y) / 2.0),                  # LEFT
+        ((tl_x + br_x) / 2.0, tl_y),                  # UP
+        (br_x, (tl_y + br_y) / 2.0),                  # RIGHT
+        ((tl_x + br_x) / 2.0, br_y),                  # DOWN
+    ]
+    best_dist = None
+    best_dir = (0.0, 0.0)
+    for slot in range(min(4, len(doors))):
+        d = doors[slot]
+        if not d or len(d) < 2:
+            continue
+        exists = bool(d[0])
+        is_open = bool(d[1])
+        if not exists or not is_open:
+            continue
+        dx, dy = door_positions[slot]
+        vx = dx - px
+        vy = dy - py
+        dist = float(np.hypot(vx, vy))
+        if dist < 1e-6:
+            unit = (0.0, 0.0)
+        else:
+            unit = (vx / dist, vy / dist)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_dir = unit
+    out[6] = best_dir[0]
+    out[7] = best_dir[1]
+
+    return out
+
+
 def _decode_passives(raw: list | None) -> np.ndarray:
     out = np.zeros(PASSIVES_K, dtype=np.int8)
     if not raw:
@@ -169,6 +263,7 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
     obs["passives"] = _decode_passives(raw.get("passives"))
     obs["room_grid"] = _decode_room_grid(raw.get("room_grid"))
     obs["doors"] = _decode_doors(raw.get("doors"))
+    obs["spatial"] = _compute_spatial(raw)
 
     for key, dim, feat_dim in [
         ("enemies", MAX_ENEMIES, ENEMY_FEATS),
@@ -202,6 +297,9 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         "doors": obs["doors"],
         "global": obs["global"],
         "last_action": obs["last_action"],
+        # Schema v2 addition. Backward-compat: older obs dicts without
+        # "spatial" get zeros (matches _compute_spatial fallback behavior).
+        "spatial": obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)),
     }
     for key in ("enemies", "projectiles", "pickups"):
         out[f"{key}_feats"] = obs[key]["feats"]

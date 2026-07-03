@@ -66,11 +66,29 @@ class PPOConfig:
     # multiple orders of magnitude (dense +0.005 vs terminal +50). Standard
     # trick from "What Matters in On-Policy RL" (Andrychowicz 2020).
     normalize_rewards: bool = True
+    # Symlog reward transformation (DreamerV3, Hafner 2023).
+    # symlog(x) = sign(x) * log(1 + |x|)
+    # Compresses wide-magnitude rewards into a narrower range without
+    # needing running stats: -50 -> -3.93, -3 -> -1.39, -0.01 -> -0.00995,
+    # +2 -> +1.10, +50 -> +3.93. Complements or replaces normalize_rewards
+    # (they can compose; symlog first, then RMS on the transformed signal).
+    # Set to True to enable. Cheap and stateless.
+    symlog_rewards: bool = False
     # Auxiliary supervised losses (UNREAL-style representation learning).
     # For each obs the model predicts (nearest_enemy_dist, enemy_count,
     # nearest_proj_dist) all normalised. MSE loss added to PPO's total loss
     # with coefficient aux_coef. Set to 0 to disable.
     aux_coef: float = 0.1
+    # Kickstarting (Schmitt et al. 2018): KL divergence penalty toward a
+    # frozen BC-pretrained teacher. Prevents catastrophic forgetting of
+    # BC behavior during early PPO. Coefficient decays linearly to zero
+    # over kickstart_decay_updates PPO updates. Set kickstart_coef=0 to
+    # disable.
+    kickstart_coef: float = 0.5           # initial KL weight (high enough to matter)
+    kickstart_decay_updates: int = 500    # updates over which coef decays to 0
+    # Path to a frozen teacher checkpoint (typically bc_pretrained.pt from a
+    # previous run). Auto-populated from run_dir if BC ran this session.
+    kickstart_teacher_path: str | None = None
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
     gamma: float = 0.999
@@ -151,6 +169,39 @@ def compute_gae(rewards, values, dones, next_value, gamma, lam):
         advantages[t] = last_gae
     returns = advantages + values
     return advantages, returns
+
+
+def symlog(x: torch.Tensor) -> torch.Tensor:
+    """Symmetric log transformation (DreamerV3 / Hafner 2023).
+
+    symlog(x) = sign(x) * log(1 + |x|)
+
+    Compresses wide-magnitude signals into a narrow, symmetric range while
+    preserving sign and monotonicity. Unlike running-std normalisation, it's
+    stateless — no dependence on policy-dependent statistics that can drift.
+
+    Reference magnitudes for Isaac rewards:
+        -50 -> -3.93   (terminal mom-kill loss)
+         -3 -> -1.39   (death)
+         -0.1 -> -0.0953 (idle penalty per tick)
+         -0.003 -> -0.003 (step penalty; almost identity in [-1, 1])
+         +0.001 -> +0.001 (full HP tick)
+         +0.5 -> +0.405 (kill)
+         +2.0 -> +1.10 (room clear)
+         +50 -> +3.93 (mom kill)
+
+    All rewards end up in ~[-4, +4], gradient magnitudes are comparable.
+    """
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def symexp(x: torch.Tensor) -> torch.Tensor:
+    """Inverse of symlog: symexp(x) = sign(x) * (exp(|x|) - 1).
+
+    Not currently used (values are learned in symlog space), but useful for
+    diagnostic logging of "true-scale" predicted returns.
+    """
+    return torch.sign(x) * torch.expm1(torch.abs(x))
 
 
 def aux_labels_from_obs(obs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -362,6 +413,34 @@ def train(cfg: PPOConfig) -> None:
                 "global_step": global_step,
             }, bc_ckpt)
             log.info("saved BC-pretrained checkpoint: %s", bc_ckpt)
+            # Auto-populate kickstart teacher path from freshly-saved BC weights.
+            # User can override via cfg.kickstart_teacher_path in YAML.
+            if cfg.kickstart_coef > 0 and cfg.kickstart_teacher_path is None:
+                cfg.kickstart_teacher_path = str(bc_ckpt)
+                log.info("kickstart teacher auto-set to %s", bc_ckpt)
+
+    # ---- Kickstarting teacher (frozen BC policy) --------------------------
+    # Load a frozen copy of the BC policy that PPO will be penalised for
+    # diverging from. KL(current || teacher) is added to the loss with
+    # coefficient kickstart_coef which decays linearly to 0 over
+    # kickstart_decay_updates PPO updates. Prevents catastrophic forgetting
+    # of BC behaviour during early PPO. Set kickstart_coef=0 to disable.
+    teacher_policy = None
+    if cfg.kickstart_coef > 0 and cfg.kickstart_teacher_path:
+        teacher_ckpt_path = Path(cfg.kickstart_teacher_path)
+        if teacher_ckpt_path.exists():
+            teacher_policy = IsaacPolicy(PolicyConfig(**cfg.policy)).to(device)
+            teacher_ckpt = torch.load(teacher_ckpt_path, map_location=device, weights_only=False)
+            teacher_policy.load_state_dict(teacher_ckpt["policy"])
+            teacher_policy.eval()
+            for p in teacher_policy.parameters():
+                p.requires_grad_(False)
+            log.info("kickstart teacher loaded from %s (coef=%.3f, decay over %d updates)",
+                     teacher_ckpt_path, cfg.kickstart_coef, cfg.kickstart_decay_updates)
+        else:
+            log.warning("kickstart_teacher_path %s does not exist — kickstarting disabled",
+                        teacher_ckpt_path)
+            cfg.kickstart_coef = 0.0
 
     # Helper: save a checkpoint at the current state. Called every
     # cfg.checkpoint_every steps AND on any exit (Ctrl+C, exception, normal
@@ -477,6 +556,13 @@ def train(cfg: PPOConfig) -> None:
         values_seq = torch.stack(rollout_values, dim=0)                # [T, B]
         dones_seq = torch.stack(rollout_dones, dim=0)                  # [T, B]
 
+        # Symlog transformation (DreamerV3): applied BEFORE running-std
+        # normalization so both can compose. Stateless compression of
+        # wide-magnitude rewards; symlog on top of RMS gives a two-stage
+        # normalization: (1) compress spikes, (2) rescale to unit variance.
+        if cfg.symlog_rewards:
+            rewards_seq = symlog(rewards_seq)
+
         # Reward normalization: track running std of returns (not raw rewards
         # — return-based normalization is the version validated in Andrychowicz
         # 2020) and divide rewards by it before GAE. We compute pseudo-returns
@@ -520,7 +606,7 @@ def train(cfg: PPOConfig) -> None:
         T = cfg.rollout_steps
         B = cfg.n_envs
         n_samples = T * B
-        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": []}
+        losses = {"policy": [], "value": [], "entropy": [], "rnd": [], "aux": [], "kickstart": []}
 
         for _ in range(cfg.n_epochs):
             # Recompute sequence forward each epoch — recurrent PPO can't shuffle timesteps
@@ -579,6 +665,31 @@ def train(cfg: PPOConfig) -> None:
                     aux_loss = F.mse_loss(aux_pred, aux_targets)
                     loss = loss + cfg.aux_coef * aux_loss
                     aux_loss_val = float(aux_loss.item())
+                # Kickstarting: KL(current || teacher) added to loss with
+                # linearly-decaying coefficient. Prevents BC forgetting.
+                kickstart_loss_val = 0.0
+                if teacher_policy is not None:
+                    with torch.no_grad():
+                        t_logits, _, _ = teacher_policy.sequence_forward(mb_seq_obs, mb_dones, mb_init)
+                    # Compute per-head KL and sum across factored heads.
+                    kl_total = torch.zeros(logits_list[0].shape[0], device=logits_list[0].device)
+                    for i, (student_logits, teacher_logits) in enumerate(zip(logits_list, t_logits)):
+                        # KL(student || teacher) = sum_a p_student(a) * (log p_student - log p_teacher)
+                        # Standard for policy distillation. We use student-first
+                        # (forward KL) because we want the student to stay near
+                        # the teacher's action distribution.
+                        student_lp = F.log_softmax(student_logits, dim=-1)
+                        teacher_lp = F.log_softmax(teacher_logits, dim=-1)
+                        student_p = student_lp.exp()
+                        kl = (student_p * (student_lp - teacher_lp)).sum(-1)
+                        kl_total = kl_total + kl
+                    kl_mean = kl_total.mean()
+                    # Linear decay of the coefficient from kickstart_coef to 0
+                    # over kickstart_decay_updates PPO updates.
+                    decay = max(0.0, 1.0 - updates / max(1, cfg.kickstart_decay_updates))
+                    effective_coef = cfg.kickstart_coef * decay
+                    loss = loss + effective_coef * kl_mean
+                    kickstart_loss_val = float(kl_mean.item())
                 # Value-function warmup: for the first cfg.vf_warmup_updates PPO
                 # updates, ONLY train the value function — zero the policy loss
                 # so the pretrained policy weights don't get overwritten by
@@ -601,6 +712,8 @@ def train(cfg: PPOConfig) -> None:
                 losses["value"].append(float(value_loss.item()))
                 if aux_loss_val > 0:
                     losses["aux"].append(aux_loss_val)
+                if kickstart_loss_val > 0:
+                    losses["kickstart"].append(kickstart_loss_val)
                 losses["entropy"].append(float(-entropy_loss.item()))
 
         # --- RND predictor update ---------------------------------------

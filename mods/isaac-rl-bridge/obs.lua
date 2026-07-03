@@ -276,6 +276,15 @@ function Obs.build(tick, reward_events, run_state)
         enemies = { feats = enemies, mask = e_mask, count = n_enemies },
         projectiles = { feats = proj, mask = p_mask, count = n_proj },
         pickups = { feats = pickups, mask = k_mask, count = n_pickups },
+        -- Room geometry (added 2026-07-02 for spatial-features obs). Uses
+        -- the same tl/br as the entity normalizers so Python can compute
+        -- player_normalized_position + wall distances + door directions
+        -- deterministically. Fields:
+        --   tl_x, tl_y: top-left world coords of the room's playable area
+        --   br_x, br_y: bottom-right world coords
+        -- Backward compatible: older Python clients that don't read this
+        -- field simply ignore it.
+        room_bounds = { tl_x = tl.X, tl_y = tl.Y, br_x = br.X, br_y = br.Y },
         global = {
             stage = level:GetStage(),
             stage_type = level:GetStageType(),
