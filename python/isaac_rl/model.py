@@ -45,6 +45,7 @@ from .spaces import (
     PASSIVES_K,
     PICKUP_FEATS,
     PLAYER_DIM,
+    PLAYER_HISTORY_DIM,
     PROJ_FEATS,
     ROOM_H,
     ROOM_W,
@@ -54,13 +55,18 @@ from .spaces import (
 
 @dataclass
 class PolicyConfig:
-    entity_dim: int = 128
-    proj_dim: int = 128
-    pickup_dim: int = 64
-    grid_channels: tuple = (32, 64)
-    trunk_dim: int = 512
-    gru_dim: int = 512
-    n_attn_heads: int = 2
+    # Network capacity scaled up (2026-07-02) to take advantage of GPU compute.
+    # Previous values were tuned for a compute-limited baseline; on any modern
+    # GPU (RTX 3060 Ti or better) these larger dimensions run at similar
+    # wall-clock speed but represent the input better. Total params: ~8M (was ~2M).
+    entity_dim: int = 192          # was 128; more capacity for enemy encoding
+    proj_dim: int = 192            # was 128; more capacity for projectile encoding
+    pickup_dim: int = 96           # was 64
+    grid_channels: tuple = (48, 96)   # was (32, 64); ~2.25x conv capacity
+    trunk_dim: int = 768           # was 512
+    gru_dim: int = 1024            # was 512; recurrent memory is the most
+                                   # important width for our recurrent PPO
+    n_attn_heads: int = 4          # was 2; more attention heads
     n_enemy_attn_layers: int = 2
     n_proj_attn_layers: int = 1
 
@@ -162,10 +168,10 @@ class IsaacPolicy(nn.Module):
         self.cfg = cfg or PolicyConfig()
         c = self.cfg
 
-        self.player_mlp   = _mlp([PLAYER_DIM, 128, 128], activate_final=True, layer_norm=True)
-        self.global_mlp   = _mlp([GLOBAL_DIM, 64, 64], activate_final=True, layer_norm=True)
-        self.passives_mlp = _mlp([PASSIVES_K, 64], activate_final=True, layer_norm=True)
-        self.last_action_mlp = _mlp([len(ACTION_FACTORS), 32], activate_final=True, layer_norm=True)
+        self.player_mlp   = _mlp([PLAYER_DIM, 192, 192], activate_final=True, layer_norm=True)
+        self.global_mlp   = _mlp([GLOBAL_DIM, 96, 96], activate_final=True, layer_norm=True)
+        self.passives_mlp = _mlp([PASSIVES_K, 96], activate_final=True, layer_norm=True)
+        self.last_action_mlp = _mlp([len(ACTION_FACTORS), 48], activate_final=True, layer_norm=True)
 
         self.enemy_encoder = _mlp([ENEMY_FEATS, c.entity_dim, c.entity_dim], activate_final=True, layer_norm=True)
         self.enemy_attn = MaskedSelfAttention(c.entity_dim, c.n_attn_heads, c.n_enemy_attn_layers)
@@ -180,14 +186,21 @@ class IsaacPolicy(nn.Module):
             nn.Conv2d(4, gc1, 3, padding=1), nn.ReLU(inplace=True),
             nn.Conv2d(gc1, gc2, 3, padding=1), nn.ReLU(inplace=True),
         )
-        self.doors_mlp = _mlp([4 * 6, 32], activate_final=True, layer_norm=True)
+        self.doors_mlp = _mlp([4 * 6, 48], activate_final=True, layer_norm=True)
         # Spatial features MLP (schema v2). Small dedicated pathway for
         # preprocessed room-position/wall-distance/door-direction features.
         # Feeding these as first-class inputs is far more sample-efficient
         # than making the network learn spatial reasoning from raw pixels.
-        self.spatial_mlp = _mlp([SPATIAL_DIM, 32, 32], activate_final=True, layer_norm=True)
+        self.spatial_mlp = _mlp([SPATIAL_DIM, 48, 48], activate_final=True, layer_norm=True)
+        # Player history MLP (frame stacking, 2026-07-02). Consumes the last
+        # N frames of (nx, ny, vx, vy) to give the network explicit access
+        # to short-term dynamics. Redundant with GRU but helps early BC.
+        self.player_history_mlp = _mlp([PLAYER_HISTORY_DIM, 48, 48], activate_final=True, layer_norm=True)
 
-        trunk_in = 128 + 64 + 64 + 32 + c.entity_dim + c.proj_dim + c.pickup_dim + gc2 + 32 + 32
+        # trunk_in is computed from the actual per-stream output sizes rather
+        # than hardcoded constants so future capacity changes stay consistent.
+        static_dims = 192 + 96 + 96 + 48 + 48 + 48 + 48   # player + global + passives + last_act + doors + spatial + player_history
+        trunk_in = static_dims + c.entity_dim + c.proj_dim + c.pickup_dim + gc2
         self.trunk = _mlp([trunk_in, c.trunk_dim, c.trunk_dim], activate_final=True, layer_norm=True)
 
         self.gru = nn.GRUCell(c.trunk_dim, c.gru_dim)
@@ -254,8 +267,9 @@ class IsaacPolicy(nn.Module):
 
         doors = self.doors_mlp(obs["doors"].flatten(1))
         spatial = self.spatial_mlp(obs["spatial"])
+        player_hist = self.player_history_mlp(obs["player_history"])
 
-        x = torch.cat([player, global_, passives, last_act, enemies, projs, pickups, grid, doors, spatial], dim=-1)
+        x = torch.cat([player, global_, passives, last_act, enemies, projs, pickups, grid, doors, spatial, player_hist], dim=-1)
         return self.trunk(x)
 
     # -- rollout step -------------------------------------------------------

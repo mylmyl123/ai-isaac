@@ -26,6 +26,9 @@ from .protocol import recv_frame, send_frame
 from .reward import RewardConfig, RewardShaper
 from .spaces import (
     ACTION_FACTORS,
+    HISTORY_FEATS,
+    HISTORY_FRAMES,
+    PLAYER_HISTORY_DIM,
     action_space,
     encode_action,
     encode_obs,
@@ -97,10 +100,58 @@ class SocketIsaacEnv(gym.Env):
         self._last_action = np.zeros(len(ACTION_FACTORS), dtype=np.int64)
         self._last_seed: int | None = None
         self._steps = 0
+        # Frame stacking: rolling buffer of past player states for the
+        # "player_history" obs field. Shape [HISTORY_FRAMES, HISTORY_FEATS]:
+        # each row is [nx, ny, vx, vy] normalised. Newest frame at index -1.
+        # Zeroed on reset. Updated each step from the incoming obs's player
+        # position + velocity.
+        self._player_history = np.zeros((HISTORY_FRAMES, HISTORY_FEATS), dtype=np.float32)
 
         self.reward_shaper = RewardShaper(reward_config)
 
         self._open_server()
+
+    # -- observation helpers ---------------------------------------------
+
+    def _update_player_history(self, raw: dict, is_reset: bool = False) -> None:
+        """Push a new player state into the rolling history buffer.
+
+        Frame stacking (added 2026-07-02). Provides short-term motion context
+        beyond what the GRU's internal state already captures — explicitly
+        redundant, but helps BC learn dynamics from small demo sets.
+
+        On reset, buffer is zeroed BEFORE recording the initial frame so that
+        all 4 slots hold the initial state (avoids startup transients).
+        """
+        player = raw.get("player") or {}
+        bounds = raw.get("room_bounds") or {}
+        tl_x = float(bounds.get("tl_x", 0) or 0)
+        tl_y = float(bounds.get("tl_y", 0) or 0)
+        br_x = float(bounds.get("br_x", 1) or 1)
+        br_y = float(bounds.get("br_y", 1) or 1)
+        width = max(1.0, br_x - tl_x)
+        height = max(1.0, br_y - tl_y)
+        px = float(player.get("x", 0) or 0)
+        py = float(player.get("y", 0) or 0)
+        nx = 2.0 * (px - tl_x) / width - 1.0
+        ny = 2.0 * (py - tl_y) / height - 1.0
+        vx = float(player.get("vx", 0) or 0) / 10.0
+        vy = float(player.get("vy", 0) or 0) / 10.0
+        new_frame = np.array([nx, ny, vx, vy], dtype=np.float32)
+
+        if is_reset:
+            # Broadcast: fill the whole history with the initial state.
+            self._player_history[:] = new_frame[None, :]
+        else:
+            # Shift oldest out (index 0), append newest at index -1.
+            self._player_history = np.roll(self._player_history, -1, axis=0)
+            self._player_history[-1] = new_frame
+
+    def _build_obs(self, raw: dict) -> dict[str, Any]:
+        """encode_obs + inject frame-stacked player_history field."""
+        obs = encode_obs(raw, last_action=self._last_action)
+        obs["player_history"] = self._player_history.reshape(-1).copy()
+        return obs
 
     # -- lifecycle --------------------------------------------------------
 
@@ -194,7 +245,10 @@ class SocketIsaacEnv(gym.Env):
 
         self._steps = 0
         self._last_action[:] = 0
-        obs = encode_obs(raw, last_action=self._last_action)
+        # Reset frame-stacking buffer to the initial player state
+        # (broadcasts across all 4 slots so no startup transient).
+        self._update_player_history(raw, is_reset=True)
+        obs = self._build_obs(raw)
         info: dict[str, Any] = {"seed": self._last_seed, "raw": raw}
         return obs, info
 
@@ -215,7 +269,10 @@ class SocketIsaacEnv(gym.Env):
             # 'don't do whatever led to this'. It's small enough not to dominate.
             self._last_action = a
             self._steps += 1
-            obs = encode_obs(_crash_penalty_obs(self.port), last_action=self._last_action)
+            crash_raw = _crash_penalty_obs(self.port)
+            # Advance frame-stack even on crash to avoid stale history.
+            self._update_player_history(crash_raw)
+            obs = self._build_obs(crash_raw)
             info: dict[str, Any] = {
                 "raw": _crash_penalty_obs(self.port),
                 "steps": self._steps,
@@ -226,7 +283,8 @@ class SocketIsaacEnv(gym.Env):
 
         self._last_action = a
         self._steps += 1
-        obs = encode_obs(raw, last_action=self._last_action)
+        self._update_player_history(raw)
+        obs = self._build_obs(raw)
 
         reward, terminated, breakdown = self.reward_shaper(raw, action=a)
         truncated = self._steps >= self.max_steps

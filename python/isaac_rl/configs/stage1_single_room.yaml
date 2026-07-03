@@ -5,6 +5,14 @@
 # Reward shaping is AGGRESSIVE by default — dense per-tick signals guide the
 # policy toward productive behavior fast, which matters when compute is limited.
 # See python/isaac_rl/reward.py for the full RewardConfig field list.
+#
+# NOTE (2026-07-02): Recommended n_envs values by CPU:
+#   4-core CPU:   n_envs=2, minibatch_size=256
+#   6-core CPU:   n_envs=4, minibatch_size=512   (default)
+#   8-core CPU:   n_envs=8, minibatch_size=1024
+#   12+-core CPU: n_envs=12, minibatch_size=1536
+# Watch Task Manager: if CPU stays under 80% you can bump n_envs; if it
+# saturates at 100%, back off. Isaac uses ~1 core per instance at 60Hz.
 
 run_name: stage1_single_room
 n_envs: 1
@@ -41,6 +49,11 @@ aux_coef: 0.1              # auxiliary supervised loss coefficient (representati
 # run via YAML: kickstart_teacher_path: /path/to/bc_pretrained.pt
 kickstart_coef: 0.5              # initial KL coefficient (decays linearly to 0)
 kickstart_decay_updates: 500     # number of PPO updates over which the coef decays
+
+# Phase A (2026-07-02): scale-up improvements.
+lr_warmup_updates: 100     # linearly ramp LR from 0 to cfg.lr for first 100 updates
+weight_decay: 1.0e-5       # AdamW weight decay (very mild L2 regularisation)
+target_kl: 0.03            # early-stop PPO epoch if approx_kl exceeds this
 
 use_rnd: true
 rnd_coef: 0.1

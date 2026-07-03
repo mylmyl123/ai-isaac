@@ -407,3 +407,22 @@ Milestones from the plan, in order:
 5. **M5 — >30% on held-out seeds.** Run `eval.py` with the stage-5 seed pool.
 
 If Stage 1 doesn't converge in ~3 months on PPO, the plan's fallback is a swap to DreamerV3 — the encoder in `model.py` is reusable directly.
+
+---
+
+## Future research directions
+
+A detailed roadmap of advanced RL techniques we haven't implemented yet lives
+in **[docs/FUTURE_WORK.md](docs/FUTURE_WORK.md)**. Contents:
+
+- **Phase B** (medium effort, high value): distributional value function (C51),
+  curriculum learning, predict-future-rewards aux task, latent variable
+  conditioning (AlphaStar-style).
+- **Phase C** (high effort, potentially transformative): DreamerV3-inspired
+  world model with imagination rollouts, transformer-based policy.
+- **Phase D** (advanced exploration): Never-Give-Up episodic novelty,
+  Population-Based Training, bootstrapped Q-ensembles.
+
+Each item includes rationale, papers, concrete implementation plan, effort
+estimate, and expected gain. Refer to that doc if the current setup plateaus
+or if we want to push toward superhuman play.

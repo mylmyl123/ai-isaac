@@ -84,6 +84,19 @@ class PPOConfig:
     # Prevents catastrophic single-update drift. Standard value is 0.015-0.03
     # (Schulman 2017); we use 0.03 as a soft ceiling. Set to 0 to disable.
     target_kl: float = 0.03
+
+    # Learning rate warmup: linearly ramp LR from 0 to cfg.lr over the first
+    # N updates. Prevents catastrophic early-update instability, especially
+    # important for BC-warm-started runs where the initial policy is highly
+    # competent and we don't want to destroy it with huge early gradients.
+    # Set to 0 to disable warmup entirely.
+    lr_warmup_updates: int = 100
+
+    # Weight decay (AdamW instead of Adam). Small L2 regularisation.
+    # Prevents overfitting to demo distribution, encourages generalisation.
+    # Standard trick from language model / vision transformer training,
+    # increasingly common in RL (Cobbe 2020, DreamerV3).
+    weight_decay: float = 1e-5
     # Kickstarting (Schmitt et al. 2018): KL divergence penalty toward a
     # frozen BC-pretrained teacher. Prevents catastrophic forgetting of
     # BC behavior during early PPO. Coefficient decays linearly to zero
@@ -322,12 +335,11 @@ def train(cfg: PPOConfig) -> None:
     policy_cfg = PolicyConfig(**cfg.policy)
     policy = IsaacPolicy(policy_cfg).to(device)
     rnd = RND(feat_dim=policy_cfg.trunk_dim).to(device) if cfg.use_rnd else None
-    # Adam optimizer: PPO-tuned parameters (Andrychowicz 2020, Engstrom 2020).
-    # PyTorch's default eps=1e-8 is too small for RL; PPO's official impl
-    # uses 1e-5, which gives a wider effective learning rate range and better
-    # convergence on non-stationary RL objectives.
-    optim = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
-    rnd_optim = torch.optim.Adam(rnd.predictor.parameters(), lr=cfg.rnd_lr, eps=1e-5) if rnd is not None else None
+    # Optimizer: AdamW with PPO-tuned eps=1e-5 (Andrychowicz 2020, Engstrom 2020).
+    # PyTorch's default eps=1e-8 is too small for RL. AdamW adds decoupled
+    # weight decay for mild regularisation (standard in modern RL training).
+    optim = torch.optim.AdamW(policy.parameters(), lr=cfg.lr, eps=1e-5, weight_decay=cfg.weight_decay)
+    rnd_optim = torch.optim.AdamW(rnd.predictor.parameters(), lr=cfg.rnd_lr, eps=1e-5, weight_decay=cfg.weight_decay) if rnd is not None else None
 
     # --- logging --------------------------------------------------------
     run_dir = Path(cfg.checkpoint_dir) / cfg.run_name / time.strftime("%Y%m%d-%H%M%S")
@@ -626,11 +638,21 @@ def train(cfg: PPOConfig) -> None:
         # Reassemble sequenced obs by key.
         seq_obs = stack_time_batch(rollout_obs)  # each value [T, B, ...]
 
-        # LR decay.
-        if cfg.lr_decay:
-            frac = 1.0 - min(1.0, global_step / cfg.total_env_steps)
-            for g in optim.param_groups:
-                g["lr"] = cfg.lr * frac
+        # LR schedule: warmup + decay. Warmup ramps LR from 0 to cfg.lr
+        # linearly over the first lr_warmup_updates PPO updates. This
+        # protects BC-pretrained weights from being blown out by the very
+        # first PPO update while advantages are still noisy. After warmup,
+        # standard linear decay over remaining training kicks in.
+        if cfg.lr_warmup_updates > 0 and updates < cfg.lr_warmup_updates:
+            warmup_frac = (updates + 1) / cfg.lr_warmup_updates   # 0 -> 1
+            effective_lr = cfg.lr * warmup_frac
+        elif cfg.lr_decay:
+            decay_frac = 1.0 - min(1.0, global_step / cfg.total_env_steps)
+            effective_lr = cfg.lr * decay_frac
+        else:
+            effective_lr = cfg.lr
+        for g in optim.param_groups:
+            g["lr"] = effective_lr
 
         # --- PPO epochs -------------------------------------------------
         T = cfg.rollout_steps

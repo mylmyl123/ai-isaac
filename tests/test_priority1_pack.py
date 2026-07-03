@@ -21,6 +21,7 @@ from isaac_rl.spaces import (
     ENEMY_FEATS, PICKUP_FEATS, PROJ_FEATS,
     PLAYER_DIM, GLOBAL_DIM, PASSIVES_K, ROOM_H, ROOM_W,
     SPATIAL_DIM,
+    PLAYER_HISTORY_DIM,
     _compute_spatial,
     zero_obs,
 )
@@ -164,6 +165,7 @@ def _random_batch(B: int = 2) -> dict[str, torch.Tensor]:
         "room_grid":         torch.zeros(B, 4, ROOM_H, ROOM_W),
         "doors":             torch.zeros(B, 4, 6),
         "spatial":           torch.zeros(B, SPATIAL_DIM),
+        "player_history":    torch.zeros(B, PLAYER_HISTORY_DIM),
     }
 
 

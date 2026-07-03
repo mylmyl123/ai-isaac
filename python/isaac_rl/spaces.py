@@ -47,6 +47,15 @@ PASSIVES_K = 256
 #   [6, 7] unit vector to nearest OPEN door, or (0, 0) if none open
 SPATIAL_DIM = 8
 
+# Player history frame-stacking (added 2026-07-02).
+# Last N frames of player state, oldest-first: [nx, ny, vx, vy] per frame.
+# Provides short-term motion context beyond what the GRU's internal state
+# provides (redundant but explicit; helps early BC learning of dynamics).
+# Computed Python-side using a per-env rolling buffer in the env wrapper.
+HISTORY_FRAMES = 4
+HISTORY_FEATS = 4                                    # (nx, ny, vx, vy)
+PLAYER_HISTORY_DIM = HISTORY_FRAMES * HISTORY_FEATS  # 4 * 4 = 16
+
 
 def observation_space() -> spaces.Dict:
     return spaces.Dict({
@@ -70,6 +79,9 @@ def observation_space() -> spaces.Dict:
         "last_action": spaces.Box(0.0, 1.0, shape=(len(ACTION_FACTORS),), dtype=np.float32),
         # Spatial features (added schema v2). See SPATIAL_DIM comment above.
         "spatial":    spaces.Box(-1.0, 1.0, shape=(SPATIAL_DIM,), dtype=np.float32),
+        # Player history (frame stacking, added 2026-07-02). Last N frames
+        # of [nx, ny, vx, vy] flattened. Bootstrapped by the env wrapper.
+        "player_history": spaces.Box(-np.inf, np.inf, shape=(PLAYER_HISTORY_DIM,), dtype=np.float32),
     })
 
 
@@ -300,6 +312,8 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         # Schema v2 addition. Backward-compat: older obs dicts without
         # "spatial" get zeros (matches _compute_spatial fallback behavior).
         "spatial": obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)),
+        # Player history (frame stacking). Backward compat: zeros if missing.
+        "player_history": obs.get("player_history", np.zeros(PLAYER_HISTORY_DIM, dtype=np.float32)),
     }
     for key in ("enemies", "projectiles", "pickups"):
         out[f"{key}_feats"] = obs[key]["feats"]
