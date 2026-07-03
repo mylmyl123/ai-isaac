@@ -80,7 +80,9 @@ def _make_enemy_at(dx: float, dy: float, hp: float = 1.0) -> dict:
 
 
 def test_aim_alignment_reward_fires_when_shooting_at_enemy():
-    r = RewardShaper()
+    # r_shoot_when_enemy_visible is disabled by default (was tear spam);
+    # explicitly enable it for this test to verify the mechanism.
+    r = RewardShaper(RewardConfig(r_shoot_when_enemy_visible=0.005))
     # Enemy directly to the right of player.
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
     # action[1] = 2 (shoot right)
@@ -90,13 +92,25 @@ def test_aim_alignment_reward_fires_when_shooting_at_enemy():
 
 
 def test_aim_alignment_no_reward_wrong_direction():
-    r = RewardShaper()
+    r = RewardShaper(RewardConfig(r_shoot_when_enemy_visible=0.005))
     # Enemy right, but shoot left.
     obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
     _, _, bd = r(obs, action=[0, 4, 0, 0, 0])   # shoot=4 = left
     assert "aim_at_enemy" not in bd
     # Still gets the "shooting when enemy visible" bonus.
     assert bd.get("shoot_when_enemy") == r.cfg.r_shoot_when_enemy_visible
+
+
+def test_shoot_spam_reward_disabled_by_default():
+    """Regression: user reported that firing tears was rewarded regardless of hitting.
+    r_shoot_when_enemy_visible defaults to 0.0 to fix this. Only aim_at_enemy
+    (correct direction) and damage_dealt (actual hits) should reward shooting now.
+    """
+    r = RewardShaper()   # default config
+    obs = {"player": {"hp_red": 3, "hp_max": 3}, "enemies": _make_enemy_at(200, 0), "events": []}
+    _, _, bd = r(obs, action=[0, 4, 0, 0, 0])   # shoot wrong direction
+    assert "shoot_when_enemy" not in bd
+    assert "aim_at_enemy" not in bd
 
 
 def test_kite_distance_reward_at_ideal_range():

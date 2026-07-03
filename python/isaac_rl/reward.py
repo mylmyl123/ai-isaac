@@ -63,7 +63,7 @@ class RewardConfig:
     # correct cardinal quadrant toward the nearest enemy, reward per tick.
     # Turns "randomly shoot in 4 directions" from a lottery into a guided search.
     r_aim_at_enemy: float = 0.03
-    r_shoot_when_enemy_visible: float = 0.005   # smaller reward just for shooting when enemies present
+    r_shoot_when_enemy_visible: float = 0.0     # DISABLED: was rewarding tear spam. Kept for config compatibility.
 
     # ---- NEW: Engagement-distance shaping ------------------------------
     # Bot learns to stay at kiting distance from enemies. Too close = enemies hit
@@ -343,8 +343,11 @@ class RewardShaper:
                     except (IndexError, TypeError, ValueError):
                         shoot_action = 0
                     if shoot_action != 0:
-                        # Small reward just for shooting when enemies are visible
-                        add("shoot_when_enemy", cfg.r_shoot_when_enemy_visible)
+                        # Small reward just for shooting when enemies are visible.
+                        # Now zero by default (was rewarding spam) but still
+                        # tunable via config for special cases.
+                        if cfg.r_shoot_when_enemy_visible != 0.0:
+                            add("shoot_when_enemy", cfg.r_shoot_when_enemy_visible)
                         # Big reward if aim matches enemy direction
                         ideal = self._angle_to_shoot_action(math.atan2(edy, edx))
                         if shoot_action == ideal:

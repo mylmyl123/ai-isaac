@@ -18,7 +18,7 @@ gamma: 0.99            # short episodes; discount can be lower than the 6-floor 
 gae_lambda: 0.95
 clip: 0.2
 vf_coef: 0.5
-ent_coef: 0.05         # bumped from 0.02 to encourage more exploration — escapes corner-camping local optima
+ent_coef: 0.005        # LOW for BC-warm-started runs (was 0.05 before BC). High ent_coef destroys the pretrained deterministic policy.
 max_grad_norm: 0.5
 
 use_rnd: true
@@ -39,6 +39,11 @@ seed: 42
 checkpoint_dir: runs
 checkpoint_every: 500_000
 log_every: 1
+
+# Value-function warmup: freeze policy for the first N PPO updates while the
+# value function catches up. Only relevant when using --bc-pretrain-file /
+# --collect-demos. Set to 0 for pure random-init PPO.
+vf_warmup_updates: 20      # ~20 rollouts of value-only training (~5-10 min at n_envs=4)
 
 policy:
   entity_dim: 128
@@ -65,9 +70,23 @@ reward:
   r_room_clear_speed_bonus: 1.0
   r_room_clear_no_damage: 1.5
 
-  # Aim alignment: still the main combat driver, kept as-is.
-  r_aim_at_enemy: 0.03
-  r_shoot_when_enemy_visible: 0.005
+  # Aim alignment: still a hint, but reduced from 0.03. Aim reward doesnt
+  # mean the tear will hit — enemies move, tears travel slowly. The REAL
+  # signal is r_damage_dealt (per hit, dense) and r_kill (per kill, sparse).
+  # Aim helps the initial exploration phase by pointing the policy toward
+  # productive shot directions; once damage_dealt fires reliably, aim can be
+  # smaller.
+  r_aim_at_enemy: 0.015           # was 0.03 — reduced now that damage reward carries more weight
+  # REMOVED: r_shoot_when_enemy_visible — was rewarding tear spam. Bot could
+  # fire in random directions and still collect this reward whenever any enemy
+  # was on screen. Bad shaping.
+  r_shoot_when_enemy_visible: 0.0
+
+  # BUMPED: damage_dealt scale from 0.1 to 0.2 — hitting enemies should
+  # dominate the shooting-related rewards. This makes actual accuracy matter
+  # more than shot intent.
+  r_damage_dealt_scale: 0.2       # was 0.1
+  max_damage_reward_per_room: 6.0  # was 3.0 — raised proportionally so cap doesnt bite too early
 
   # Engagement distance — REDUCED because it accidentally rewarded corner-camping
   # (enemies wander into range while bot stays still). Small enough to still

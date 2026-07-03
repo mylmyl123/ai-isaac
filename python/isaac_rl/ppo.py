@@ -89,6 +89,13 @@ class PPOConfig:
     bc_epochs: int = 10                     # BC epochs
     bc_batch_size: int = 256                # BC minibatch size
     bc_lr: float = 3.0e-4                   # BC learning rate
+
+    # Value-function warmup: freeze policy for first N PPO updates while the
+    # value function catches up. Critical when using BC pretraining — the
+    # pretrained policy is competent but the value network starts random, and
+    # updates from an untrained value net produce noisy advantages that
+    # destroy the pretrained policy. Set to 0 for random-init runs.
+    vf_warmup_updates: int = 0
     log_every: int = 1   # log a progress line every N PPO updates. Default 1 = once per rollout (~17s at n_envs=4).
 
     # Policy net
@@ -430,6 +437,14 @@ def train(cfg: PPOConfig) -> None:
                 entropy_loss = -entropy.mean()
 
                 loss = policy_loss + cfg.vf_coef * value_loss + cfg.ent_coef * entropy_loss
+                # Value-function warmup: for the first cfg.vf_warmup_updates PPO
+                # updates, ONLY train the value function — zero the policy loss
+                # so the pretrained policy weights don't get overwritten by
+                # noisy advantages from an untrained value net. Crucial when
+                # using BC pretraining, where the policy is competent but the
+                # value function starts random.
+                if updates < cfg.vf_warmup_updates:
+                    loss = cfg.vf_coef * value_loss
                 optim.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
