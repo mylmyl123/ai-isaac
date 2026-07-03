@@ -1,0 +1,4 @@
+This file is purely informational. Changing it will have no effect on saving or loading data.
+
+Save Data Path: C:\Users\yanbo/Documents/My Games/Binding of Isaac Repentance/
+Modding Data Path: C:\Users\yanbo\downloads\ai-isaac/mods/
