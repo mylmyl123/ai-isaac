@@ -79,14 +79,15 @@ class HeuristicConfig:
     # Deterministic seed for stochastic tie-breaks
     seed: int = 0
 
-    # Door-seeking behavior (activates when the room is clear).
-    # Isaac door slots (from obs.lua DOOR_SLOTS):
-    #   0 = LEFT, 1 = UP, 2 = RIGHT, 3 = DOWN
-    # Each corresponds to a cardinal movement direction. When the room is
-    # clear and there are no threats, walk toward the first open, unlocked,
-    # non-special door. Teaches BC that "clear room -> exit through door".
+    # Door-seeking behavior. Historically activated when the room was clear;
+    # DISABLED by default after user report of bot walking into walls at 50K
+    # steps (BC learned biased/wrong door direction due to sparse demo data
+    # in cleared-room states — classic BC distribution-shift failure mode).
+    # To re-enable: set enable_door_seeking=True below AND
+    # r_seek_door_when_clear > 0 in reward config.
+    enable_door_seeking: bool = False
     door_slot_to_move: tuple = (7, 1, 3, 5)   # LEFT, UP, RIGHT, DOWN -> move action
-    prefer_normal_doors: bool = True          # avoid boss/treasure/secret doors when a normal exit exists
+    prefer_normal_doors: bool = True
 
 
 class HeuristicPolicy:
@@ -149,10 +150,10 @@ class HeuristicPolicy:
                     move = self._angle_to_move(math.atan2(edx, -edy))     # rotate -90°
 
         else:
-            # No enemies, no threats. If the room is clear and there's an open
-            # door, head toward it (progress to a new room). Otherwise wander
-            # so we discover the layout / trigger enemy spawns.
-            if is_clear:
+            # No enemies, no threats. If door-seeking is ENABLED and the room
+            # is clear, head to an open door. Otherwise fall back to random
+            # wander so we still explore.
+            if cfg.enable_door_seeking and is_clear:
                 door_move = self._pick_door_move(raw_obs)
                 if door_move is not None:
                     move = door_move

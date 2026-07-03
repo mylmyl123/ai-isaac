@@ -81,10 +81,15 @@ reward:
   r_room_clear_speed_bonus: 1.0
   r_room_clear_no_damage: 1.5
 
-  # Door-seeking: dense signal for moving toward exits when the room is clear.
-  # Without this, cleared-room navigation relies on random walk. Combined with
-  # boosted r_new_room, gives a smooth gradient toward exits.
-  r_seek_door_when_clear: 0.02
+  # Door-seeking: DISABLED. Turned this off after user reported bot walking
+  # into walls at 50K steps. Root cause: door-seeking is rare in demos (~5%
+  # of ticks are in cleared rooms), so BC has few examples of the "seek an
+  # open door" pattern. In new rooms with different door layouts, BC
+  # predictions are wrong, PPO amplifies the errors (classic distribution
+  # shift / compounding-error problem in BC — see Ross & Bagnell 2010).
+  # Set r_seek_door_when_clear > 0 to re-enable once you have time to
+  # collect 500K+ demos and run 30+ BC epochs.
+  r_seek_door_when_clear: 0.0
 
   # Aim alignment: still a hint, but reduced from 0.03. Aim reward doesnt
   # mean the tear will hit — enemies move, tears travel slowly. The REAL

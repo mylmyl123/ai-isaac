@@ -246,9 +246,14 @@ def _make_obs_with_doors(doors, is_clear=True):
     }
 
 
+def _door_seeking_policy() -> HeuristicPolicy:
+    """Policy with door-seeking explicitly enabled (default is disabled)."""
+    return HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, idle_move_prob=0.0, seed=0))
+
+
 def test_seeks_right_door_when_room_clear():
     """Room clear with only a RIGHT door open -> move right (only option)."""
-    p = HeuristicPolicy()
+    p = _door_seeking_policy()
     # slot 2 = RIGHT. Fields: [exists, is_open, is_locked, is_boss, is_treas, is_secret]
     doors = [
         [0, 0, 0, 0, 0, 0],   # LEFT: doesn't exist
@@ -263,7 +268,7 @@ def test_seeks_right_door_when_room_clear():
 
 def test_seeks_up_door_when_room_clear():
     """Only UP door open -> move up."""
-    p = HeuristicPolicy()
+    p = _door_seeking_policy()
     doors = [
         [0, 0, 0, 0, 0, 0],
         [1, 1, 0, 0, 0, 0],   # UP open
@@ -277,7 +282,7 @@ def test_seeks_up_door_when_room_clear():
 
 def test_prefers_normal_door_over_boss_door():
     """When both normal and boss doors are open, take the normal one (regardless of slot order)."""
-    p = HeuristicPolicy()
+    p = _door_seeking_policy()
     doors = [
         [1, 1, 0, 1, 0, 0],   # LEFT: boss (is_boss=1)
         [0, 0, 0, 0, 0, 0],
@@ -294,7 +299,7 @@ def test_prefers_normal_door_over_boss_door():
 
 def test_skips_locked_doors():
     """Locked door isn't picked, open unlocked one is."""
-    p = HeuristicPolicy()
+    p = _door_seeking_policy()
     doors = [
         [1, 1, 1, 0, 0, 0],   # LEFT: locked
         [0, 0, 0, 0, 0, 0],
@@ -309,7 +314,7 @@ def test_skips_locked_doors():
 
 def test_no_door_seeking_when_not_clear():
     """When room isn't clear, bot doesn't seek doors even with none-around."""
-    p = HeuristicPolicy(HeuristicConfig(idle_move_prob=0.0))   # no random wander
+    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, idle_move_prob=0.0))   # no random wander
     doors = [
         [0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0],
@@ -325,7 +330,7 @@ def test_no_door_seeking_when_not_clear():
 def test_door_selection_spreads_over_multiple_open_doors():
     """When multiple doors are open, over many calls the heuristic should pick
     each one at least sometimes (no LEFT-bias)."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0))
+    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, seed=0))
     doors = [
         [1, 1, 0, 0, 0, 0],   # LEFT open
         [1, 1, 0, 0, 0, 0],   # UP open
@@ -341,3 +346,20 @@ def test_door_selection_spreads_over_multiple_open_doors():
     # 4 uniform choices, 50 draws, probability of one direction never chosen
     # is very small.
     assert len(picks) >= 3, f"door pick distribution is biased: {picks}"
+
+
+def test_door_seeking_disabled_by_default():
+    """Regression: after user report of wall-hitting, door-seeking is OFF
+    by default in the heuristic. Enable via HeuristicConfig(enable_door_seeking=True).
+    """
+    p = HeuristicPolicy(HeuristicConfig(idle_move_prob=0.0))  # no random wander
+    doors = [
+        [1, 1, 0, 0, 0, 0],   # LEFT open
+        [1, 1, 0, 0, 0, 0],   # UP open
+        [1, 1, 0, 0, 0, 0],   # RIGHT open
+        [1, 1, 0, 0, 0, 0],   # DOWN open
+    ]
+    obs = _make_obs_with_doors(doors, is_clear=True)
+    a = p.act(obs)
+    # With door-seeking disabled AND idle_move_prob=0, should stay idle.
+    assert a[0] == 0
