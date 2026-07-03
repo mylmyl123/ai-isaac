@@ -248,7 +248,7 @@ function Obs.build(tick, reward_events, run_state)
     local pickups, k_mask, n_pickups = build_pickups(room, player, tl, br)
 
     return {
-        schema = 1,
+        schema = 2,
         tick = tick,
         player = {
             x = pos.X, y = pos.Y,

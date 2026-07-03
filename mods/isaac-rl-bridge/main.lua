@@ -304,7 +304,7 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     if conn then conn:close() end
     conn = Net.connect(HOST, PORT, 0.05)   -- see net.lua for why 50 ms
     local seed = Game():GetSeeds():GetStartSeed()
-    conn:send(json.encode({hello = true, schema = 1, seed = seed, is_continued = is_continued}))
+    conn:send(json.encode({hello = true, schema = 2, seed = seed, is_continued = is_continued}))
     Isaac.DebugString("[isaac-rl-bridge] connected to trainer on port " .. tostring(PORT))
 end)
 
@@ -403,7 +403,7 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
             -- the missing fields without any special-case handling.
             if conn then
                 local minimal = {
-                    schema = 1,
+                    schema = 2,
                     tick = tick,
                     player = { is_dead = true, hp_red = 0 },
                     events = { { kind = "death" } },
