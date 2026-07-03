@@ -115,6 +115,11 @@ class HeuristicPolicy:
         threats = self._all_projectile_threats(raw_obs)
         is_clear = bool((raw_obs.get("global") or {}).get("is_clear", False))
 
+        # Wall-avoidance: compute a bitmask of "forbidden" cardinal directions
+        # based on player proximity to each wall. Prevents BC from learning
+        # "push into wall" — the classic corner-hugging pathology.
+        forbidden = self._forbidden_directions(raw_obs)
+
         # ---- Movement decision -----------------------------------------
         move = 0
 
@@ -160,12 +165,27 @@ class HeuristicPolicy:
             # wander so we still explore.
             if cfg.enable_door_seeking and is_clear:
                 door_move = self._pick_door_move(raw_obs)
-                if door_move is not None:
+                if door_move is not None and door_move not in forbidden:
                     move = door_move
                 elif self._rng.random() < cfg.idle_move_prob:
-                    move = int(self._rng.choice(cfg.idle_move_choices))
+                    move = self._safe_random_move(forbidden)
             elif self._rng.random() < cfg.idle_move_prob:
-                move = int(self._rng.choice(cfg.idle_move_choices))
+                move = self._safe_random_move(forbidden)
+
+        # ---- Wall-avoidance final filter --------------------------------
+        # Regardless of how `move` was chosen (combat dodging, kiting, door-
+        # seeking, random wander), if the chosen action would push into a
+        # wall we're already against, override to a non-forbidden direction.
+        # Prevents BC from learning the corner-hugging pathology.
+        if move != 0 and move in forbidden:
+            # Try the two rotations adjacent to the chosen move (±45°).
+            adjacent = ((move - 1 - 1) % 8 + 1, (move - 1 + 1) % 8 + 1)
+            candidates = [a for a in adjacent if a not in forbidden]
+            if candidates:
+                move = self._rng.choice(candidates)
+            else:
+                # All adjacent also forbidden. Fall back to any legal cardinal.
+                move = self._safe_random_move(forbidden)
 
         # ---- Shoot decision (with lead-shot prediction) ------------------
         # Instead of aiming at the enemy's current position, aim at where the
@@ -183,6 +203,65 @@ class HeuristicPolicy:
         # Heuristic outputs a 2-dim action: [move, shoot]. The active/bomb/pill
         # heads were removed from the action space (see spaces.ACTION_FACTORS).
         return np.array([move, shoot], dtype=np.int64)
+
+    # ---- wall-avoidance (prevent corner-hugging in BC demos) -----------
+
+    def _forbidden_directions(self, raw_obs: dict[str, Any]) -> set[int]:
+        """Return the set of movement actions that would push into a wall.
+
+        Uses room_bounds + player position to detect wall proximity. When
+        the player is within wall_proximity_threshold of a wall, moves that
+        would push into that wall are marked forbidden.
+
+        Prevents BC from learning "push into wall" — the classic corner-
+        hugging pathology. Without this, the random-wander and door-seek
+        fallbacks can push into walls indefinitely, and the network learns
+        "if I'm at a wall, my action is 'move into wall'" (because that's
+        what the heuristic did there).
+
+        Move action codes (from ACTION_FACTORS[0]):
+          0=idle, 1=up, 2=up-right, 3=right, 4=down-right,
+          5=down, 6=down-left, 7=left, 8=up-left
+        """
+        forbidden: set[int] = set()
+        bounds = raw_obs.get("room_bounds")
+        if not bounds:
+            return forbidden   # no bounds info — conservative fallback
+        player = raw_obs.get("player") or {}
+        px = float(player.get("x", 0) or 0)
+        py = float(player.get("y", 0) or 0)
+        tl_x = float(bounds.get("tl_x", 0) or 0)
+        tl_y = float(bounds.get("tl_y", 0) or 0)
+        br_x = float(bounds.get("br_x", 1) or 1)
+        br_y = float(bounds.get("br_y", 1) or 1)
+        # Wall proximity threshold: 15% of room dimension.
+        wx = (br_x - tl_x) * 0.15
+        wy = (br_y - tl_y) * 0.15
+        near_left  = (px - tl_x) < wx
+        near_up    = (py - tl_y) < wy
+        near_right = (br_x - px) < wx
+        near_down  = (br_y - py) < wy
+        # If near a wall, forbid any move that has a component pushing into it.
+        # Up-moves: 1,2,8. Down-moves: 4,5,6. Left-moves: 6,7,8. Right-moves: 2,3,4.
+        if near_up:
+            forbidden.update({1, 2, 8})
+        if near_down:
+            forbidden.update({4, 5, 6})
+        if near_left:
+            forbidden.update({6, 7, 8})
+        if near_right:
+            forbidden.update({2, 3, 4})
+        return forbidden
+
+    def _safe_random_move(self, forbidden: set[int]) -> int:
+        """Pick a random cardinal move avoiding forbidden directions."""
+        cfg = self.cfg
+        allowed = [m for m in cfg.idle_move_choices if m not in forbidden]
+        if not allowed:
+            # All 4 cardinals blocked (bot at corner + wall thresholds cover
+            # the whole room). Just idle rather than push into a wall.
+            return 0
+        return int(self._rng.choice(allowed))
 
     # ---- door-seeking (post-clear navigation) --------------------------
 
