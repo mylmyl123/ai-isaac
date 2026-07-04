@@ -109,6 +109,16 @@ class HeuristicPolicy:
     def __init__(self, config: HeuristicConfig | None = None):
         self.cfg = config or HeuristicConfig()
         self._rng = np.random.default_rng(self.cfg.seed)
+        # Stuck-detection state. Isaac's collision means "push into obstacle =
+        # velocity stays near zero". Track consecutive stuck ticks so we can
+        # switch direction when needed.
+        self._stuck_ticks = 0
+        self._last_action_move = 0
+        # Room-transition tracking. When room_index changes, we know the bot
+        # just crossed a door. Remember which door we came IN through so we
+        # can avoid immediately going back through it.
+        self._prev_room_index: int | None = None
+        self._entered_from_slot: int | None = None   # 0=LEFT,1=UP,2=RIGHT,3=DOWN
 
     def act(self, raw_obs: dict[str, Any]) -> np.ndarray:
         """Return action ndarray of shape (5,), dtype int64.
@@ -119,6 +129,54 @@ class HeuristicPolicy:
         """
         cfg = self.cfg
 
+        # Update room-transition tracking. If we just entered a new room,
+        # remember which slot we came IN through. Bot is closest to that
+        # door at spawn, so we'd naturally pick it as "nearest" — avoiding
+        # it prevents immediate backtracking.
+        cur_room = None
+        gg = raw_obs.get("global") or {}
+        cur_room = gg.get("room_index") or gg.get("safe_grid_index")
+        if cur_room is not None and cur_room != self._prev_room_index:
+            # Room changed. Infer entry slot from player position: whichever
+            # wall the player is nearest to is the wall they came through.
+            bounds = raw_obs.get("room_bounds")
+            if bounds:
+                player = raw_obs.get("player") or {}
+                px = float(player.get("x", 0) or 0)
+                py = float(player.get("y", 0) or 0)
+                tl_x = float(bounds.get("tl_x", 0) or 0)
+                tl_y = float(bounds.get("tl_y", 0) or 0)
+                br_x = float(bounds.get("br_x", 1) or 1)
+                br_y = float(bounds.get("br_y", 1) or 1)
+                dl = px - tl_x
+                du = py - tl_y
+                dr = br_x - px
+                dd = br_y - py
+                nearest = min(dl, du, dr, dd)
+                # 0=LEFT, 1=UP, 2=RIGHT, 3=DOWN
+                if nearest == dl:
+                    self._entered_from_slot = 0
+                elif nearest == du:
+                    self._entered_from_slot = 1
+                elif nearest == dr:
+                    self._entered_from_slot = 2
+                else:
+                    self._entered_from_slot = 3
+            self._prev_room_index = cur_room
+            self._stuck_ticks = 0   # reset stuck counter on room change
+
+        # Stuck detection: if last-tick action was non-idle but player velocity
+        # is near zero, we're pushing into an obstacle. Increment counter;
+        # when it exceeds threshold, force a direction change this tick.
+        player = raw_obs.get("player") or {}
+        vx = float(player.get("vx", 0) or 0)
+        vy = float(player.get("vy", 0) or 0)
+        actual_speed = math.hypot(vx, vy)
+        if self._last_action_move != 0 and actual_speed < 0.5:
+            self._stuck_ticks += 1
+        else:
+            self._stuck_ticks = 0
+
         enemy = self._nearest_enemy(raw_obs)
         threats = self._all_projectile_threats(raw_obs)
         is_clear = bool((raw_obs.get("global") or {}).get("is_clear", False))
@@ -127,6 +185,9 @@ class HeuristicPolicy:
         # based on player proximity to each wall. Prevents BC from learning
         # "push into wall" — the classic corner-hugging pathology.
         forbidden = self._forbidden_directions(raw_obs)
+        # If we've been stuck for 3+ ticks, forbid the last action too.
+        if self._stuck_ticks >= 3 and self._last_action_move != 0:
+            forbidden.add(self._last_action_move)
 
         # ---- Movement decision -----------------------------------------
         move = 0
@@ -219,6 +280,7 @@ class HeuristicPolicy:
 
         # Heuristic outputs a 2-dim action: [move, shoot]. The active/bomb/pill
         # heads were removed from the action space (see spaces.ACTION_FACTORS).
+        self._last_action_move = int(move)
         return np.array([move, shoot], dtype=np.int64)
 
     # ---- wall-avoidance (prevent corner-hugging in BC demos) -----------
@@ -348,6 +410,10 @@ class HeuristicPolicy:
             door_positions = None
 
         n_slots = min(4, len(doors))
+        # Avoid the door we just came IN through (prevents immediate backtrack).
+        # Only skip when there ARE other viable doors; if the entry door is
+        # the only open door, we have to use it.
+        entered_from = self._entered_from_slot
 
         # Two passes: normal doors first (if prefer_normal_doors), then any open door.
         for pass_idx in (0, 1):
@@ -375,6 +441,11 @@ class HeuristicPolicy:
                 eligible.append((dist, slot))
             if not eligible:
                 continue
+            # Filter out the door we came in through, unless it's the only one.
+            if entered_from is not None:
+                non_entry = [(d, s) for d, s in eligible if s != entered_from]
+                if non_entry:
+                    eligible = non_entry
             # Pick nearest. If multiple doors are tied within a small epsilon
             # (e.g. player at exact room center with all 4 doors open),
             # randomize among ties to avoid a persistent LEFT-bias in BC.

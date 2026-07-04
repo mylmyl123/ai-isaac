@@ -290,8 +290,8 @@ def test_prefers_normal_door_over_boss_door():
         [0, 0, 0, 0, 0, 0],
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
-    # Try several times to average out the randomized slot order
-    # — all runs should pick RIGHT (normal), never LEFT (boss).
+    # Non-zero velocity so stuck-detection doesn't fire during test.
+    obs["player"] = {"hp_red": 3, "hp_max": 3, "vx": 2.0, "vy": 0.0}
     for _ in range(20):
         a = p.act(obs)
         assert a[0] == 3, f"picked non-normal door: move={a[0]}"
@@ -307,10 +307,10 @@ def test_skips_locked_doors():
         [0, 0, 0, 0, 0, 0],
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
+    obs["player"] = {"hp_red": 3, "hp_max": 3, "vx": 2.0, "vy": 0.0}
     for _ in range(20):
         a = p.act(obs)
         assert a[0] == 3, f"picked locked door: move={a[0]}"
-
 
 def test_door_seeking_when_no_enemies_regardless_of_clear():
     """UPDATED 2026-07-03: door-seeking no longer requires is_clear=True.
@@ -392,7 +392,8 @@ def test_door_selection_stable_same_state():
         [1, 1, 0, 0, 0, 0],
     ]
     obs = _make_obs_with_doors(doors, is_clear=True)
-    obs["player"] = {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0, "x": 110, "y": 300}
+    # Non-zero velocity so stuck-detection doesn't fire during rapid test calls.
+    obs["player"] = {"hp_red": 3, "hp_max": 3, "vx": -2.0, "vy": 0.0, "x": 110, "y": 300}
     obs["room_bounds"] = {"tl_x": 100, "tl_y": 100, "br_x": 500, "br_y": 500}
     # Player near LEFT wall -> should ALWAYS pick LEFT (move=7).
     picks = [int(p.act(obs)[0]) for _ in range(20)]

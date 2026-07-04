@@ -53,6 +53,11 @@ class RewardConfig:
     # At r_new_room=3.0, crossing is strongly incentivized even if the next
     # room has enemies. Combined with r_door_distance_shaping (PBRS),
     # this gives dense signal both en-route to and at the moment of crossing.
+    # Backtrack penalty (2026-07-03): if bot re-enters a room it's been to
+    # before, apply this penalty. Breaks the "walk-up-and-down between two
+    # cleared rooms" oscillation loop that arises when door_pbrs rewards
+    # any door approach without regard to novelty.
+    r_backtrack: float = -0.5
     r_boss_room_first_entry: float = 0.5
     r_room_clear_speed_bonus: float = 1.0 # bonus if room cleared in < speed_clear_ticks
     speed_clear_ticks: int = 200          # ~13s at 15Hz
@@ -294,11 +299,21 @@ class RewardShaper:
             elif kind == "new_room":
                 if evt.get("is_new"):
                     add("new_room", cfg.r_new_room)
+                else:
+                    # Backtrack: re-entering a room we've been to before.
+                    # Break oscillation loops between cleared rooms.
+                    add("backtrack", cfg.r_backtrack)
                 # Reset per-room shaping state
                 st.damage_reward_this_room = 0.0
                 st.ticks_since_room_start = 0
                 st.damage_this_room_red = 0.0
                 st.damage_this_room_other = 0.0
+                # CRITICAL: reset door PBRS state so cross-room delta doesn't
+                # emit a bogus reward/penalty. Without this, the delta between
+                # "nearly at LEFT door of prev room" (dist ≈ 0) and "far from
+                # any door in new room" (dist ≈ 0.5) generates a -0.15 penalty,
+                # or vice-versa. This drove room-oscillation loops.
+                st.prev_door_dist = None
                 if evt.get("room_type") == ROOM_TYPE_BOSS:
                     sgi = evt.get("safe_grid_index")
                     if sgi is not None and sgi not in st.visited_boss_rooms:
