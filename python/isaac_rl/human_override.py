@@ -75,15 +75,23 @@ class HumanOverride:
     Target-env selection: with multi-env training, use number keys 1-9 to
     select which env receives your keyboard overrides. The default target
     is env 0 (the first Isaac window that connected).
+
+    Auto-focus detection (Windows only): when auto_focus=True, the target
+    env automatically switches to whichever Isaac window has focus.
+    Enumerates Isaac windows in order of creation (by HWND ascending) and
+    maps them to env indices 0..N-1.
     """
 
-    def __init__(self, save_path: str | Path | None = None):
+    def __init__(self, save_path: str | Path | None = None, auto_focus: bool = True):
         self.save_path = Path(save_path) if save_path else None
         self.pressed: set[str] = set()
         self.enabled: bool = True
         self.bot_paused: bool = False
         self.target_env: int = 0        # which env gets the override (0-indexed)
+        self.auto_focus: bool = auto_focus
         self.listener: Any = None
+        self._focus_thread: threading.Thread | None = None
+        self._focus_stop = threading.Event()
         self._corrections_obs: list[dict] = []
         self._corrections_actions: list[np.ndarray] = []
         self._lock = threading.Lock()
@@ -109,19 +117,98 @@ class HumanOverride:
         )
         self.listener.daemon = True
         self.listener.start()
+        # Start focus-detection loop if available.
+        if self.auto_focus:
+            self._start_focus_watch()
         log.info(
             "Human override ACTIVE. Keys:\n"
             "  Movement: WASD (with diagonals via combos)\n"
             "  Shooting: IJKL\n"
             "  Target:   1/2/3/4/... = select which env gets your input (default: env 0)\n"
+            "            Auto-focus: focusing an Isaac window auto-switches target (Windows only)\n"
             "  Toggle:   F1 = enable/disable override, F2 = pause bot\n"
             "            F3 = save corrections now, ESC = disable"
         )
+
+    def _start_focus_watch(self) -> None:
+        """Start a background thread that watches the focused window and
+        auto-switches target_env when an Isaac window gets focus.
+
+        Windows-only. Uses ctypes to call Win32 APIs (no extra deps).
+        Silently disabled on non-Windows platforms.
+        """
+        import sys
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def get_window_title(hwnd: int) -> str:
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return ""
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value
+
+        def enum_isaac_windows() -> list[int]:
+            """Return HWNDs of all Isaac windows, sorted ascending.
+
+            HWNDs are Windows-assigned handles. On the same session, HWNDs
+            issued later have larger numeric values, so ascending order
+            roughly matches creation order — which typically matches env_idx.
+            """
+            hwnds: list[int] = []
+            def callback(hwnd: int, _lparam: int) -> bool:
+                title = get_window_title(hwnd)
+                if "isaac" in title.lower() or "binding of isaac" in title.lower():
+                    hwnds.append(hwnd)
+                return True   # keep enumerating
+            user32.EnumWindows(EnumWindowsProc(callback), 0)
+            hwnds.sort()
+            return hwnds
+
+        def watch_loop():
+            last_target = -1
+            while not self._focus_stop.is_set():
+                try:
+                    fg = user32.GetForegroundWindow()
+                    if fg:
+                        hwnds = enum_isaac_windows()
+                        if fg in hwnds:
+                            new_target = hwnds.index(fg)
+                            if new_target != self.target_env and new_target != last_target:
+                                self.target_env = new_target
+                                last_target = new_target
+                                log.info("[override] auto-focus -> target env = %d", new_target)
+                except Exception:
+                    pass
+                self._focus_stop.wait(0.3)   # poll every 300ms
+
+        self._focus_thread = threading.Thread(target=watch_loop, daemon=True)
+        self._focus_thread.start()
 
     def stop(self) -> None:
         if self.listener is not None:
             self.listener.stop()
             self.listener = None
+        # Stop focus watcher thread if running.
+        self._focus_stop.set()
+        if self._focus_thread is not None:
+            self._focus_thread.join(timeout=1.0)
+            self._focus_thread = None
         self.save_corrections()
 
     def _key_str(self, key: Any) -> str:
