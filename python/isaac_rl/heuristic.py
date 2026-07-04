@@ -304,31 +304,56 @@ class HeuristicPolicy:
     # ---- door-seeking (post-clear navigation) --------------------------
 
     def _pick_door_move(self, raw_obs: dict[str, Any]) -> int | None:
-        """When room is clear, choose a movement direction toward an open door.
+        """When no visible enemies, choose a movement direction toward an open door.
 
         Doors obs is a [4, 6] array: rows are LEFT/UP/RIGHT/DOWN slots, columns
         are (exists, is_open, is_locked, is_boss, is_treasure, is_secret).
         Prefers normal doors over special-purpose ones when both are open.
         Returns a movement action (1..8) or None if no viable door.
 
-        RANDOMIZED slot order: if we always iterated 0..3, BC would learn a
-        LEFT-first bias ("go left in every cleared room") because slot 0 is
-        LEFT. In rooms without a LEFT door, the trained network would then
-        walk into the left wall. Shuffling the slot order per call spreads
-        the demo distribution across all four cardinal directions.
+        DETERMINISTIC selection based on distance to player: picks the CLOSEST
+        open door. Previously used random shuffle which caused the bot to
+        oscillate between doors each tick (never committing to one).
+
+        BC bias mitigation: instead of randomizing per-call, we rely on the
+        natural distribution of nearest-door-across-rooms to spread demos
+        across all four cardinal directions. Different rooms have different
+        nearest doors, so BC still sees diverse directions.
         """
         cfg = self.cfg
         doors = raw_obs.get("doors")
         if not doors:
             return None
 
+        # Compute nearest open-door slot based on player position.
+        bounds = raw_obs.get("room_bounds")
+        player = raw_obs.get("player") or {}
+        px = float(player.get("x", 0) or 0)
+        py = float(player.get("y", 0) or 0)
+        if bounds:
+            tl_x = float(bounds.get("tl_x", 0) or 0)
+            tl_y = float(bounds.get("tl_y", 0) or 0)
+            br_x = float(bounds.get("br_x", 1) or 1)
+            br_y = float(bounds.get("br_y", 1) or 1)
+            mid_x = (tl_x + br_x) / 2.0
+            mid_y = (tl_y + br_y) / 2.0
+            door_positions = [
+                (tl_x, mid_y),   # LEFT
+                (mid_x, tl_y),   # UP
+                (br_x, mid_y),   # RIGHT
+                (mid_x, br_y),   # DOWN
+            ]
+        else:
+            # No room_bounds — fall back to fixed slot order (deterministic).
+            door_positions = None
+
         n_slots = min(4, len(doors))
-        slot_order = list(range(n_slots))
-        self._rng.shuffle(slot_order)
 
         # Two passes: normal doors first (if prefer_normal_doors), then any open door.
         for pass_idx in (0, 1):
-            for slot in slot_order:
+            # Collect eligible doors with their distances.
+            eligible: list[tuple[float, int]] = []
+            for slot in range(n_slots):
                 d = doors[slot]
                 if not d or len(d) < 6:
                     continue
@@ -342,7 +367,22 @@ class HeuristicPolicy:
                     continue
                 if pass_idx == 0 and cfg.prefer_normal_doors and (is_boss or is_treasure or is_secret):
                     continue
-                return cfg.door_slot_to_move[slot]
+                if door_positions is not None:
+                    dx, dy = door_positions[slot]
+                    dist = math.hypot(px - dx, py - dy)
+                else:
+                    dist = float(slot)   # fallback: slot-index order
+                eligible.append((dist, slot))
+            if not eligible:
+                continue
+            # Pick nearest. If multiple doors are tied within a small epsilon
+            # (e.g. player at exact room center with all 4 doors open),
+            # randomize among ties to avoid a persistent LEFT-bias in BC.
+            eligible.sort()
+            best_dist = eligible[0][0]
+            tied = [slot for dist, slot in eligible if dist - best_dist < 1e-3]
+            best_slot = int(self._rng.choice(tied)) if len(tied) > 1 else tied[0]
+            return cfg.door_slot_to_move[best_slot]
         return None
 
     # ---- feature extraction helpers ------------------------------------

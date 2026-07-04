@@ -331,25 +331,72 @@ def test_door_seeking_when_no_enemies_regardless_of_clear():
     assert a[0] == 3
 
 
-def test_door_selection_spreads_over_multiple_open_doors():
-    """When multiple doors are open, over many calls the heuristic should pick
-    each one at least sometimes (no LEFT-bias)."""
-    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, seed=0))
+def test_door_selection_picks_nearest_door():
+    """With room_bounds set, heuristic picks the door NEAREST to the player,
+    not a random one. Fixed 2026-07-03 to prevent tick-to-tick oscillation.
+
+    Verifies:
+    - Player near LEFT wall + all 4 doors open -> picks LEFT (move=7)
+    - Player near RIGHT wall + all 4 doors open -> picks RIGHT (move=3)
+    - Player near UP wall + all 4 doors open -> picks UP (move=1)
+    - Player near DOWN wall + all 4 doors open -> picks DOWN (move=5)
+    """
+    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, idle_move_prob=0.0, seed=0))
     doors = [
         [1, 1, 0, 0, 0, 0],   # LEFT open
         [1, 1, 0, 0, 0, 0],   # UP open
         [1, 1, 0, 0, 0, 0],   # RIGHT open
         [1, 1, 0, 0, 0, 0],   # DOWN open
     ]
+    bounds = {"tl_x": 100, "tl_y": 100, "br_x": 500, "br_y": 500}
+
+    # Player near LEFT wall.
+    obs_left = _make_obs_with_doors(doors, is_clear=True)
+    obs_left["player"] = {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0, "x": 110, "y": 300}
+    obs_left["room_bounds"] = bounds
+    a = p.act(obs_left)
+    assert a[0] == 7, f"expected LEFT (7), got {a[0]}"
+
+    # Player near RIGHT wall.
+    obs_right = _make_obs_with_doors(doors, is_clear=True)
+    obs_right["player"] = {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0, "x": 490, "y": 300}
+    obs_right["room_bounds"] = bounds
+    a = p.act(obs_right)
+    assert a[0] == 3, f"expected RIGHT (3), got {a[0]}"
+
+    # Player near UP wall.
+    obs_up = _make_obs_with_doors(doors, is_clear=True)
+    obs_up["player"] = {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0, "x": 300, "y": 110}
+    obs_up["room_bounds"] = bounds
+    a = p.act(obs_up)
+    assert a[0] == 1, f"expected UP (1), got {a[0]}"
+
+    # Player near DOWN wall.
+    obs_down = _make_obs_with_doors(doors, is_clear=True)
+    obs_down["player"] = {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0, "x": 300, "y": 490}
+    obs_down["room_bounds"] = bounds
+    a = p.act(obs_down)
+    assert a[0] == 5, f"expected DOWN (5), got {a[0]}"
+
+
+def test_door_selection_stable_same_state():
+    """Regression: door selection must be deterministic for the same state.
+    Previously (pre-2026-07-03) the heuristic shuffled slot order each call,
+    causing the bot to oscillate between doors tick-to-tick.
+    """
+    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, idle_move_prob=0.0, seed=0))
+    doors = [
+        [1, 1, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0],
+    ]
     obs = _make_obs_with_doors(doors, is_clear=True)
-    picks = set()
-    for _ in range(50):
-        a = p.act(obs)
-        picks.add(int(a[0]))
-    # Should have picked at least 3 different directions across 50 samples.
-    # 4 uniform choices, 50 draws, probability of one direction never chosen
-    # is very small.
-    assert len(picks) >= 3, f"door pick distribution is biased: {picks}"
+    obs["player"] = {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0, "x": 110, "y": 300}
+    obs["room_bounds"] = {"tl_x": 100, "tl_y": 100, "br_x": 500, "br_y": 500}
+    # Player near LEFT wall -> should ALWAYS pick LEFT (move=7).
+    picks = [int(p.act(obs)[0]) for _ in range(20)]
+    assert all(m == 7 for m in picks), f"expected all LEFT, got {picks}"
 
 
 def test_door_seeking_enabled_by_default():
