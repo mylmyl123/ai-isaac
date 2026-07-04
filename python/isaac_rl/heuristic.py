@@ -66,8 +66,29 @@ class HeuristicConfig:
 
     # Door alignment threshold (world units). Once the bot's perpendicular
     # coordinate is within this of the door center, push straight through.
-    # Wider than align_thresh in v1 (was 20) — hysteresis prevents jitter.
-    door_align_thresh: float = 50.0
+    # 2026-07-04: LOWERED from 50 to 15 after debug trace showed bot stuck
+    # at wall for 117 seconds because it thought it was aligned when 36
+    # units off from the door center. Isaac's actual door opening is
+    # ~40 units wide total, so bot must be within ~15-20 of center to pass.
+    door_align_thresh: float = 15.0
+
+    # 2026-07-04: stuck-detection. If bot's position stays within `stuck_radius`
+    # for `stuck_ticks` consecutive ticks, unlock the current door target.
+    # Next tick will pick a new target (possibly a different door). This
+    # is the minimal safety net that prevents "push into wall forever"
+    # pathologies without adding complex forbidden-direction logic.
+    stuck_ticks: int = 30           # ~2 seconds at 15Hz
+    stuck_radius: float = 5.0       # if pos hasn't moved beyond this radius
+
+    # 2026-07-04: entry-slot skip. When entering a new room, check bot's
+    # position relative to room walls. If bot is within `entry_wall_dist` of
+    # a wall, treat that wall's door as the ENTRY door and don't target it.
+    # Prevents backtrack oscillation (bot enters, targets entry door, walks
+    # back). Isaac spawns bot near the door it came through, so proximity
+    # to a wall is a reliable entry-slot signal EXCEPT in the very first
+    # room (spawn at center) — handled by threshold: if no wall is within
+    # entry_wall_dist, all doors are viable.
+    entry_wall_dist: float = 60.0
 
     # RNG seed for tie-breaking.
     seed: int = 0
@@ -95,6 +116,11 @@ class HeuristicPolicy:
         self._rng = np.random.default_rng(self.cfg.seed)
         self._prev_room_index: int | None = None
         self._target_door_slot: int | None = None
+        # 2026-07-04: stuck-detection state.
+        self._stuck_pos: tuple[float, float] | None = None
+        self._stuck_ticks_count: int = 0
+        # 2026-07-04: entry-slot to skip (backtrack prevention).
+        self._entry_slot: int | None = None
         # Debug logging toggle.
         import os
         self._debug = bool(os.environ.get("ISAAC_HEURISTIC_DEBUG", "").strip())
@@ -109,13 +135,47 @@ class HeuristicPolicy:
 
     def act(self, raw_obs: dict[str, Any]) -> np.ndarray:
         """Return action ndarray [move, shoot]."""
-        # Detect room change: reset locked door target.
+        player = raw_obs.get("player") or {}
+        px = float(player.get("x", 0) or 0)
+        py = float(player.get("y", 0) or 0)
+
+        # Detect room change: reset locked door target and entry slot.
         cur_room = None
         gg = raw_obs.get("global") or {}
         cur_room = gg.get("room_index") or gg.get("safe_grid_index")
         if cur_room is not None and cur_room != self._prev_room_index:
             self._prev_room_index = cur_room
             self._target_door_slot = None   # force re-pick in new room
+            # Infer entry slot from bot's position relative to walls. Bot
+            # typically spawns near the door it came through.
+            self._entry_slot = self._infer_entry_slot(raw_obs, px, py)
+            # Reset stuck-detection.
+            self._stuck_pos = None
+            self._stuck_ticks_count = 0
+
+        # Stuck-detection: track position over recent ticks. If bot has been
+        # within stuck_radius of its earlier position for stuck_ticks in a
+        # row, unlock the door target. Next tick picks a new (random)
+        # target which may differ, breaking the stuck loop.
+        if self._stuck_pos is None:
+            self._stuck_pos = (px, py)
+            self._stuck_ticks_count = 0
+        else:
+            dx = px - self._stuck_pos[0]
+            dy = py - self._stuck_pos[1]
+            if (dx * dx + dy * dy) < self.cfg.stuck_radius * self.cfg.stuck_radius:
+                self._stuck_ticks_count += 1
+            else:
+                # Bot moved; reset window.
+                self._stuck_pos = (px, py)
+                self._stuck_ticks_count = 0
+            if self._stuck_ticks_count >= self.cfg.stuck_ticks:
+                if self._debug:
+                    log.info("[heuristic] STUCK at (%.0f,%.0f) for %d ticks -> unlock target=%s",
+                             px, py, self._stuck_ticks_count, self._target_door_slot)
+                self._target_door_slot = None
+                self._stuck_pos = (px, py)
+                self._stuck_ticks_count = 0
 
         # ---- Aim + shoot at nearest enemy ----
         enemy = self._nearest_enemy(raw_obs)
@@ -185,6 +245,33 @@ class HeuristicPolicy:
 
     # ---- Door target selection (called once per room) --------------------
 
+    def _infer_entry_slot(self, raw_obs: dict[str, Any], px: float, py: float) -> int | None:
+        """Infer which door the bot came through by position relative to walls.
+
+        Isaac spawns the bot near the door it entered. If the bot is within
+        entry_wall_dist of one wall, that's likely the entry side.
+
+        Returns door slot (0=LEFT, 1=UP, 2=RIGHT, 3=DOWN) or None for center
+        spawns (first room / edge cases).
+        """
+        bounds = raw_obs.get("room_bounds")
+        if not bounds:
+            return None
+        tl_x = float(bounds.get("tl_x", 0) or 0)
+        tl_y = float(bounds.get("tl_y", 0) or 0)
+        br_x = float(bounds.get("br_x", 1) or 1)
+        br_y = float(bounds.get("br_y", 1) or 1)
+        thresh = self.cfg.entry_wall_dist
+        candidates = []
+        if px - tl_x < thresh: candidates.append((px - tl_x, 0))   # LEFT wall
+        if py - tl_y < thresh: candidates.append((py - tl_y, 1))   # UP wall
+        if br_x - px < thresh: candidates.append((br_x - px, 2))   # RIGHT wall
+        if br_y - py < thresh: candidates.append((br_y - py, 3))   # DOWN wall
+        if not candidates:
+            return None   # center spawn -> no entry slot to skip
+        candidates.sort()
+        return candidates[0][1]
+
     def _pick_target_door(self, raw_obs: dict[str, Any]) -> int | None:
         """Choose ONE door slot to target for this room. Locked in until room change.
 
@@ -195,9 +282,11 @@ class HeuristicPolicy:
         doors = raw_obs.get("doors")
         if not doors:
             return None
-        # First pass: normal open unlocked doors only.
-        # Second pass: any open unlocked doors (boss/treasure/secret included).
-        for pass_idx in (0, 1):
+        # First pass: normal open unlocked doors, excluding entry slot.
+        # Second pass: any open unlocked doors, still excluding entry slot.
+        # Third pass: any open unlocked doors INCLUDING entry slot (only if
+        # nothing else is viable — dead-end rooms).
+        for pass_idx in (0, 1, 2):
             candidates: list[int] = []
             for slot in range(min(4, len(doors))):
                 d = doors[slot]
@@ -209,14 +298,12 @@ class HeuristicPolicy:
                 is_special = bool(d[3]) or bool(d[4]) or bool(d[5])
                 if not exists or not is_open or is_locked:
                     continue
+                if pass_idx <= 1 and slot == self._entry_slot:
+                    continue   # skip entry door except in last-resort pass
                 if pass_idx == 0 and is_special:
                     continue
                 candidates.append(slot)
             if candidates:
-                # Random pick among viable doors. RNG-seeded so runs are
-                # reproducible. Randomization here (rather than nearest-door)
-                # ensures demos see all door slots as targets over many rooms,
-                # preventing BC from learning a positional bias.
                 return int(self._rng.choice(candidates))
         return None
 

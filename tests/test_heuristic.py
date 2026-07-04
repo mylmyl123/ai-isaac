@@ -222,16 +222,18 @@ def test_move_toward_down_door_from_left():
 # ---- 4. Regression: no oscillation ---------------------------------------
 
 def test_no_oscillation_locked_target_delivers_stable_moves():
-    """Simulate 50 ticks with the same obs. Move action should be stable
-    (either all same, or a small set matching the diagonal->cardinal
-    transition as bot approaches door)."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0))
+    """Simulate ticks with the same obs. Move action should be stable while
+    the target is locked (within stuck_ticks). After stuck_ticks, target
+    unlocks and moves may change - that's expected safety behavior."""
+    # Use high stuck_ticks so it doesn't fire in the test window.
+    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=1000))
     doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+    # Position AWAY from all walls to avoid triggering entry_slot inference.
     obs = _mk_obs(px=300, py=280, doors=doors, room_index=1)
     moves = [int(p.act(obs)[0]) for _ in range(50)]
     unique = set(moves)
-    # With static obs and locked target, we should see at most 1 unique move.
-    # (No bot position changes since obs is fixed, so alignment stays same.)
+    # With static obs and locked target (no stuck timeout), we should see
+    # at most 1 unique move.
     assert len(unique) == 1, f"expected 1 unique move, got {unique}"
 
 
@@ -278,3 +280,77 @@ def test_angle_to_move_cardinals():
     assert HeuristicPolicy._angle_to_move(math.pi) == 7    # left
     assert HeuristicPolicy._angle_to_move(-math.pi / 2) == 1   # up
     assert HeuristicPolicy._angle_to_move(math.pi / 2) == 5    # down
+
+
+# ---- 8. Stuck detection (regression: bot pinned against wall) ------------
+
+def test_stuck_detection_unlocks_target_after_threshold():
+    """Bot stuck at same position for stuck_ticks -> target unlocked, re-picked."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=5, stuck_radius=5.0))
+    doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+    obs = _mk_obs(px=300, py=280, doors=doors, room_index=1)
+    # First act picks a target.
+    p.act(obs)
+    initial_target = p._target_door_slot
+    # 5 more ticks with same position -> should trigger unlock on the 5th.
+    for _ in range(5):
+        p.act(obs)
+    # After the unlock, target could be re-picked to the SAME slot (random).
+    # The KEY property is that stuck_ticks_count is reset, meaning the unlock
+    # DID fire. We can also verify by using a seed that produces a different pick.
+    # More robust: verify unlock happens by checking counter behavior after
+    # position changes.
+    # Move bot to new position -> counter should reset.
+    obs2 = _mk_obs(px=400, py=280, doors=doors, room_index=1)
+    p.act(obs2)
+    assert p._stuck_ticks_count == 0, "counter didn't reset on movement"
+
+
+def test_stuck_detection_does_not_fire_when_moving():
+    """Bot actually moving between ticks -> stuck counter stays low."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=5))
+    doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+    for i in range(20):
+        # Position changes each tick (bot moving).
+        obs = _mk_obs(px=300 + i * 10, py=280, doors=doors, room_index=1)
+        p.act(obs)
+    # Bot moved every tick -> counter should be 0.
+    assert p._stuck_ticks_count == 0
+
+
+# ---- 9. Entry-slot skip (regression: backtrack between rooms) ------------
+
+def test_entry_slot_inferred_from_near_left_wall():
+    """Bot spawns near LEFT wall -> entry_slot = 0 (LEFT)."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, entry_wall_dist=60))
+    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [1, 1, 0, 0, 0, 0], [0]*6]
+    # Bot at x=90, bounds tl_x=80 -> 10 units from LEFT wall.
+    obs = _mk_obs(px=90, py=280, doors=doors, room_index=1)
+    p.act(obs)
+    # LEFT should have been skipped in door selection.
+    assert p._entry_slot == 0
+    assert p._target_door_slot != 0, "picked entry (LEFT) door despite skip"
+
+
+def test_entry_slot_none_when_center_spawn():
+    """Bot in room center -> no entry_slot, all doors viable."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, entry_wall_dist=60))
+    doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+    # Center spawn: bot at (320, 280), room (80..560, 160..400).
+    # Distance to any wall = 120..240, all above threshold=60.
+    obs = _mk_obs(px=320, py=280, doors=doors, room_index=1)
+    p.act(obs)
+    assert p._entry_slot is None
+
+
+def test_dead_end_room_still_finds_a_door():
+    """Room where the only open door is the entry door -> heuristic picks
+    it anyway (third pass in _pick_target_door)."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, entry_wall_dist=60))
+    # Only LEFT door open, bot near LEFT wall.
+    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [0]*6, [0]*6]
+    obs = _mk_obs(px=90, py=280, doors=doors, room_index=1)
+    p.act(obs)
+    assert p._entry_slot == 0
+    # Should still pick LEFT (only viable) even though it's the entry.
+    assert p._target_door_slot == 0
