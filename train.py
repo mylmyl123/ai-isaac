@@ -348,6 +348,12 @@ def main() -> int:
              "Requires: pip install pynput. Human corrections saved to "
              "runs/<name>/human_corrections.npz for later DAgger retraining."
     )
+    ap.add_argument(
+        "--debug-heuristic", action="store_true",
+        help="Record every heuristic decision to a JSONL file for post-hoc "
+             "analysis. Output: runs/<name>/heuristic_debug.jsonl. "
+             "Equivalent to ISAAC_HEURISTIC_DEBUG=1 env var."
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -478,17 +484,33 @@ def main() -> int:
         human_override.start()
         set_instance(human_override)
 
-    # Diagnostic recorder: if ISAAC_HEURISTIC_DEBUG=1, log every heuristic
-    # decision to a JSONL file for post-hoc analysis. Non-invasive; off by
-    # default. See python/isaac_rl/debug_recorder.py.
+    # Diagnostic recorder: if ISAAC_HEURISTIC_DEBUG=1 OR --debug-heuristic
+    # flag, log every heuristic decision to a JSONL file for post-hoc
+    # analysis. Non-invasive; off by default. See
+    # python/isaac_rl/debug_recorder.py.
     debug_recorder = None
-    if os.environ.get("ISAAC_HEURISTIC_DEBUG", "").strip():
+    debug_enabled = args.debug_heuristic or bool(
+        os.environ.get("ISAAC_HEURISTIC_DEBUG", "").strip()
+    )
+    if debug_enabled:
         from isaac_rl.debug_recorder import DebugRecorder
-        run_dir = getattr(cfg, "run_dir", None) or "runs"
-        debug_path = os.path.join(run_dir, "heuristic_debug.jsonl")
-        debug_recorder = DebugRecorder(save_path=debug_path, enabled=True)
+        # Use a stable path under checkpoint_dir/run_name so user can find it
+        # without knowing the timestamped subfolder. Timestamp appended so
+        # multiple runs don't overwrite each other.
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        ckpt_dir = getattr(cfg, "checkpoint_dir", None) or "runs"
+        run_name = getattr(cfg, "run_name", None) or "default"
+        debug_path = os.path.abspath(
+            os.path.join(ckpt_dir, run_name, f"heuristic_debug_{ts}.jsonl")
+        )
+        debug_recorder = DebugRecorder(save_path=debug_path, enabled=True, flush_every=100)
         DebugRecorder.set_instance(debug_recorder)
-        log.info("heuristic debug recorder ACTIVE -> %s", debug_path)
+        log.info("=" * 72)
+        log.info("HEURISTIC DEBUG RECORDER ACTIVE")
+        log.info("  Path: %s", debug_path)
+        log.info("  Format: JSONL, one line per heuristic decision")
+        log.info("  Flush: every 100 ticks (~7s at 15Hz)")
+        log.info("=" * 72)
 
     try:
         train(cfg)
