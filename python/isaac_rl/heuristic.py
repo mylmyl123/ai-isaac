@@ -453,6 +453,46 @@ class HeuristicPolicy:
             best_dist = eligible[0][0]
             tied = [slot for dist, slot in eligible if dist - best_dist < 1e-3]
             best_slot = int(self._rng.choice(tied)) if len(tied) > 1 else tied[0]
+            # CRITICAL FIX (2026-07-03): move TOWARD the door's exact position,
+            # not just the cardinal direction of the door slot. Doors are
+            # narrow (~40 units) gaps in the wall. If the bot moves purely
+            # LEFT while its Y-coord doesn't match the LEFT door's Y-coord,
+            # it hits the solid wall segment NEXT to the door, not the door
+            # itself. Solution: force DIAGONAL movement toward the door until
+            # aligned on the perpendicular axis.
+            if door_positions is not None:
+                target_x, target_y = door_positions[best_slot]
+                vec_x = target_x - px
+                vec_y = target_y - py
+                align_thresh = 20.0   # ~half a tile in Isaac coords
+                if best_slot == 0:   # LEFT door: go left; adjust y if not aligned
+                    if vec_y > align_thresh:
+                        return 6   # down-left
+                    elif vec_y < -align_thresh:
+                        return 8   # up-left
+                    else:
+                        return 7   # left (aligned)
+                elif best_slot == 2:  # RIGHT door
+                    if vec_y > align_thresh:
+                        return 4   # down-right
+                    elif vec_y < -align_thresh:
+                        return 2   # up-right
+                    else:
+                        return 3   # right
+                elif best_slot == 1:  # UP door
+                    if vec_x > align_thresh:
+                        return 2   # up-right
+                    elif vec_x < -align_thresh:
+                        return 8   # up-left
+                    else:
+                        return 1   # up
+                elif best_slot == 3:  # DOWN door
+                    if vec_x > align_thresh:
+                        return 4   # down-right
+                    elif vec_x < -align_thresh:
+                        return 6   # down-left
+                    else:
+                        return 5   # down
             return cfg.door_slot_to_move[best_slot]
         return None
 
