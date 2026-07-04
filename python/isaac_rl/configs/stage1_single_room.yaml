@@ -47,8 +47,12 @@ aux_coef: 0.1              # auxiliary supervised loss coefficient (representati
 # kickstart_teacher_path from bc_pretrained.pt if you run with --collect-demos
 # in the same session; you can also point it at a checkpoint from a previous
 # run via YAML: kickstart_teacher_path: /path/to/bc_pretrained.pt
-kickstart_coef: 0.5              # initial KL coefficient (decays linearly to 0)
-kickstart_decay_updates: 500     # number of PPO updates over which the coef decays
+# 2026-07-04: reduced from 0.5 -> 0.2 after 605K-step run showed BC pinning
+# policy to a bad local optimum for 400K steps. Weaker kickstart lets PPO
+# escape faster if BC learned junk. If BC is high-quality, PPO still respects
+# it via the initial policy weights (not the KL penalty).
+kickstart_coef: 0.2              # initial KL coefficient (decays linearly to 0)
+kickstart_decay_updates: 300     # was 500 - decay faster to unblock PPO exploration
 
 # Phase A (2026-07-02): scale-up improvements.
 lr_warmup_updates: 100     # linearly ramp LR from 0 to cfg.lr for first 100 updates
@@ -74,10 +78,13 @@ curriculum:
   # Past 3M: cfg default (0.02)
 
 # Adaptive entropy floor (2026-07-03). Prevents catastrophic entropy collapse.
-# If measured entropy drops below 0.8, ent_coef is auto-boosted up to 0.1.
-# Standard mechanism from SAC / Agent57 / many production RL systems.
-entropy_floor: 0.8
-ent_coef_max: 0.1
+# 2026-07-04: raised floor from 0.8 -> 1.0 after 605K run showed entropy
+# collapse to 0.03 pre-recovery. Higher floor triggers earlier and keeps bot
+# exploring. 1.0 is roughly the log-entropy of a 3-way uniform mix over the
+# 9-way move space (still peaks around good actions but always samples
+# alternatives).
+entropy_floor: 1.0
+ent_coef_max: 0.15    # was 0.1 - allow more aggressive entropy boost when adaptive triggers
 
 # B1 (distributional value) and B4 (latent z) knobs live in policy.* below.
 
