@@ -264,6 +264,12 @@ class SocketIsaacEnv(gym.Env):
     def step(self, action):
         assert self._client is not None, "reset() must be called before step()"
         a = np.asarray(action, dtype=np.int64).reshape(-1)
+        # Apply human override if enabled (does nothing if not).
+        try:
+            from isaac_rl.human_override import apply_override
+            a = apply_override(a)
+        except ImportError:
+            pass
         try:
             send_frame(self._client, encode_action(a))
             raw = recv_frame(self._client)

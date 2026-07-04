@@ -340,6 +340,14 @@ def main() -> int:
     ap.add_argument("--bc-lr", type=float, default=3.0e-4,
                     help="BC learning rate (default 3e-4).")
     ap.add_argument("--override", nargs="*", default=[], help="Extra config overrides: key=value")
+    ap.add_argument(
+        "--human-override", action="store_true",
+        help="Enable keyboard override to manually steer the bot during training. "
+             "Movement: WASD (diagonals via combos). Shoot: IJKL. "
+             "F1=toggle enable, F2=pause bot, F3=save corrections, ESC=disable. "
+             "Requires: pip install pynput. Human corrections saved to "
+             "runs/<name>/human_corrections.npz for later DAgger retraining."
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -456,6 +464,20 @@ def main() -> int:
     # Hand off to the trainer. Its build_vec_env() will open the server sockets
     # and block until each Isaac connects. Ctrl-C during accept() surfaces as
     # KeyboardInterrupt which our signal handler catches.
+
+    # Set up human keyboard override if requested. Its listener runs in a
+    # background thread; env.py's step() will consult it via the singleton
+    # accessor. If pynput isn't installed, it silently becomes a no-op.
+    human_override = None
+    if args.human_override:
+        from isaac_rl.human_override import HumanOverride, set_instance
+        # Save corrections to the run directory.
+        run_dir = getattr(cfg, "run_dir", None) or "runs"
+        save_path = os.path.join(run_dir, "human_corrections.npz")
+        human_override = HumanOverride(save_path=save_path)
+        human_override.start()
+        set_instance(human_override)
+
     try:
         train(cfg)
     except KeyboardInterrupt:
@@ -464,6 +486,8 @@ def main() -> int:
         log.exception("training failed: %s", e)
         return 1
     finally:
+        if human_override is not None:
+            human_override.stop()
         cleanup()
 
     return 0
