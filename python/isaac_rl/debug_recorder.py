@@ -65,10 +65,29 @@ class DebugRecorder:
         self._start_wall = time.time()
         if self.enabled and self.save_path:
             self.save_path.parent.mkdir(parents=True, exist_ok=True)
-            # Truncate any existing file so a new run starts fresh.
+            # Write an initial marker line so the file exists on disk
+            # immediately with meaningful content. If nothing else gets
+            # logged, at least the user can find it and confirm the
+            # recorder was active.
             with open(self.save_path, "w") as f:
-                f.write("")   # empty file
+                init_marker = {
+                    "t": 0.0,
+                    "event": "recorder_started",
+                    "start_wall": self._start_wall,
+                    "save_path": str(self.save_path),
+                }
+                f.write(json.dumps(init_marker) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            # Register atexit handler as belt-and-suspenders backup for
+            # Ctrl+C / abrupt exits that might skip normal cleanup paths.
+            import atexit
+            atexit.register(self._atexit_flush)
             log.info("[debug_recorder] recording heuristic trace -> %s", self.save_path)
+            log.info("[debug_recorder] initial marker written; file exists at start")
 
     @classmethod
     def get_instance(cls) -> "DebugRecorder | None":
@@ -178,8 +197,22 @@ class DebugRecorder:
             with open(self.save_path, "a") as f:
                 for tick in to_write:
                     f.write(json.dumps(tick) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
         except OSError as e:
             log.warning("[debug_recorder] write failed: %s", e)
+
+    def _atexit_flush(self) -> None:
+        """Atexit backup: flush + close. May be called multiple times safely."""
+        try:
+            self.flush()
+            log.info("[debug_recorder] atexit flush complete (%d ticks total) at %s",
+                     self._tick_count, self.save_path)
+        except Exception:
+            pass
 
     def close(self) -> None:
         self.flush()

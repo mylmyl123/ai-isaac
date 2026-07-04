@@ -503,7 +503,7 @@ def main() -> int:
         debug_path = os.path.abspath(
             os.path.join(ckpt_dir, run_name, f"heuristic_debug_{ts}.jsonl")
         )
-        debug_recorder = DebugRecorder(save_path=debug_path, enabled=True, flush_every=100)
+        debug_recorder = DebugRecorder(save_path=debug_path, enabled=True, flush_every=10)
         DebugRecorder.set_instance(debug_recorder)
         log.info("=" * 72)
         log.info("HEURISTIC DEBUG RECORDER ACTIVE")
