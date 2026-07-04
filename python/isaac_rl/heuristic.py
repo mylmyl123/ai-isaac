@@ -121,6 +121,9 @@ class HeuristicPolicy:
         self._stuck_ticks_count: int = 0
         # 2026-07-04: entry-slot to skip (backtrack prevention).
         self._entry_slot: int | None = None
+        # 2026-07-04 (later): slots that got the bot stuck THIS room -> skip.
+        # Reset on room change. Prevents re-picking a stuck door repeatedly.
+        self._failed_slots: set[int] = set()
         # Debug logging toggle.
         import os
         self._debug = bool(os.environ.get("ISAAC_HEURISTIC_DEBUG", "").strip())
@@ -146,6 +149,7 @@ class HeuristicPolicy:
         if cur_room is not None and cur_room != self._prev_room_index:
             self._prev_room_index = cur_room
             self._target_door_slot = None   # force re-pick in new room
+            self._failed_slots = set()      # reset per-room failed history
             # Infer entry slot from bot's position relative to walls. Bot
             # typically spawns near the door it came through.
             self._entry_slot = self._infer_entry_slot(raw_obs, px, py)
@@ -173,6 +177,9 @@ class HeuristicPolicy:
                 if self._debug:
                     log.info("[heuristic] STUCK at (%.0f,%.0f) for %d ticks -> unlock target=%s",
                              px, py, self._stuck_ticks_count, self._target_door_slot)
+                # Add the stuck slot to failed_slots so we don't re-pick it.
+                if self._target_door_slot is not None:
+                    self._failed_slots.add(self._target_door_slot)
                 self._target_door_slot = None
                 self._stuck_pos = (px, py)
                 self._stuck_ticks_count = 0
@@ -192,6 +199,12 @@ class HeuristicPolicy:
             if edist < self.cfg.retreat_dist:
                 # Flee: move directly away from enemy.
                 move = self._angle_to_move(math.atan2(-edy, -edx))
+                # 2026-07-04: wall-avoidance during retreat. If the flee
+                # direction would push into a wall (bot near that wall),
+                # rotate 90 degrees to slide along the wall instead of
+                # pushing into it. Prevents "corner pinning" pathology where
+                # 80% of combat_retreat ticks happened at room edges.
+                move = self._rotate_if_wall(move, raw_obs, px, py)
                 zone = "retreat"
             elif edist > self.cfg.approach_dist:
                 # Approach: move toward enemy.
@@ -282,11 +295,11 @@ class HeuristicPolicy:
         doors = raw_obs.get("doors")
         if not doors:
             return None
-        # First pass: normal open unlocked doors, excluding entry slot.
-        # Second pass: any open unlocked doors, still excluding entry slot.
-        # Third pass: any open unlocked doors INCLUDING entry slot (only if
-        # nothing else is viable — dead-end rooms).
-        for pass_idx in (0, 1, 2):
+        # First pass: normal open unlocked doors, excluding entry AND failed slots.
+        # Second pass: any open unlocked doors, excluding entry AND failed slots.
+        # Third pass: any open unlocked doors, excluding failed slots (allow entry).
+        # Fourth pass: any open unlocked doors (dead-end rescue — include everything).
+        for pass_idx in (0, 1, 2, 3):
             candidates: list[int] = []
             for slot in range(min(4, len(doors))):
                 d = doors[slot]
@@ -299,7 +312,9 @@ class HeuristicPolicy:
                 if not exists or not is_open or is_locked:
                     continue
                 if pass_idx <= 1 and slot == self._entry_slot:
-                    continue   # skip entry door except in last-resort pass
+                    continue
+                if pass_idx <= 2 and slot in self._failed_slots:
+                    continue
                 if pass_idx == 0 and is_special:
                     continue
                 candidates.append(slot)
@@ -361,6 +376,81 @@ class HeuristicPolicy:
             elif vec_x < -thresh: return 6   # down-left
             else:                 return 5   # pure down
         return int(self.cfg.door_slot_to_move[slot])
+
+    def _rotate_if_wall(self, move: int, raw_obs: dict[str, Any], px: float, py: float) -> int:
+        """If `move` action pushes bot into a nearby wall, rotate 90 degrees
+        to slide along the wall instead. Returns rotated action.
+
+        This prevents combat_retreat and other flee behaviors from pinning
+        the bot against a wall corner. The 80% edge-retreat pathology from
+        the debug trace comes from this.
+
+        Rotation direction (CW or CCW) picked randomly per call.
+        """
+        bounds = raw_obs.get("room_bounds")
+        if not bounds:
+            return move
+        tl_x = float(bounds.get("tl_x", 0) or 0)
+        tl_y = float(bounds.get("tl_y", 0) or 0)
+        br_x = float(bounds.get("br_x", 1) or 1)
+        br_y = float(bounds.get("br_y", 1) or 1)
+        # Check if move direction pushes into a wall that's very close.
+        # Move actions: 1=up, 2=up-right, 3=right, 4=down-right,
+        #               5=down, 6=down-left, 7=left, 8=up-left
+        wall_thresh = 40.0   # if bot within 40 units of the wall it's pushing toward
+        pushes_up = move in (1, 2, 8)
+        pushes_down = move in (4, 5, 6)
+        pushes_left = move in (6, 7, 8)
+        pushes_right = move in (2, 3, 4)
+        into_wall = (
+            (pushes_up and (py - tl_y) < wall_thresh) or
+            (pushes_down and (br_y - py) < wall_thresh) or
+            (pushes_left and (px - tl_x) < wall_thresh) or
+            (pushes_right and (br_x - px) < wall_thresh)
+        )
+        if not into_wall:
+            return move
+        # Rotate 90 degrees. Try one direction; if that also pushes into a
+        # wall, try the other. If both do (corner), pick the one that pushes
+        # further from BOTH walls.
+        rot_cw = self._rotate_move_90(move, clockwise=True)
+        rot_ccw = self._rotate_move_90(move, clockwise=False)
+        # Check each rotation for wall collision.
+        def _wall_collides(m: int) -> bool:
+            pu = m in (1, 2, 8); pd = m in (4, 5, 6)
+            pl = m in (6, 7, 8); pr = m in (2, 3, 4)
+            return (
+                (pu and (py - tl_y) < wall_thresh) or
+                (pd and (br_y - py) < wall_thresh) or
+                (pl and (px - tl_x) < wall_thresh) or
+                (pr and (br_x - px) < wall_thresh)
+            )
+        cw_hits = _wall_collides(rot_cw)
+        ccw_hits = _wall_collides(rot_ccw)
+        if not cw_hits and not ccw_hits:
+            # Both are free; pick randomly.
+            return rot_cw if self._rng.random() < 0.5 else rot_ccw
+        if not cw_hits:
+            return rot_cw
+        if not ccw_hits:
+            return rot_ccw
+        # Both rotations hit walls (unusual - three walls close). Return
+        # original; stuck-detection will unlock target later.
+        return move
+
+    @staticmethod
+    def _rotate_move_90(move: int, clockwise: bool = True) -> int:
+        """Rotate an 8-way move action 90 degrees. Idle (0) stays idle.
+        Move actions: 1=up, 2=up-right, 3=right, 4=down-right,
+                      5=down, 6=down-left, 7=left, 8=up-left
+        """
+        if move == 0:
+            return 0
+        # Clockwise rotation table.
+        cw = {1: 3, 2: 4, 3: 5, 4: 6, 5: 7, 6: 8, 7: 1, 8: 2}
+        # Counter-clockwise = inverse.
+        ccw = {v: k for k, v in cw.items()}
+        return cw[move] if clockwise else ccw[move]
 
     # ---- Enemy detection ------------------------------------------------
 

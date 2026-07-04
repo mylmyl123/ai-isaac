@@ -114,7 +114,8 @@ def test_door_target_locked_across_ticks_same_room():
     change tick-to-tick within the same room. Previous heuristic (v1)
     flipped between doors as bot position changed, causing left-right
     oscillation."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0))
+    # Use high stuck_ticks so stuck detection doesn't fire in the test window.
+    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=1000))
     # Room with LEFT+RIGHT doors both open. Bot in center.
     doors = [
         [1, 1, 0, 0, 0, 0],   # LEFT open
@@ -354,3 +355,77 @@ def test_dead_end_room_still_finds_a_door():
     assert p._entry_slot == 0
     # Should still pick LEFT (only viable) even though it's the entry.
     assert p._target_door_slot == 0
+
+
+# ---- 10. Failed-slot memory (regression: same door picked after stuck) ----
+
+def test_stuck_slot_added_to_failed_set():
+    """After stuck-timeout, the stuck slot is added to _failed_slots so
+    subsequent picks avoid it."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=3))
+    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+    # Center spawn, no entry restriction.
+    obs = _mk_obs(px=300, py=280, doors=doors, room_index=1)
+    p.act(obs)
+    initial = p._target_door_slot
+    assert initial is not None
+    # 4 ticks with same position -> stuck detection fires (stuck_ticks=3).
+    for _ in range(4):
+        p.act(obs)
+    # Original target should now be in failed_slots.
+    assert initial in p._failed_slots
+
+
+def test_failed_slots_reset_on_room_change():
+    """When bot enters a new room, failed_slots resets (may re-explore old failures)."""
+    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=3))
+    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+    obs1 = _mk_obs(px=300, py=280, doors=doors, room_index=1)
+    p.act(obs1)
+    p._failed_slots.add(0)  # simulate a failed slot
+    assert 0 in p._failed_slots
+    # Room change resets.
+    obs2 = _mk_obs(px=300, py=280, doors=doors, room_index=2)
+    p.act(obs2)
+    assert 0 not in p._failed_slots
+
+
+# ---- 11. Combat retreat wall rotation (regression: corner pinning) --------
+
+def test_retreat_rotates_when_pushing_into_left_wall():
+    """Bot near LEFT wall, enemy on RIGHT -> retreat direction is LEFT.
+    But LEFT pushes into wall -> should rotate to UP or DOWN."""
+    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250, seed=0))
+    # Bot at x=90 (10 from LEFT wall at tl_x=80). Enemy to the RIGHT.
+    obs = _mk_obs(px=90, py=280, enemies=_mk_enemy(dx=50, dy=0))
+    a = p.act(obs)
+    # Move should NOT be pure LEFT (7). Should be UP (1), DOWN (5), or a
+    # diagonal that includes vertical component.
+    assert a[0] in (1, 5, 2, 4, 6, 8), f"retreat pinned to LEFT wall: move={a[0]}"
+    # Ensure move doesn't include LEFT component (7, 6, 8).
+    assert a[0] not in (6, 7, 8), f"retreat still moving LEFT despite wall: move={a[0]}"
+
+
+def test_retreat_no_rotation_when_wall_far():
+    """Bot in center of room, enemy on RIGHT -> retreat LEFT is fine, no rotation."""
+    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250, seed=0))
+    # Bot at x=300 (well away from any wall). Enemy on RIGHT.
+    obs = _mk_obs(px=300, py=280, enemies=_mk_enemy(dx=50, dy=0))
+    a = p.act(obs)
+    # Move should be pure LEFT (7) - no rotation needed.
+    assert a[0] == 7, f"unnecessary rotation: move={a[0]}"
+
+
+def test_rotate_move_90_clockwise():
+    from isaac_rl.heuristic import HeuristicPolicy
+    assert HeuristicPolicy._rotate_move_90(1, clockwise=True) == 3   # UP -> RIGHT
+    assert HeuristicPolicy._rotate_move_90(3, clockwise=True) == 5   # RIGHT -> DOWN
+    assert HeuristicPolicy._rotate_move_90(5, clockwise=True) == 7   # DOWN -> LEFT
+    assert HeuristicPolicy._rotate_move_90(7, clockwise=True) == 1   # LEFT -> UP
+    assert HeuristicPolicy._rotate_move_90(0, clockwise=True) == 0   # idle stays idle
+
+
+def test_rotate_move_90_counterclockwise():
+    from isaac_rl.heuristic import HeuristicPolicy
+    assert HeuristicPolicy._rotate_move_90(1, clockwise=False) == 7   # UP -> LEFT
+    assert HeuristicPolicy._rotate_move_90(3, clockwise=False) == 1   # RIGHT -> UP
