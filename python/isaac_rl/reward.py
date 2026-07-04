@@ -99,6 +99,22 @@ class RewardConfig:
     r_idle_penalty: float = -0.01
     idle_speed_threshold: float = 0.5      # velocity magnitude below this = idle
 
+    # ---- NEW (2026-07-04): Idle death termination -----------------------
+    # User request after 605K-step analysis showed bot idled for 400K steps
+    # in a bad local optimum. Instead of just penalizing idle per-tick, we
+    # now TERMINATE the episode if the bot has been idle for too long,
+    # applying a huge negative reward. This:
+    #   1. Forces PPO to actually update policy (episode boundary = clear signal)
+    #   2. Provides a discrete cliff cost that dominates any incremental
+    #      idle-reward exploit
+    #   3. Resets the bot to a fresh spawn, giving exploration another shot
+    # Only fires when bot is IDLE (velocity ~ 0) AND not in combat (no enemies
+    # visible). In combat, staying in place can be tactical (dodging in a
+    # tight corner) so we don't terminate.
+    r_idle_death: float = -20.0            # applied when idle_death_ticks reached
+    idle_death_ticks: int = 300            # 300 ticks = ~20 seconds at 15Hz
+    idle_death_require_no_enemies: bool = True   # don't terminate if enemies visible
+
     # ---- NEW: Anti-camping (position-based) ----------------------------
     # Even with the idle penalty, PPO can find local optima where the bot
     # oscillates within a tiny radius ("wiggles" in a corner while shooting).
@@ -166,6 +182,7 @@ class RewardState:
     prev_potential: float | None = None    # PBRS: previous state potential
     prev_door_dist: float | None = None    # for r_door_distance_shaping
     pos_history: list = field(default_factory=list)  # rolling position window
+    consecutive_idle_ticks: int = 0        # 2026-07-04: for idle-death termination
 
 
 class RewardShaper:
@@ -360,6 +377,26 @@ class RewardShaper:
             # Anti-idle penalty.
             if speed < cfg.idle_speed_threshold:
                 add("idle_penalty", cfg.r_idle_penalty)
+                # Idle-death: track consecutive idle ticks. If bot idles too
+                # long WITHOUT enemies present, terminate the episode with a
+                # huge negative reward. This forces PPO out of "stand still"
+                # local optima that per-tick penalties alone can't escape.
+                enemies_present = False
+                enemies_obs = raw_obs.get("enemies") or {}
+                mask = enemies_obs.get("mask") or []
+                if any(bool(m) for m in mask):
+                    enemies_present = True
+                if cfg.idle_death_require_no_enemies and enemies_present:
+                    # In combat: don't count toward idle-death (dodging is OK).
+                    st.consecutive_idle_ticks = 0
+                else:
+                    st.consecutive_idle_ticks += 1
+                    if st.consecutive_idle_ticks >= cfg.idle_death_ticks:
+                        add("idle_death", cfg.r_idle_death)
+                        terminated = True
+                        st.consecutive_idle_ticks = 0   # reset for next episode
+            else:
+                st.consecutive_idle_ticks = 0
 
             # Anti-camping (position-based). Tracks bots position over a rolling
             # window; if the max displacement across the window is below

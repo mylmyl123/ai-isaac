@@ -142,6 +142,61 @@ def test_idle_penalty_absent_when_moving():
     assert "idle_penalty" not in bd
 
 
+def test_idle_death_fires_after_threshold():
+    """2026-07-04: bot idle for idle_death_ticks in an empty room -> terminate
+    episode with r_idle_death reward."""
+    from isaac_rl.reward import RewardConfig
+    cfg = RewardConfig(idle_death_ticks=5, r_idle_death=-20.0)
+    r = RewardShaper(cfg)
+    obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0},
+           "enemies": {"mask": []}, "events": []}
+    # First N-1 ticks: idle penalty fires but no termination.
+    for i in range(cfg.idle_death_ticks - 1):
+        rew, term, bd = r(obs)
+        assert not term, f"episode terminated too early at tick {i}"
+        assert "idle_death" not in bd
+    # Nth tick: threshold reached -> terminate with big penalty.
+    rew, term, bd = r(obs)
+    assert term, "episode should terminate on idle_death threshold"
+    assert bd.get("idle_death") == cfg.r_idle_death
+
+
+def test_idle_death_blocked_by_enemies():
+    """When enemies visible, idle-death should NOT trigger (staying still
+    can be tactical dodging)."""
+    from isaac_rl.reward import RewardConfig
+    cfg = RewardConfig(idle_death_ticks=5, r_idle_death=-20.0,
+                       idle_death_require_no_enemies=True)
+    r = RewardShaper(cfg)
+    obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0},
+           "enemies": {"mask": [True], "feats": [[0.5, 0.5, 0.1, 0.1]]},
+           "events": []}
+    for i in range(cfg.idle_death_ticks * 2):
+        rew, term, bd = r(obs)
+        assert not term, f"terminated at tick {i} despite enemies"
+        assert "idle_death" not in bd
+
+
+def test_idle_death_counter_resets_on_movement():
+    """Bot idles, moves briefly, idles again -> counter reset -> no death."""
+    from isaac_rl.reward import RewardConfig
+    cfg = RewardConfig(idle_death_ticks=5, r_idle_death=-20.0)
+    r = RewardShaper(cfg)
+    idle_obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 0.0, "vy": 0.0},
+                "enemies": {"mask": []}, "events": []}
+    move_obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 5.0, "vy": 0.0},
+                "enemies": {"mask": []}, "events": []}
+    # Idle 3 ticks, move 1 tick (resets counter), idle 4 ticks -> no death.
+    for _ in range(3):
+        rew, term, _ = r(idle_obs)
+        assert not term
+    rew, term, _ = r(move_obs)
+    assert not term
+    for _ in range(4):
+        rew, term, _ = r(idle_obs)
+        assert not term, "counter didn't reset on movement"
+
+
 def test_full_hp_tick_reward():
     r = RewardShaper()
     obs = {"player": {"hp_red": 3, "hp_max": 3, "vx": 5.0, "vy": 0.0}, "events": []}

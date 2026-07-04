@@ -191,6 +191,15 @@ reward:
   r_idle_penalty: -0.1           # was -0.03 (was -0.01)
   idle_speed_threshold: 0.5
 
+  # 2026-07-04: Idle-DEATH termination. User request after 605K run showed
+  # bot idled 400K steps in local optimum. If bot idles for 300 consecutive
+  # ticks (~20 sec) with no enemies visible, KILL the episode and apply
+  # -20 reward. Discrete cliff cost that dominates any incremental idle-
+  # reward exploit. Episode resets, giving fresh exploration chance.
+  r_idle_death: -20.0            # huge negative on idle-timeout death
+  idle_death_ticks: 300          # ~20 sec at 15Hz
+  idle_death_require_no_enemies: true
+
   # Anti-camping (position-based). Also bumped: -0.02 -> -0.08 for same reason
   # as idle_penalty above. Catches bots that jitter enough to defeat idle_penalty.
   r_stationary_penalty: -0.08    # was -0.02
