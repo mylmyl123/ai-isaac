@@ -84,10 +84,12 @@ class SocketIsaacEnv(gym.Env):
         max_steps: int = 27000,          # ~30 min at 15 Hz
         reward_config: RewardConfig | None = None,
         reset_stage: int | None = None,   # curriculum: force `stage N` on reset
+        env_idx: int = 0,                 # position in the vec-env (0-indexed)
     ):
         super().__init__()
         self.host = host
         self.port = port
+        self.env_idx = env_idx
         self.accept_timeout_s = accept_timeout_s
         self.max_steps = max_steps
         self.reset_stage = reset_stage
@@ -264,10 +266,10 @@ class SocketIsaacEnv(gym.Env):
     def step(self, action):
         assert self._client is not None, "reset() must be called before step()"
         a = np.asarray(action, dtype=np.int64).reshape(-1)
-        # Apply human override if enabled (does nothing if not).
+        # Apply human override if enabled AND this env is the current target.
         try:
             from isaac_rl.human_override import apply_override
-            a = apply_override(a)
+            a = apply_override(a, env_idx=self.env_idx)
         except ImportError:
             pass
         try:

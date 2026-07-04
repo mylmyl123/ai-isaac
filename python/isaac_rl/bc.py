@@ -104,16 +104,19 @@ def collect_demos(
         # steering the bot, we want BC to learn from the HUMAN's action, not
         # the heuristic's. This makes demo collection double as DAgger-style
         # correction gathering.
+        #
+        # Override applies only to the target env (default env 0). User can
+        # switch target with number keys 1-9 during training.
         override = _get_override()
         if override is not None:
             move, shoot = override.get_action()
             if move is not None or shoot is not None:
-                # Apply to all envs (single keyboard, single override).
-                for i in range(n_envs):
+                target = override.target_env
+                if 0 <= target < n_envs:
                     if move is not None and action_dim >= 1:
-                        actions[i, 0] = move
+                        actions[target, 0] = move
                     if shoot is not None and action_dim >= 2:
-                        actions[i, 1] = shoot
+                        actions[target, 1] = shoot
 
         # Record (obs_before_action, action).
         for i in range(n_envs):

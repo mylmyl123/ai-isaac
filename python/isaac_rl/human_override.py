@@ -71,6 +71,10 @@ class HumanOverride:
     Non-invasive: if pynput is not installed, the override is silently
     disabled (get_action always returns (None, None)). Training continues
     with the policy in full control.
+
+    Target-env selection: with multi-env training, use number keys 1-9 to
+    select which env receives your keyboard overrides. The default target
+    is env 0 (the first Isaac window that connected).
     """
 
     def __init__(self, save_path: str | Path | None = None):
@@ -78,6 +82,7 @@ class HumanOverride:
         self.pressed: set[str] = set()
         self.enabled: bool = True
         self.bot_paused: bool = False
+        self.target_env: int = 0        # which env gets the override (0-indexed)
         self.listener: Any = None
         self._corrections_obs: list[dict] = []
         self._corrections_actions: list[np.ndarray] = []
@@ -108,6 +113,7 @@ class HumanOverride:
             "Human override ACTIVE. Keys:\n"
             "  Movement: WASD (with diagonals via combos)\n"
             "  Shooting: IJKL\n"
+            "  Target:   1/2/3/4/... = select which env gets your input (default: env 0)\n"
             "  Toggle:   F1 = enable/disable override, F2 = pause bot\n"
             "            F3 = save corrections now, ESC = disable"
         )
@@ -144,6 +150,13 @@ class HumanOverride:
         if ks == "Key.esc":
             self.enabled = False
             log.info("[override] DISABLED (ESC)")
+            return
+        # Number keys 1-9: switch target env.
+        if ks in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+            new_target = int(ks) - 1
+            if new_target != self.target_env:
+                self.target_env = new_target
+                log.info("[override] target env = %d", self.target_env)
             return
         with self._lock:
             self.pressed.add(ks)
@@ -260,14 +273,23 @@ def get_instance() -> HumanOverride | None:
     return _INSTANCE
 
 
-def apply_override(action: np.ndarray) -> np.ndarray:
+def apply_override(action: np.ndarray, env_idx: int = 0) -> np.ndarray:
     """If a HumanOverride instance is set and active, mutate action in place.
+
+    Args:
+        action: the (2,) or (5,) int action array to potentially modify.
+        env_idx: which env is calling. Override only applies if env_idx
+                 matches the current target_env (default 0). Prevents the
+                 user's key press from affecting ALL envs in a multi-env
+                 training run.
 
     Returns the (possibly modified) action array. Called by env.py's step()
     before sending the action to Isaac.
     """
     inst = _INSTANCE
     if inst is None:
+        return action
+    if env_idx != inst.target_env:
         return action
     move, shoot = inst.get_action()
     if move is not None:

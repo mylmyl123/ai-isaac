@@ -102,6 +102,7 @@ def build_vec_env(
             max_steps=max_episode_steps,
             reward_config=reward_config,
             reset_stage=reset_stage,
+            env_idx=i,
         )
         envs.append(env)
 
