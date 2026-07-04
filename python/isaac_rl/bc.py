@@ -85,6 +85,11 @@ def collect_demos(
 
     total_steps = 0
     t_start = time.time()
+    # Import lazily so bc.py doesn't hard-require the human_override module.
+    try:
+        from isaac_rl.human_override import get_instance as _get_override
+    except ImportError:
+        _get_override = lambda: None   # type: ignore
     while total_steps < n_steps:
         # One action per env from the heuristic (needs raw obs from info).
         actions = np.zeros((n_envs, action_dim), dtype=np.int64)
@@ -94,6 +99,21 @@ def collect_demos(
             # Pad or truncate to match env's action dim (heuristic may return
             # 2-dim under the new action space).
             actions[i, :min(len(act), action_dim)] = act[:action_dim]
+
+        # Apply human override BEFORE recording: if the user is manually
+        # steering the bot, we want BC to learn from the HUMAN's action, not
+        # the heuristic's. This makes demo collection double as DAgger-style
+        # correction gathering.
+        override = _get_override()
+        if override is not None:
+            move, shoot = override.get_action()
+            if move is not None or shoot is not None:
+                # Apply to all envs (single keyboard, single override).
+                for i in range(n_envs):
+                    if move is not None and action_dim >= 1:
+                        actions[i, 0] = move
+                    if shoot is not None and action_dim >= 2:
+                        actions[i, 1] = shoot
 
         # Record (obs_before_action, action).
         for i in range(n_envs):
