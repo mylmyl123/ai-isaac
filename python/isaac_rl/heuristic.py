@@ -47,11 +47,19 @@ Projectiles (feats[i], 10 dims each):
 """
 from __future__ import annotations
 
+import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger(__name__)
+
+# Set env var ISAAC_HEURISTIC_DEBUG=1 to log per-tick decisions to stderr.
+# Useful for diagnosing "why is the bot walking randomly" issues.
+_DEBUG = os.environ.get("ISAAC_HEURISTIC_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -160,17 +168,26 @@ class HeuristicPolicy:
                     move = self._angle_to_move(math.atan2(edx, -edy))     # rotate -90°
 
         else:
-            # No enemies, no threats. If door-seeking is ENABLED and the room
-            # is clear, head to an open door. Otherwise fall back to random
-            # wander so we still explore.
-            if cfg.enable_door_seeking and is_clear:
+            # No enemies, no threats. Head to an open door if door-seeking
+            # is enabled. We no longer gate on is_clear: if there are no
+            # visible enemies, we might as well progress through a door.
+            # This handles edge cases (starting room, loading transitions)
+            # where is_clear may be False but doors are available.
+            if cfg.enable_door_seeking:
                 door_move = self._pick_door_move(raw_obs)
                 if door_move is not None and door_move not in forbidden:
                     move = door_move
+                    if _DEBUG:
+                        log.info("[heuristic] no-enemies -> door_move=%d (is_clear=%s)", move, is_clear)
                 elif self._rng.random() < cfg.idle_move_prob:
                     move = self._safe_random_move(forbidden)
+                    if _DEBUG:
+                        log.info("[heuristic] no-enemies, no reachable door (door_move=%s), random=%d forbidden=%s doors=%s",
+                                 door_move, move, sorted(forbidden), raw_obs.get("doors"))
             elif self._rng.random() < cfg.idle_move_prob:
                 move = self._safe_random_move(forbidden)
+                if _DEBUG:
+                    log.info("[heuristic] door-seek disabled, random=%d", move)
 
         # ---- Wall-avoidance final filter --------------------------------
         # Regardless of how `move` was chosen (combat dodging, kiting, door-

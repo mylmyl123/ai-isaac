@@ -312,9 +312,13 @@ def test_skips_locked_doors():
         assert a[0] == 3, f"picked locked door: move={a[0]}"
 
 
-def test_no_door_seeking_when_not_clear():
-    """When room isn't clear, bot doesn't seek doors even with none-around."""
-    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, idle_move_prob=0.0))   # no random wander
+def test_door_seeking_when_no_enemies_regardless_of_clear():
+    """UPDATED 2026-07-03: door-seeking no longer requires is_clear=True.
+    If no enemies visible, bot heads to open door regardless of is_clear.
+    Handles edge cases (loading transitions, starting room) where is_clear
+    may be False even though the room is safe.
+    """
+    p = HeuristicPolicy(HeuristicConfig(enable_door_seeking=True, idle_move_prob=0.0))
     doors = [
         [0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0],
@@ -323,8 +327,8 @@ def test_no_door_seeking_when_not_clear():
     ]
     obs = _make_obs_with_doors(doors, is_clear=False)
     a = p.act(obs)
-    # No enemies, no threats, not clear, no idle wander -> should be idle.
-    assert a[0] == 0
+    # No enemies visible + RIGHT door open -> should pick RIGHT (move=3).
+    assert a[0] == 3
 
 
 def test_door_selection_spreads_over_multiple_open_doors():
