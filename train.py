@@ -478,6 +478,18 @@ def main() -> int:
         human_override.start()
         set_instance(human_override)
 
+    # Diagnostic recorder: if ISAAC_HEURISTIC_DEBUG=1, log every heuristic
+    # decision to a JSONL file for post-hoc analysis. Non-invasive; off by
+    # default. See python/isaac_rl/debug_recorder.py.
+    debug_recorder = None
+    if os.environ.get("ISAAC_HEURISTIC_DEBUG", "").strip():
+        from isaac_rl.debug_recorder import DebugRecorder
+        run_dir = getattr(cfg, "run_dir", None) or "runs"
+        debug_path = os.path.join(run_dir, "heuristic_debug.jsonl")
+        debug_recorder = DebugRecorder(save_path=debug_path, enabled=True)
+        DebugRecorder.set_instance(debug_recorder)
+        log.info("heuristic debug recorder ACTIVE -> %s", debug_path)
+
     try:
         train(cfg)
     except KeyboardInterrupt:
@@ -488,6 +500,8 @@ def main() -> int:
     finally:
         if human_override is not None:
             human_override.stop()
+        if debug_recorder is not None:
+            debug_recorder.close()
         cleanup()
 
     return 0

@@ -98,6 +98,12 @@ class HeuristicPolicy:
         # Debug logging toggle.
         import os
         self._debug = bool(os.environ.get("ISAAC_HEURISTIC_DEBUG", "").strip())
+        # Diagnostic recorder (singleton). Off by default; enabled via env var.
+        try:
+            from isaac_rl.debug_recorder import DebugRecorder
+            self._recorder = DebugRecorder.get_instance()
+        except ImportError:
+            self._recorder = None
 
     # ---- Main decision --------------------------------------------------
 
@@ -126,9 +132,11 @@ class HeuristicPolicy:
             if edist < self.cfg.retreat_dist:
                 # Flee: move directly away from enemy.
                 move = self._angle_to_move(math.atan2(-edy, -edx))
+                zone = "retreat"
             elif edist > self.cfg.approach_dist:
                 # Approach: move toward enemy.
                 move = self._angle_to_move(math.atan2(edy, edx))
+                zone = "approach"
             else:
                 # Hold position, keep shooting. Do not idle — small random
                 # nudge to avoid becoming pinned by touch damage. Perpendicular
@@ -136,27 +144,44 @@ class HeuristicPolicy:
                 # Rotate enemy direction by 90 degrees (either +90 or -90).
                 sign = 1.0 if self._rng.random() < 0.5 else -1.0
                 move = self._angle_to_move(math.atan2(sign * edx, -sign * edy))
+                zone = "hold"
 
             if self._debug:
-                log.info("[heuristic] combat: enemy dist=%.0f -> move=%d shoot=%d",
-                         edist, move, shoot)
-            return np.array([move, shoot], dtype=np.int64)
+                log.info("[heuristic] combat: enemy dist=%.0f zone=%s -> move=%d shoot=%d",
+                         edist, zone, move, shoot)
+            action = np.array([move, shoot], dtype=np.int64)
+            if self._recorder is not None:
+                self._recorder.log_tick(
+                    env_idx=0, raw_obs=raw_obs, action=action, branch=f"combat_{zone}",
+                    extra={"target_door": self._target_door_slot, "enemy_dist": round(edist, 1)},
+                )
+            return action
 
         # ---- No enemies: navigate to a door ----
         # Pick a target door if we don't have one for this room.
+        just_picked = False
         if self._target_door_slot is None:
             self._target_door_slot = self._pick_target_door(raw_obs)
+            just_picked = True
 
         if self._target_door_slot is not None:
             move = self._move_toward_door(raw_obs, self._target_door_slot)
+            branch = "door_seek" + ("_newpick" if just_picked else "")
         else:
             # No open doors visible. Wander randomly.
             move = int(self._rng.integers(1, 9))
+            branch = "wander_no_doors"
 
         if self._debug:
             log.info("[heuristic] no-enemies: door_slot=%s -> move=%d",
                      self._target_door_slot, move)
-        return np.array([move, shoot], dtype=np.int64)
+        action = np.array([move, shoot], dtype=np.int64)
+        if self._recorder is not None:
+            self._recorder.log_tick(
+                env_idx=0, raw_obs=raw_obs, action=action, branch=branch,
+                extra={"target_door": self._target_door_slot},
+            )
+        return action
 
     # ---- Door target selection (called once per room) --------------------
 
