@@ -234,22 +234,43 @@ class HeuristicPolicy:
         tl_y = float(bounds.get("tl_y", 0) or 0)
         br_x = float(bounds.get("br_x", 1) or 1)
         br_y = float(bounds.get("br_y", 1) or 1)
-        # Wall proximity threshold: 15% of room dimension.
-        wx = (br_x - tl_x) * 0.15
-        wy = (br_y - tl_y) * 0.15
+        # Wall proximity threshold: 5% of room dimension. Was 15% (too
+        # aggressive) which prevented door-crossing (doors are AT walls).
+        # 5% catches genuine wall-pressing without blocking door approach.
+        wx = (br_x - tl_x) * 0.05
+        wy = (br_y - tl_y) * 0.05
         near_left  = (px - tl_x) < wx
         near_up    = (py - tl_y) < wy
         near_right = (br_x - px) < wx
         near_down  = (br_y - py) < wy
-        # If near a wall, forbid any move that has a component pushing into it.
+
+        # KEY FIX: only forbid wall-directed moves if there is NO OPEN DOOR
+        # on that wall. Doors are holes in the wall — the bot MUST approach
+        # a wall to cross a door. Blocking wall-approach at door locations
+        # traps the bot in loops circling the room center.
+        doors = raw_obs.get("doors") or []
+        def door_open(slot: int) -> bool:
+            if slot >= len(doors):
+                return False
+            d = doors[slot]
+            if not d or len(d) < 2:
+                return False
+            return bool(d[0]) and bool(d[1])
+        # Door slot: 0=LEFT, 1=UP, 2=RIGHT, 3=DOWN
+        left_has_door  = door_open(0)
+        up_has_door    = door_open(1)
+        right_has_door = door_open(2)
+        down_has_door  = door_open(3)
+
+        # If near a wall AND no door there, forbid moves into that wall.
         # Up-moves: 1,2,8. Down-moves: 4,5,6. Left-moves: 6,7,8. Right-moves: 2,3,4.
-        if near_up:
+        if near_up and not up_has_door:
             forbidden.update({1, 2, 8})
-        if near_down:
+        if near_down and not down_has_door:
             forbidden.update({4, 5, 6})
-        if near_left:
+        if near_left and not left_has_door:
             forbidden.update({6, 7, 8})
-        if near_right:
+        if near_right and not right_has_door:
             forbidden.update({2, 3, 4})
         return forbidden
 
