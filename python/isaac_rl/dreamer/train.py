@@ -204,10 +204,11 @@ def train(cfg: DreamerConfig) -> None:
     world_model = IsaacWorldModel(cfg)
     behavior = IsaacImagBehavior(cfg, world_model)
     log.info(
-        "params: WM=%.2fM  actor=%.2fM  critic=%.2fM",
+        "params: WM=%.2fM  actor=%.2fM  critic=%.2fM  rssm_compiled=%s",
         sum(p.numel() for p in world_model.parameters()) / 1e6,
         sum(p.numel() for p in behavior.actor.parameters()) / 1e6,
         sum(p.numel() for p in behavior.critic.parameters()) / 1e6,
+        getattr(world_model, "_rssm_compiled", False),
     )
 
     # ---- replay --------------------------------------------------------

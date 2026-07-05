@@ -102,6 +102,31 @@ class IsaacWorldModel(nn.Module):
             device=str(device),
         )
 
+        # Optional: torch.compile the RSSM step methods. These are called
+        # seq_len times per WM update (32 -> 16 in the XS config), and each
+        # call has Python-dispatch overhead across nn.Sequential layers.
+        # torch.compile fuses the graph, cutting ~1.5-2x off wm_rssm_observe.
+        # Degrades gracefully to unfused fallback on older PyTorch.
+        compile_ok = getattr(cfg, "compile_rssm", True) and hasattr(torch, "compile") and device.type == "cuda"
+        if compile_ok:
+            try:
+                # mode='reduce-overhead' targets tight loops of small ops.
+                self.dynamics.obs_step = torch.compile(
+                    self.dynamics.obs_step, mode="reduce-overhead", fullgraph=False,
+                )
+                self.dynamics.img_step = torch.compile(
+                    self.dynamics.img_step, mode="reduce-overhead", fullgraph=False,
+                )
+                self._rssm_compiled = True
+            except Exception as e:  # pragma: no cover
+                import logging
+                logging.getLogger("dreamer").warning(
+                    "torch.compile on RSSM failed (%s); falling back to eager.", e,
+                )
+                self._rssm_compiled = False
+        else:
+            self._rssm_compiled = False
+
         feat_size = cfg.rssm_stoch * cfg.rssm_discrete + cfg.rssm_deter
 
         # ---- Decoder ---------------------------------------------------

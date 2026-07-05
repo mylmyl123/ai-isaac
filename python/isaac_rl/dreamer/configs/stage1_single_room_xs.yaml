@@ -66,8 +66,13 @@ world_model_lr: 1.0e-4
 world_model_eps: 1.0e-8
 world_model_grad_clip: 1000.0
 weight_decay: 0.0
-batch_size: 8                   # was 16 — halved (with seq_len 32 = 256 samples/update vs 1024)
-seq_len: 32                     # was 64 — halved (also cuts imagination memory)
+batch_size: 8                   # was 16 — halved (with seq_len 16 = 128 samples/update vs 1024)
+seq_len: 16                     # was 64 -> 32 -> 16. RSSM observe is 21% of wall-clock;
+                                # halving seq_len halves that cost. Trade-off: less temporal
+                                # credit assignment. For single-room stage1 (episodes ~200-500
+                                # ticks) 16 is still >>enough — the RSSM only needs to model
+                                # ~5-10s of game time to predict rewards. Stage 2+ may want
+                                # seq_len 32-64 again for longer-horizon planning.
 kl_free_bits: 1.0
 kl_dyn_scale: 0.5
 kl_rep_scale: 0.1

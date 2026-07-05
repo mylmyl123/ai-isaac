@@ -47,6 +47,12 @@ class DreamerConfig:
     # cuDNN autotuner: picks the fastest conv kernel per input shape at
     # startup. Costs ~30s of warmup, saves ~5% per step steady-state.
     cudnn_benchmark: bool = True
+    # torch.compile the RSSM's obs_step / img_step. These get called
+    # ``seq_len`` times per WM update (and 15x per behavior update for
+    # imagination), so cutting per-call Python-dispatch overhead compounds
+    # nicely. Requires PyTorch 2.0+ and CUDA. First call incurs ~10-30s
+    # compile time; subsequent calls run the fused graph.
+    compile_rssm: bool = True
 
     # ---- Encoder / decoder --------------------------------------------
     encoder_embed_dim: int = 1024
