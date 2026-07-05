@@ -6,9 +6,15 @@
 # targets 15-25 sps on the 3060 Ti — the "Dreamer-XS" tier from Danijar's
 # post-paper size sweep.
 #
-# Compute footprint: ~7M WM params (was ~30M). Halves memory and per-update
-# compute by ~4x. Expected sample-efficiency loss vs full DreamerV3: ~30%
-# (still ~5-10x more efficient than PPO on Isaac's compute budget).
+# 2026-07-05 REV: user wants max quality-per-step within a ~1-week budget.
+# Reverted seq_len 16 -> 32 (better temporal credit assignment). Kept the
+# XS model dims (RSSM 256, encoder 512, decoder 256). Kept pure-speedup
+# optimizations: AMP bf16, shared-trunk decoder, TF32, cuDNN benchmark,
+# torch.compile on RSSM. Expected steady-state: 3-5 sps.
+#
+# Compute footprint: ~5M WM params (was ~23M default). Halves memory and
+# per-update compute by ~4x. Expected sample-efficiency loss vs full
+# DreamerV3: ~20% (still ~5-10x more efficient than PPO on Isaac).
 #
 # When to use vs stage1_single_room.yaml:
 #   - You have <16 GB VRAM or a consumer GPU (3060-tier or older).
@@ -37,7 +43,8 @@ accept_timeout_s: 300.0
 device: cuda
 seed: 42
 checkpoint_dir: runs
-checkpoint_every: 250_000
+checkpoint_every: 100_000       # was 250k — more frequent so daily inspection
+                                # always has a fresh restore point.
 log_every: 50
 
 # ---- encoder / decoder (XS: halved from default) --------------------
@@ -66,13 +73,12 @@ world_model_lr: 1.0e-4
 world_model_eps: 1.0e-8
 world_model_grad_clip: 1000.0
 weight_decay: 0.0
-batch_size: 8                   # was 16 — halved (with seq_len 16 = 128 samples/update vs 1024)
-seq_len: 16                     # was 64 -> 32 -> 16. RSSM observe is 21% of wall-clock;
-                                # halving seq_len halves that cost. Trade-off: less temporal
-                                # credit assignment. For single-room stage1 (episodes ~200-500
-                                # ticks) 16 is still >>enough — the RSSM only needs to model
-                                # ~5-10s of game time to predict rewards. Stage 2+ may want
-                                # seq_len 32-64 again for longer-horizon planning.
+batch_size: 8                   # was 16 — halved (with seq_len 32 = 256 samples/update vs 1024)
+seq_len: 32                     # was 64 -> 32. 32 gives the RSSM enough temporal window
+                                # for stage1 credit assignment (episodes are ~200-500 ticks;
+                                # 32 timesteps at 15 Hz = ~2 sec of game time per training
+                                # window). Halving further (to 16) hurt quality-per-step
+                                # more than the ~1.4x throughput gain was worth.
 kl_free_bits: 1.0
 kl_dyn_scale: 0.5
 kl_rep_scale: 0.1

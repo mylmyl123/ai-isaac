@@ -343,6 +343,7 @@ Expect `24 passed` in a few seconds. All offline (no live Isaac needed). Also ru
 
 ```powershell
 .\scripts\run.ps1           # start training. Ctrl-C to stop cleanly.
+.\scripts\check_progress.ps1 # quick "is it working?" check on the current run
 .\scripts\push_data.ps1     # export TB summary + checkpoint, commit, push.
 .\scripts\clear_data.ps1    # nuke runs\ before a fresh experiment.
 ```
@@ -373,6 +374,13 @@ That's it. The wrappers pick sane defaults (stage 1, n_envs from the YAML, Tenso
 - **Unsure** — run `.\scripts\run.ps1 -Smoke -XS` first. If sps ≥ 20 and reward metrics fire, XS is fine. If you want to see if the full model runs faster (unlikely on consumer HW), try `.\scripts\run.ps1 -Smoke` without `-XS` after.
 
 **Ctrl-C behavior:** the trainer traps SIGINT. First Ctrl-C finishes the current rollout, saves a checkpoint tagged `interrupted`, flushes TB, and exits cleanly. Second Ctrl-C force-quits (progress since the last checkpoint is lost — don't hit it twice unless you have to).
+
+**`scripts\check_progress.ps1`** — quick "is my run making progress?" check without opening TensorBoard. Reads the latest run's TB events, prints PASS/FAIL against key thresholds (sps ≥3, actor_entropy ≥1.5, WM loss trending down, ep_reward improving), gives a KEEP GOING / STOP / TOO EARLY verdict at the bottom. Safe to run repeatedly, doesn't modify anything. Recommended: run once a day mid-training to decide whether to keep burning compute.
+
+```powershell
+.\scripts\check_progress.ps1                   # check most recent run
+.\scripts\check_progress.ps1 -RunDir "runs\dreamer_stage1_single_room_xs\<ts>"  # specific run
+```
 
 **`scripts\push_data.ps1`** — after Ctrl-C, run this to ship the run's artifacts back to the repo. Auto-picks the most recent run under `runs\`:
 
