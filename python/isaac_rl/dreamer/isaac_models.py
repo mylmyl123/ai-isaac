@@ -106,11 +106,18 @@ class IsaacWorldModel(nn.Module):
         # seq_len times per WM update (32 -> 16 in the XS config), and each
         # call has Python-dispatch overhead across nn.Sequential layers.
         # torch.compile fuses the graph, cutting ~1.5-2x off wm_rssm_observe.
-        # Degrades gracefully to unfused fallback on older PyTorch.
-        compile_ok = getattr(cfg, "compile_rssm", True) and hasattr(torch, "compile") and device.type == "cuda"
+        #
+        # Requires Triton, which is broken/missing on Windows in many PyTorch
+        # builds. If the compile succeeds at registration time but throws at
+        # FIRST CALL time (Triton missing), we catch that at the outer
+        # train_step boundary and revert to eager for the rest of the run.
+        # Config default is False (off) — enable only if Triton is verified.
+        compile_ok = getattr(cfg, "compile_rssm", False) and hasattr(torch, "compile") and device.type == "cuda"
+        self._rssm_compiled = False
+        self._eager_obs_step = self.dynamics.obs_step
+        self._eager_img_step = self.dynamics.img_step
         if compile_ok:
             try:
-                # mode='reduce-overhead' targets tight loops of small ops.
                 self.dynamics.obs_step = torch.compile(
                     self.dynamics.obs_step, mode="reduce-overhead", fullgraph=False,
                 )
@@ -121,11 +128,8 @@ class IsaacWorldModel(nn.Module):
             except Exception as e:  # pragma: no cover
                 import logging
                 logging.getLogger("dreamer").warning(
-                    "torch.compile on RSSM failed (%s); falling back to eager.", e,
+                    "torch.compile on RSSM failed at init (%s); falling back to eager.", e,
                 )
-                self._rssm_compiled = False
-        else:
-            self._rssm_compiled = False
 
         feat_size = cfg.rssm_stoch * cfg.rssm_discrete + cfg.rssm_deter
 
@@ -190,6 +194,22 @@ class IsaacWorldModel(nn.Module):
 
         self.to(device)
 
+    def _revert_to_eager(self, reason: str) -> None:
+        """Restore unmodified obs_step / img_step so subsequent calls run in
+        eager mode. Called when torch.compile throws at runtime (Triton
+        missing on Windows, unsupported graph break, etc.).
+        """
+        if not self._rssm_compiled:
+            return
+        import logging
+        logging.getLogger("dreamer").warning(
+            "torch.compile RSSM failed at runtime (%s); reverting to eager. "
+            "Set compile_rssm=false in the YAML to silence.", reason,
+        )
+        self.dynamics.obs_step = self._eager_obs_step
+        self.dynamics.img_step = self._eager_img_step
+        self._rssm_compiled = False
+
     # ------------------------------------------------------------------
     # env-side rollout helpers
     # ------------------------------------------------------------------
@@ -223,6 +243,22 @@ class IsaacWorldModel(nn.Module):
         Returns (post, context, metrics). ``post`` is the RSSM posterior state
         (batched, with grad detached) — used by ImagBehavior as start states
         for imagination rollouts. ``context`` carries embed/feat/kl for logging.
+
+        If torch.compile on the RSSM throws at runtime (Triton missing, graph
+        break, etc.), we catch the error, revert to eager mode, and retry
+        once. Subsequent calls run in eager for the rest of the run.
+        """
+        try:
+            return self._train_step_inner(batch)
+        except Exception as e:
+            msg = str(e).lower()
+            if self._rssm_compiled and any(k in msg for k in ("triton", "torchdynamo", "compile", "torch._dynamo")):
+                self._revert_to_eager(str(e))
+                return self._train_step_inner(batch)
+            raise
+
+    def _train_step_inner(self, batch: dict[str, np.ndarray]) -> tuple[dict, dict, dict[str, float]]:
+        """Inner WM training step (see ``train_step`` for the retry wrapper).
 
         Populates ``self.last_step_times`` with per-section wall-clock in ms
         (CUDA-synced), so the trainer can propagate them to TB. Sections:
@@ -565,6 +601,25 @@ class IsaacImagBehavior(nn.Module):
         self._slow_updates += 1
 
     def train_step(self, start_state: dict[str, torch.Tensor]) -> dict[str, float]:
+        """One imagination-based actor+critic gradient update.
+
+        Uses the world model's RSSM to imagine forward for ``imag_horizon``
+        steps from each start state. If torch.compile on the RSSM throws at
+        runtime, catch it, revert to eager, and retry once.
+        """
+        try:
+            return self._train_step_inner(start_state)
+        except Exception as e:
+            msg = str(e).lower()
+            wm = self.world_model
+            if getattr(wm, "_rssm_compiled", False) and any(
+                k in msg for k in ("triton", "torchdynamo", "compile", "torch._dynamo")
+            ):
+                wm._revert_to_eager(str(e))
+                return self._train_step_inner(start_state)
+            raise
+
+    def _train_step_inner(self, start_state: dict[str, torch.Tensor]) -> dict[str, float]:
         cfg = self.cfg
         self._update_slow()
 

@@ -50,9 +50,12 @@ class DreamerConfig:
     # torch.compile the RSSM's obs_step / img_step. These get called
     # ``seq_len`` times per WM update (and 15x per behavior update for
     # imagination), so cutting per-call Python-dispatch overhead compounds
-    # nicely. Requires PyTorch 2.0+ and CUDA. First call incurs ~10-30s
-    # compile time; subsequent calls run the fused graph.
-    compile_rssm: bool = True
+    # nicely. Requires PyTorch 2.0+, CUDA, AND a working Triton install
+    # (Triton on Windows is flaky — leave this off unless you know it works).
+    # First call incurs ~10-30s compile time; subsequent calls run the fused
+    # graph. If Triton is missing, the RSSM falls back to eager mode with
+    # a WARN log — training still works, just slower.
+    compile_rssm: bool = False
 
     # ---- Encoder / decoder --------------------------------------------
     encoder_embed_dim: int = 1024

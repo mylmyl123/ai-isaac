@@ -47,6 +47,11 @@ checkpoint_every: 100_000       # was 250k — more frequent so daily inspection
                                 # always has a fresh restore point.
 log_every: 50
 
+# torch.compile the RSSM. Needs Triton; broken on Windows in many
+# PyTorch builds. Leave off unless you've confirmed Triton works on your
+# box (import triton; triton.__version__ raises no error).
+compile_rssm: false
+
 # ---- encoder / decoder (XS: halved from default) --------------------
 encoder_embed_dim: 512          # was 1024
 encoder_trunk_dim: 384          # was 768
