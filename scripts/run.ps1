@@ -5,22 +5,26 @@
 #
 # Usage:
 #   .\scripts\run.ps1                          # stage 1, default settings
+#   .\scripts\run.ps1 -XS                      # stage 1 XS variant — 2.5x smaller model,
+#                                              #   ~16x less compute per env-step. USE THIS
+#                                              #   on 3060 Ti / 8 GB VRAM / consumer GPUs.
 #   .\scripts\run.ps1 -Stage 2                 # stage 2
 #   .\scripts\run.ps1 -Stage 4                 # stage 4
 #   .\scripts\run.ps1 -Smoke                   # M1 smoke: 100k steps, n_envs=2
+#   .\scripts\run.ps1 -Smoke -XS               # smoke with the XS variant (RECOMMENDED first)
 #   .\scripts\run.ps1 -NEnvs 4                 # override n_envs
 #   .\scripts\run.ps1 -TrainRatio 4            # WM grad-steps per env-step
-#                                              #   (default 16; drop to 4/8 if throughput
-#                                              #    is GPU-bound; bump to 32 if GPU idle)
+#                                              #   (default 16 for full, 4 for XS)
 #   .\scripts\run.ps1 -Isaac "C:\path\isaac-ng.exe"    # override binary path
 #
 # Isaac binary auto-detected from standard Steam install locations.
 
 param(
     [string]$Stage = "1",
+    [switch]$XS,
     [switch]$Smoke,
     [int]$NEnvs = 0,             # 0 = use YAML default
-    [int]$TrainRatio = 0,        # 0 = use YAML default (16)
+    [int]$TrainRatio = 0,        # 0 = use YAML default
     [string]$Isaac = "",         # empty = auto-detect from Steam
     [switch]$NoTensorboard
 )
@@ -43,6 +47,15 @@ $stageConfigs = @{
     "1" = "python\isaac_rl\dreamer\configs\stage1_single_room.yaml"
     "2" = "python\isaac_rl\dreamer\configs\stage2_floor_clear.yaml"
     "4" = "python\isaac_rl\dreamer\configs\stage4_full_run.yaml"
+}
+if ($XS) {
+    # Only stage 1 has an XS variant for now (stages 2/4 are compute-bound
+    # differently — long-horizon reasoning benefits from the bigger model).
+    if ($Stage -ne "1") {
+        Write-Warning "-XS is only implemented for Stage 1. Ignoring flag."
+    } else {
+        $stageConfigs["1"] = "python\isaac_rl\dreamer\configs\stage1_single_room_xs.yaml"
+    }
 }
 if (-not $stageConfigs.ContainsKey($Stage)) {
     Write-Error "Unknown stage '$Stage'. Valid: 1, 2, 4."
@@ -74,9 +87,10 @@ if ($overrides.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "==== Isaac RL — Dreamer stage $Stage ====" -ForegroundColor Cyan
+Write-Host "==== Isaac RL — Dreamer stage $Stage$(if ($XS) { ' (XS variant)' }) ====" -ForegroundColor Cyan
 Write-Host "config:    $configPath"
 if ($Smoke)     { Write-Host "mode:      SMOKE (100k steps)" -ForegroundColor Yellow }
+if ($XS)        { Write-Host "model:     XS (9.5M params — targets consumer GPUs)" -ForegroundColor Green }
 if ($Isaac)     { Write-Host "isaac:     $Isaac" }
 if ($overrides) { Write-Host "overrides: $($overrides -join ' ')" }
 Write-Host "cmd:       python $($cmd -join ' ')"

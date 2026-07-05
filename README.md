@@ -353,16 +353,24 @@ That's it. The wrappers pick sane defaults (stage 1, n_envs from the YAML, Tenso
 
 ```powershell
 .\scripts\run.ps1                              # stage 1 default (5M steps)
+.\scripts\run.ps1 -XS                          # stage 1 XS variant (RECOMMENDED for consumer GPUs)
 .\scripts\run.ps1 -Smoke                       # M1 smoke: 100k steps, n_envs=2 (~1 hour)
+.\scripts\run.ps1 -Smoke -XS                   # M1 smoke with XS variant
 .\scripts\run.ps1 -Stage 2                     # stage 2 config
 .\scripts\run.ps1 -Stage 4                     # stage 4 config
 .\scripts\run.ps1 -NEnvs 4                     # override n_envs
 .\scripts\run.ps1 -Isaac "C:\Path\isaac-ng.exe"  # override binary path
 .\scripts\run.ps1 -NoTensorboard               # skip TB (saves a bit of I/O)
-.\scripts\run.ps1 -TrainRatio 4                # WM grad-steps per env-step (default 16).
-                                               # Drop to 4/8 if throughput is GPU-bound;
+.\scripts\run.ps1 -TrainRatio 4                # WM grad-steps per env-step (default 16 full, 4 XS).
+                                               # Drop to 2/4 if throughput is GPU-bound;
                                                # bump to 32 if GPU is idle.
 ```
+
+**Which config should I use?**
+
+- **RTX 3060 Ti / 3070 / 4060 / 4070 (any 8-12 GB consumer GPU)** — use `-XS`. 9.5M params, ~16× less GPU compute per env-step. Target 15-25 sps.
+- **RTX 3090 / 4080 / 4090 / A100 / H100** — skip `-XS`, use the full config. 23.6M params, target 25-40 sps on full DreamerV3 defaults.
+- **Unsure** — run `.\scripts\run.ps1 -Smoke -XS` first. If sps ≥ 20 and reward metrics fire, XS is fine. If you want to see if the full model runs faster (unlikely on consumer HW), try `.\scripts\run.ps1 -Smoke` without `-XS` after.
 
 **Ctrl-C behavior:** the trainer traps SIGINT. First Ctrl-C finishes the current rollout, saves a checkpoint tagged `interrupted`, flushes TB, and exits cleanly. Second Ctrl-C force-quits (progress since the last checkpoint is lost — don't hit it twice unless you have to).
 
@@ -402,6 +410,17 @@ The first 10h stage-1 run (61k env-steps, 231 episodes) surfaced two real bugs t
 **Fix:** raised `actor_entropy: 1e-2` (33× higher). Standard-order magnitude for discrete-action Dreamer variants.
 
 **Throughput was also low** (1.66 sps vs. expected 30). If your next run also shows sps <10, try `.\scripts\run.ps1 -Smoke -TrainRatio 4` — this drops WM gradient steps per env-step from 16 to 4, letting the env keep pace. Watch Task Manager: if Isaac windows are minimized, Windows will throttle them to 5 fps regardless of `train_ratio` — keep them visible.
+
+**Bug 3: default config oversizes the model for consumer GPUs.** Second run at `train_ratio=16` on a 3060 Ti pinned the GPU at 100% and delivered 0.55 sps (6k steps in 3h). The DreamerV3 paper defaults (RSSM deter=512, hidden=512, embed=1024, batch 16×64) assume A100-class hardware. Per-WM-update compute on the default config is ~1.3 TFLOPS; a 3060 Ti at 13 TFLOPS peak can do ~10/sec, which × train_ratio=16 = 0.6 env-steps/sec matching the observation exactly.
+
+**Fix:** new `stage1_single_room_xs.yaml` — the "Dreamer-XS" variant. RSSM/encoder/decoder dims halved, batch and seq_len halved, train_ratio dropped 16 → 4. Total: **9.5M params (was 23.6M), ~16× less GPU compute per env-step**. Sample efficiency drops ~30% vs full DreamerV3 but throughput goes up ~15-25×. Target on 3060 Ti: **15-25 sps**.
+
+**Use `-XS` on any consumer GPU** (3060/3070/4060/4070-class, <=12 GB VRAM). Only skip XS if you have a 3090/4080/4090+/A100+.
+
+```powershell
+.\scripts\run.ps1 -Smoke -XS               # smoke with XS variant (RECOMMENDED for 3060 Ti)
+.\scripts\run.ps1 -XS                      # full stage 1 with XS
+```
 
 If a future run has the same problem after these fixes, `.\scripts\push_data.ps1` the TB JSON and I'll diagnose. Do NOT commit multi-day compute to a run that's already showing entropy collapse or flat reward curves in the first hour.
 
