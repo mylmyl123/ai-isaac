@@ -9,6 +9,9 @@
 #   .\scripts\run.ps1 -Stage 4                 # stage 4
 #   .\scripts\run.ps1 -Smoke                   # M1 smoke: 100k steps, n_envs=2
 #   .\scripts\run.ps1 -NEnvs 4                 # override n_envs
+#   .\scripts\run.ps1 -TrainRatio 4            # WM grad-steps per env-step
+#                                              #   (default 16; drop to 4/8 if throughput
+#                                              #    is GPU-bound; bump to 32 if GPU idle)
 #   .\scripts\run.ps1 -Isaac "C:\path\isaac-ng.exe"    # override binary path
 #
 # Isaac binary auto-detected from standard Steam install locations.
@@ -17,6 +20,7 @@ param(
     [string]$Stage = "1",
     [switch]$Smoke,
     [int]$NEnvs = 0,             # 0 = use YAML default
+    [int]$TrainRatio = 0,        # 0 = use YAML default (16)
     [string]$Isaac = "",         # empty = auto-detect from Steam
     [switch]$NoTensorboard
 )
@@ -63,6 +67,7 @@ if ($Smoke) {
     if ($NEnvs -eq 0) { $overrides += "n_envs=2" }
 }
 if ($NEnvs -gt 0) { $overrides += "n_envs=$NEnvs" }
+if ($TrainRatio -gt 0) { $overrides += "train_ratio=$TrainRatio" }
 if ($overrides.Count -gt 0) {
     $cmd += "--override"
     $cmd += $overrides

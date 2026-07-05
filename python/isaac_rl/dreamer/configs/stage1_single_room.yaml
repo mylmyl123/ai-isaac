@@ -1,5 +1,13 @@
 # DreamerV3 — Stage 1: single-room combat on Basement 1.
 #
+# 2026-07-05 REVISION after 10h stage1 run analysis:
+#   - actor_entropy raised 3e-4 -> 1e-2 (v1 entropy collapsed to 0.58 by 40k steps).
+#   - reward shaping rewritten to remove anti-exploration penalties that
+#     dominated the return for a random-init Dreamer (see reward block below
+#     for full rationale). v1 shaping was inherited from PPO, where it worked
+#     against a BC-warm-started policy; against a random-init policy it
+#     rewarded corner-camping-until-idle-death as the local optimum.
+#
 # Compute footprint: ~30M params (world model), fits in 8-16 GB VRAM.
 # At n_envs=2, ~30 env-steps/sec: single-room convergence expected in ~1-2M
 # env-steps (~10-18 hours wall-clock). Compare to PPO which was stalled at
@@ -69,7 +77,7 @@ critic_hidden: 512
 critic_layers: 2
 actor_grad_clip: 100.0
 critic_grad_clip: 100.0
-actor_entropy: 3.0e-4
+actor_entropy: 1.0e-2
 imag_horizon: 15
 gamma: 0.997
 gae_lambda: 0.95
@@ -93,33 +101,74 @@ prefill_steps: 2500
 train_ratio: 16
 replay_capacity: 500_000       # 500K * ~7KB per obs ~= 3.5 GB RAM. Bump to 1M if you have 8GB+.
 
-# ---- reward (same shaping as PPO stage1) ----
+# ---- reward (2026-07-05: rewritten after 10h stage1 run analysis) --------
+# The v1 shaping (copied from PPO) punished exploration enough that the
+# random-init Dreamer policy collapsed to "camp in a corner and die to
+# idle-death" as the optimal strategy. In 61k env-steps / 231 episodes,
+# ZERO room_clear / kill / damage_dealt rewards ever fired. The reward
+# head had nothing to model, and the actor learned the local optimum of
+# minimizing per-tick penalties.
+#
+# v2 removes ALL anti-exploration per-tick penalties (idle_penalty,
+# stationary_penalty, step_penalty, full_hp_tick — that last was rewarding
+# camping). Keeps only the "die if you idle forever" cliff, at reduced
+# magnitude. Boosts engagement rewards 2-4x so the random policy stumbles
+# into positive signal within its first few thousand steps.
+#
+# This is INTENTIONALLY the "generous" reward shaping — we want the WM to
+# see reward signal early. Once the actor is engaging enemies, we can
+# tighten the shaping in stage 2+.
 reward:
-  r_step: -0.003
-  r_room_clear: 2.0
-  r_new_room: 3.0
-  r_backtrack: -0.5
-  r_door_distance_shaping: 0.3
+  # No per-tick cost — a random policy shouldn't be punished for existing.
+  # Once the agent is competent, stage2+ can add r_step back for efficiency.
+  r_step: 0.0
+
+  # Room / floor progression — big carrots.
+  r_room_clear: 5.0                # was 2.0
+  r_new_room: 5.0                  # was 3.0
+  r_backtrack: -0.3                # was -0.5 (softer — early bot will backtrack)
   r_room_clear_speed_bonus: 1.0
   r_room_clear_no_damage: 1.5
+  r_door_distance_shaping: 0.3     # PBRS toward doors when room is clear
   r_seek_door_when_clear: 0.0
-  r_aim_at_enemy: 0.015
+
+  # Engagement — big signal for actually fighting enemies.
+  r_aim_at_enemy: 0.03             # was 0.015 (was reduced for BC; not applicable here)
   r_shoot_when_enemy_visible: 0.0
-  r_damage_dealt_scale: 0.2
-  max_damage_reward_per_room: 6.0
-  r_at_kite_dist_tick: 0.001
+  r_kill: 2.0                      # was 0.5 default (RewardConfig) — quadruple
+  r_damage_dealt_scale: 0.5        # was 0.2 — 2.5x
+  max_damage_reward_per_room: 20.0 # was 6.0 — essentially uncap so damage always pays
+
+  # Damage taken — mild disincentive but NOT the dominant signal (was overkill).
+  # (These are not in v1 either; RewardConfig defaults are -1.0 / -0.5.)
+
+  # Kiting / positioning — DISABLED. Dreamer will learn positioning from
+  # engagement reward; hand-shaped positioning bonuses just added noise.
+  r_at_kite_dist_tick: 0.0         # was 0.001
   kite_dist_min: 100.0
   kite_dist_max: 300.0
-  r_full_hp_tick: 0.001
-  r_idle_penalty: -0.1
+
+  # Camping-attractor removals: full_hp_tick was rewarding a bot that
+  # never engages. Delete.
+  r_full_hp_tick: 0.0              # was 0.001
+
+  # Anti-idle: keep the CLIFF (episode ends if bot idles 300 ticks with no
+  # enemies visible) but drop the per-tick penalty. The cliff is a discrete
+  # cost that trains the continue-head; per-tick was dominating the return.
+  r_idle_penalty: 0.0              # was -0.1
   idle_speed_threshold: 0.5
-  r_idle_death: -20.0
+  r_idle_death: -5.0               # was -20.0 (4x reduction so it doesn't dominate returns)
   idle_death_ticks: 300
   idle_death_require_no_enemies: true
-  r_stationary_penalty: -0.08
+
+  # Anti-stationary: same as idle_penalty — was killing exploration.
+  r_stationary_penalty: 0.0        # was -0.08
   stationary_radius: 40.0
   stationary_window: 45
-  r_pbrs_scale: 0.1
-  pbrs_gamma: 0.997     # match Dreamer's gamma exactly (PBRS invariance)
+
+  # PBRS toward nearest enemy engagement distance. Provably policy-invariant,
+  # gives dense guidance during exploration.
+  r_pbrs_scale: 0.3                # was 0.1 — 3x
+  pbrs_gamma: 0.997                # matches Dreamer's gamma exactly (PBRS invariance)
   pbrs_ideal_dist: 200.0
   pbrs_decay: 200.0

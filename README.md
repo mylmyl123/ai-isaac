@@ -359,6 +359,9 @@ That's it. The wrappers pick sane defaults (stage 1, n_envs from the YAML, Tenso
 .\scripts\run.ps1 -NEnvs 4                     # override n_envs
 .\scripts\run.ps1 -Isaac "C:\Path\isaac-ng.exe"  # override binary path
 .\scripts\run.ps1 -NoTensorboard               # skip TB (saves a bit of I/O)
+.\scripts\run.ps1 -TrainRatio 4                # WM grad-steps per env-step (default 16).
+                                               # Drop to 4/8 if throughput is GPU-bound;
+                                               # bump to 32 if GPU is idle.
 ```
 
 **Ctrl-C behavior:** the trainer traps SIGINT. First Ctrl-C finishes the current rollout, saves a checkpoint tagged `interrupted`, flushes TB, and exits cleanly. Second Ctrl-C force-quits (progress since the last checkpoint is lost — don't hit it twice unless you have to).
@@ -386,18 +389,41 @@ What gets committed:
 .\scripts\clear_data.ps1 -All -Yes             # runs\ + ckpts\ + tb_*.json, no prompt
 ```
 
+### First-run diagnosis (2026-07-05)
+
+The first 10h stage-1 run (61k env-steps, 231 episodes) surfaced two real bugs that are fixed in the current `stage1_single_room.yaml`:
+
+**Bug 1: reward shaping punished exploration.** The v1 shaping was inherited from PPO where it worked against a BC-warm-started policy. Against a random-init Dreamer, it made "camp in a corner and die to idle-death" the local optimum — so **zero** kill/room-clear/damage rewards ever fired. The reward head had nothing to model.
+
+**Fix:** removed all per-tick anti-exploration penalties (`r_idle_penalty`, `r_stationary_penalty`, `r_step`, `r_full_hp_tick`). Kept the idle-death cliff at reduced magnitude (`r_idle_death: -5.0`, was -20.0). Boosted engagement rewards 2–4× (`r_kill: 2.0`, `r_new_room: 5.0`, `r_damage_dealt_scale: 0.5`).
+
+**Bug 2: actor entropy collapsed fast.** `actor_entropy: 3e-4` (Dreamer paper default for continuous control) wasn't enough to keep exploration alive against the punishing reward. Entropy went from 3.81 → 0.58 in 40k steps → deterministic "moves back and forth" policy.
+
+**Fix:** raised `actor_entropy: 1e-2` (33× higher). Standard-order magnitude for discrete-action Dreamer variants.
+
+**Throughput was also low** (1.66 sps vs. expected 30). If your next run also shows sps <10, try `.\scripts\run.ps1 -Smoke -TrainRatio 4` — this drops WM gradient steps per env-step from 16 to 4, letting the env keep pace. Watch Task Manager: if Isaac windows are minimized, Windows will throttle them to 5 fps regardless of `train_ratio` — keep them visible.
+
+If a future run has the same problem after these fixes, `.\scripts\push_data.ps1` the TB JSON and I'll diagnose. Do NOT commit multi-day compute to a run that's already showing entropy collapse or flat reward curves in the first hour.
+
 ### 3. What to expect on TensorBoard (M1 smoke success criteria)
 
 Run `.\scripts\run.ps1 -Smoke`, wait ~1 hour, open http://localhost:6006:
 
-- `loss/total` (world model) trending down over 100k steps
-- `loss/kl`, `loss/kl_dyn`, `loss/kl_rep` finite and roughly stable (0.1 – 10 range)
-- `loss/actor` finite (starts near 0, mildly negative)
-- `loss/critic` finite, gently trending
-- `rollout/ep_reward` above the random-policy baseline
-- No NaN anywhere; run completes without crash
+**Must pass (else abort and share the TB JSON):**
 
-If any of these blow up (NaN, exploding KL), `.\scripts\push_data.ps1` and share the JSON — that's a real bug and I need the numbers to diagnose. Do NOT proceed to full stage 1 training.
+- `loss/total` (world model) trends down from ~90 → ~1.5 within the first ~10k env-steps, then flat. If it's still >5 by 30k steps, WM is broken.
+- `loss/kl`, `loss/kl_dyn`, `loss/kl_rep` finite and roughly stable in the 0.5–5 range. Should never exceed 20.
+- `loss/actor_entropy` **stays above 1.5** through the whole smoke run. If it drops below 1.0 in the first 30k steps, actor collapsed — raise `actor_entropy` further and try again.
+- `rollout/n_episodes` growing steadily (>= ~200 by end of smoke).
+- `perf/sps` at least 15 (ideally 25+ at n_envs=2). If <10 for the last half of the run, throughput is broken — try `-TrainRatio 4` or check Isaac window state.
+
+**Must NOT happen:**
+
+- Reward-breakdown metrics all zero (`reward/kill`, `reward/room_clear` never appearing in the TB scalar list). This means the agent isn't triggering ANY reward events — same failure mode as the v1 run. If this happens after the 2026-07-05 fixes, the reward shaping needs more work.
+- `rollout/ep_reward` monotonically decreasing across the whole run. Some initial dip is fine; sustained decline means the policy is learning the wrong thing.
+- Any NaN in any loss. That's a real bug, not a training issue.
+
+If any "must pass" fails, `.\scripts\push_data.ps1` and share the JSON — I'll diagnose before you burn more compute. Do NOT proceed to full stage 1 training on a broken smoke.
 
 ### 4. Full stage 1 → stage 2 → stage 4 chain
 
