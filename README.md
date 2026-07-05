@@ -305,6 +305,150 @@ Note: PowerShell continues lines with a backtick (`` ` ``), not backslash. Print
 
 ---
 
+## Training with DreamerV3 (recommended)
+
+The repo also ships a full **DreamerV3** trainer alongside PPO. Dreamer is a world-model / imagination-based algorithm that's ~10–20× more sample-efficient than PPO on sparse-reward procedural games (DreamerV3 solved Minecraft-diamond from scratch, no demos, no curriculum — Hafner et al., *Nature* 2025). On this project's compute budget (1 GPU, ~30 env-steps/sec), Dreamer is the algorithm that makes "beat Mom in weeks" realistic; PPO was projected to take months.
+
+The PPO stack is preserved for ablation baselines — pick between them with `--algo {ppo,dreamer}` on `train.py` and `eval.py`.
+
+### What lives where
+
+```
+python/isaac_rl/dreamer/
+├── vendor/           NM512/dreamerv3-torch @ 6ef8646 (MIT — RSSM, twohot, KL utils)
+├── encoder.py        IsaacObsEncoder (entity-attn architecture from PPO's model.py)
+├── decoder.py        IsaacObsDecoder (per-stream reconstruction heads)
+├── action.py         MultiDiscreteActionHead (factored [9, 5] one-hot concat)
+├── replay.py         SequenceReplay (episode-aware, terminal-obs correct)
+├── isaac_models.py   IsaacWorldModel + IsaacImagBehavior
+├── train.py          main training loop
+├── config.py         DreamerConfig dataclass (paper hyperparameters)
+└── configs/
+    ├── stage1_single_room.yaml
+    ├── stage2_floor_clear.yaml
+    └── stage4_full_run.yaml
+```
+
+No new dependencies beyond what PPO already needs — same `requirements.txt`.
+
+### 1. Verify the port compiles
+
+```powershell
+$env:PYTHONPATH = "python"; pytest tests/dreamer/
+```
+
+Expect `24 passed` in a few seconds. All offline (no live Isaac needed). Also run `pytest tests/` to confirm the 94 PPO tests still pass — the port doesn't touch the PPO code.
+
+### 2. M1 — smoke test on live Isaac (~1 hour wall-clock)
+
+Before committing to a multi-day run, prove Dreamer trains end-to-end on your box and TensorBoard curves look sane. This runs 100k env-steps at n_envs=2:
+
+```powershell
+python train.py --algo dreamer `
+                --config python\isaac_rl\dreamer\configs\stage1_single_room.yaml `
+                --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe" `
+                --tensorboard `
+                --override total_env_steps=100000 n_envs=2
+```
+
+**Success on TensorBoard (http://localhost:6006):**
+
+- `loss/total` (world model) trending down over 100k steps
+- `loss/kl`, `loss/kl_dyn`, `loss/kl_rep` finite and roughly stable (0.1 – 10 range)
+- `loss/actor` finite (starts near 0, mildly negative)
+- `loss/critic` finite, gently trending
+- `rollout/ep_reward` above random baseline
+- No NaN anywhere, run completes without crash
+
+If any of these blow up (NaN, exploding KL), that's a real bug — capture the TB export and file it. Do NOT proceed to M2.
+
+### 3. M2 — Stage 1 convergence (1–2 weeks wall-clock)
+
+```powershell
+python train.py --algo dreamer `
+                --config python\isaac_rl\dreamer\configs\stage1_single_room.yaml `
+                --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe" `
+                --tensorboard
+```
+
+(No `--override` needed — the YAML defaults are `total_env_steps=5_000_000`, `n_envs=2`. Bump `--n-envs 4` if your CPU can handle it.)
+
+**Success target:** `reward/room_clear` firing on ≥90% of episodes. Verify with the eval command below. If the loss curves look healthy but the agent isn't solving rooms by 2M steps, capture the TB and we'll diagnose.
+
+### 4. M3 / M4 — floor clear + beat Mom
+
+```powershell
+# Stage 2 — floor clear (20M steps, ~2-3 weeks)
+python train.py --algo dreamer `
+                --config python\isaac_rl\dreamer\configs\stage2_floor_clear.yaml `
+                --isaac "..." --tensorboard `
+                --override resume_from=runs\dreamer_stage1_single_room\<latest>\latest.pt
+
+# Stage 4 — full run through Depths 2 + Mom (100M steps, ~4-8 weeks)
+python train.py --algo dreamer `
+                --config python\isaac_rl\dreamer\configs\stage4_full_run.yaml `
+                --isaac "..." --tensorboard `
+                --override resume_from=runs\dreamer_stage2_floor_clear\<latest>\latest.pt
+```
+
+### 5. Evaluating a Dreamer checkpoint
+
+Same eval harness as PPO, just add `--algo dreamer`:
+
+```powershell
+python -m isaac_rl.eval `
+    --algo dreamer `
+    --checkpoint runs\dreamer_stage1_single_room\<timestamp>\latest.pt `
+    --config python\isaac_rl\dreamer\configs\stage1_single_room.yaml `
+    --episodes 32
+```
+
+Prints `n_episodes`, `mean_reward`, `median_reward`, `mom_kills`, `mom_kill_rate`, `mean_max_stage` — same output format as PPO eval, so you can compare directly.
+
+### Ablation: Dreamer vs PPO on the same task
+
+The PPO stack is untouched. Running the same experiment with `--algo ppo` on `python\isaac_rl\configs\stage1_single_room.yaml` gives you the ablation baseline. Both write to `runs/`; TensorBoard reads them all at once:
+
+```powershell
+tensorboard --logdir runs
+```
+
+The `rollout/ep_reward_best` and `reward/room_clear` curves side-by-side are the main ablation figure for a writeup.
+
+<details><summary>bash equivalent</summary>
+
+```bash
+# M1 smoke
+python train.py --algo dreamer \
+                --config python/isaac_rl/dreamer/configs/stage1_single_room.yaml \
+                --isaac "/path/to/isaac-ng" --tensorboard \
+                --override total_env_steps=100000 n_envs=2
+
+# M2 full stage 1
+python train.py --algo dreamer \
+                --config python/isaac_rl/dreamer/configs/stage1_single_room.yaml \
+                --isaac "/path/to/isaac-ng" --tensorboard
+
+# Eval
+python -m isaac_rl.eval --algo dreamer \
+    --checkpoint runs/dreamer_stage1_single_room/<timestamp>/latest.pt \
+    --config python/isaac_rl/dreamer/configs/stage1_single_room.yaml \
+    --episodes 32
+```
+</details>
+
+### Hyperparameter notes
+
+The YAML configs match DreamerV3 paper defaults (Hafner et al., *Nature* 2025) as reproduced in NM512/dreamerv3-torch. **Don't tune the world-model hyperparameters first** — they're validated across 150+ tasks in the paper. If M1 looks bad, check reward shaping (`reward:` block in the YAML) and `n_envs` before touching RSSM knobs.
+
+Key knobs if you need to fit tighter memory:
+
+- `replay_capacity` — 1M steps ≈ 7 GB RAM. Drop to 500K if RAM is tight.
+- `batch_size` × `seq_len` = 16 × 64 by default. Fits ~6 GB VRAM at Isaac's obs size. Halve if you OOM.
+- `train_ratio` — WM gradient steps per env-step. Default 16. Drop to 8 if GPU is the bottleneck; bump to 32 if GPU is idle.
+
+---
+
 ## Wall-clock expectations
 
 At 15 Hz control, each Isaac instance produces ~15 env-steps/second. The default config uses 2 instances (~30 sps).
