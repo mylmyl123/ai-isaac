@@ -339,57 +339,86 @@ $env:PYTHONPATH = "python"; pytest tests/dreamer/
 
 Expect `24 passed` in a few seconds. All offline (no live Isaac needed). Also run `pytest tests/` to confirm the 94 PPO tests still pass — the port doesn't touch the PPO code.
 
-### 2. M1 — smoke test on live Isaac (~1 hour wall-clock)
-
-Before committing to a multi-day run, prove Dreamer trains end-to-end on your box and TensorBoard curves look sane. This runs 100k env-steps at n_envs=2:
+### 2. The 3-script workflow (this is all you need day-to-day)
 
 ```powershell
-python train.py --algo dreamer `
-                --config python\isaac_rl\dreamer\configs\stage1_single_room.yaml `
-                --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe" `
-                --tensorboard `
-                --override total_env_steps=100000 n_envs=2
+.\scripts\run.ps1           # start training. Ctrl-C to stop cleanly.
+.\scripts\push_data.ps1     # export TB summary + checkpoint, commit, push.
+.\scripts\clear_data.ps1    # nuke runs\ before a fresh experiment.
 ```
 
-**Success on TensorBoard (http://localhost:6006):**
+That's it. The wrappers pick sane defaults (stage 1, n_envs from the YAML, TensorBoard on, Isaac binary auto-detected from Steam), catch Ctrl-C so the trainer flushes a final checkpoint and TB events before exiting, and know where to look for output files.
+
+**`scripts\run.ps1`** — start training. Common flags:
+
+```powershell
+.\scripts\run.ps1                              # stage 1 default (5M steps)
+.\scripts\run.ps1 -Smoke                       # M1 smoke: 100k steps, n_envs=2 (~1 hour)
+.\scripts\run.ps1 -Stage 2                     # stage 2 config
+.\scripts\run.ps1 -Stage 4                     # stage 4 config
+.\scripts\run.ps1 -NEnvs 4                     # override n_envs
+.\scripts\run.ps1 -Isaac "C:\Path\isaac-ng.exe"  # override binary path
+.\scripts\run.ps1 -NoTensorboard               # skip TB (saves a bit of I/O)
+```
+
+**Ctrl-C behavior:** the trainer traps SIGINT. First Ctrl-C finishes the current rollout, saves a checkpoint tagged `interrupted`, flushes TB, and exits cleanly. Second Ctrl-C force-quits (progress since the last checkpoint is lost — don't hit it twice unless you have to).
+
+**`scripts\push_data.ps1`** — after Ctrl-C, run this to ship the run's artifacts back to the repo. Auto-picks the most recent run under `runs\`:
+
+```powershell
+.\scripts\push_data.ps1                        # most recent run
+.\scripts\push_data.ps1 -RunGlob "dreamer_stage2_*"      # most recent stage 2
+.\scripts\push_data.ps1 -RunDir "runs\dreamer_stage1_single_room\20260704-231512"  # specific run
+.\scripts\push_data.ps1 -NoCheckpoint          # skip the .pt (JSON only)
+```
+
+What gets committed:
+
+- `tb_dreamer_<stage>_<timestamp>.json` — compact scalar summary (~50 KB). Send me this for analysis.
+- `ckpts\latest_<stage>_<timestamp>.pt` — copy of the run's `latest.pt` (~150 MB). Skip via `-NoCheckpoint` if GitHub rejects the size (>100 MB) — in that case upload the raw `.pt` via bucket/scp/email.
+
+**`scripts\clear_data.ps1`** — wipe local data before a fresh run:
+
+```powershell
+.\scripts\clear_data.ps1                       # deletes runs\, prompts first
+.\scripts\clear_data.ps1 -Yes                  # no prompt
+.\scripts\clear_data.ps1 -Stage 1              # only stage 1's runs
+.\scripts\clear_data.ps1 -All -Yes             # runs\ + ckpts\ + tb_*.json, no prompt
+```
+
+### 3. What to expect on TensorBoard (M1 smoke success criteria)
+
+Run `.\scripts\run.ps1 -Smoke`, wait ~1 hour, open http://localhost:6006:
 
 - `loss/total` (world model) trending down over 100k steps
 - `loss/kl`, `loss/kl_dyn`, `loss/kl_rep` finite and roughly stable (0.1 – 10 range)
 - `loss/actor` finite (starts near 0, mildly negative)
 - `loss/critic` finite, gently trending
-- `rollout/ep_reward` above random baseline
-- No NaN anywhere, run completes without crash
+- `rollout/ep_reward` above the random-policy baseline
+- No NaN anywhere; run completes without crash
 
-If any of these blow up (NaN, exploding KL), that's a real bug — capture the TB export and file it. Do NOT proceed to M2.
+If any of these blow up (NaN, exploding KL), `.\scripts\push_data.ps1` and share the JSON — that's a real bug and I need the numbers to diagnose. Do NOT proceed to full stage 1 training.
 
-### 3. M2 — Stage 1 convergence (1–2 weeks wall-clock)
+### 4. Full stage 1 → stage 2 → stage 4 chain
 
-```powershell
-python train.py --algo dreamer `
-                --config python\isaac_rl\dreamer\configs\stage1_single_room.yaml `
-                --isaac "C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth\isaac-ng.exe" `
-                --tensorboard
-```
-
-(No `--override` needed — the YAML defaults are `total_env_steps=5_000_000`, `n_envs=2`. Bump `--n-envs 4` if your CPU can handle it.)
-
-**Success target:** `reward/room_clear` firing on ≥90% of episodes. Verify with the eval command below. If the loss curves look healthy but the agent isn't solving rooms by 2M steps, capture the TB and we'll diagnose.
-
-### 4. M3 / M4 — floor clear + beat Mom
+After M1 smoke looks clean:
 
 ```powershell
-# Stage 2 — floor clear (20M steps, ~2-3 weeks)
-python train.py --algo dreamer `
-                --config python\isaac_rl\dreamer\configs\stage2_floor_clear.yaml `
-                --isaac "..." --tensorboard `
-                --override resume_from=runs\dreamer_stage1_single_room\<latest>\latest.pt
+.\scripts\run.ps1                              # stage 1, 5M steps, 1-2 weeks
+# ... Ctrl-C when ready, or let it complete ...
+.\scripts\push_data.ps1                        # ship the data
 
-# Stage 4 — full run through Depths 2 + Mom (100M steps, ~4-8 weeks)
-python train.py --algo dreamer `
-                --config python\isaac_rl\dreamer\configs\stage4_full_run.yaml `
-                --isaac "..." --tensorboard `
-                --override resume_from=runs\dreamer_stage2_floor_clear\<latest>\latest.pt
+# When stage 1 room-clear rate is >=90%, resume into stage 2:
+.\scripts\run.ps1 -Stage 2                     # 20M steps, 2-3 weeks
+# ... Ctrl-C or complete ...
+.\scripts\push_data.ps1 -RunGlob "dreamer_stage2_*"
+
+# Then stage 4:
+.\scripts\run.ps1 -Stage 4                     # 100M steps, 4-8 weeks
+.\scripts\push_data.ps1 -RunGlob "dreamer_stage4_*"
 ```
+
+(To resume stage 2 from a stage 1 checkpoint, pass `--override resume_from=runs\dreamer_stage1_single_room\<timestamp>\latest.pt` to `run.ps1` via its `-NEnvs` isn't the right mechanism — use `python train.py` directly for that one-off, or open an issue and I'll wire a `-Resume` flag.)
 
 ### 5. Evaluating a Dreamer checkpoint
 
@@ -414,28 +443,6 @@ tensorboard --logdir runs
 ```
 
 The `rollout/ep_reward_best` and `reward/room_clear` curves side-by-side are the main ablation figure for a writeup.
-
-<details><summary>bash equivalent</summary>
-
-```bash
-# M1 smoke
-python train.py --algo dreamer \
-                --config python/isaac_rl/dreamer/configs/stage1_single_room.yaml \
-                --isaac "/path/to/isaac-ng" --tensorboard \
-                --override total_env_steps=100000 n_envs=2
-
-# M2 full stage 1
-python train.py --algo dreamer \
-                --config python/isaac_rl/dreamer/configs/stage1_single_room.yaml \
-                --isaac "/path/to/isaac-ng" --tensorboard
-
-# Eval
-python -m isaac_rl.eval --algo dreamer \
-    --checkpoint runs/dreamer_stage1_single_room/<timestamp>/latest.pt \
-    --config python/isaac_rl/dreamer/configs/stage1_single_room.yaml \
-    --episodes 32
-```
-</details>
 
 ### Hyperparameter notes
 
