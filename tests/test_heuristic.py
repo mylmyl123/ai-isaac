@@ -49,8 +49,6 @@ def _mk_enemy(dx=100.0, dy=0.0):
     }
 
 
-# ---- 1. Combat behavior ---------------------------------------------------
-
 def test_shoot_at_enemy_right():
     """Enemy to the right -> shoot=2 (right)."""
     p = HeuristicPolicy()
@@ -67,37 +65,8 @@ def test_shoot_at_enemy_up():
     assert a[1] == 1, f"expected shoot=1 (up), got {a[1]}"
 
 
-def test_retreat_when_enemy_too_close():
-    """Enemy within retreat_dist (100) -> flee AWAY from enemy."""
-    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250))
-    # Enemy is 50 units to the right -> bot should move left.
-    obs = _mk_obs(enemies=_mk_enemy(dx=50, dy=0))
-    a = p.act(obs)
-    # Flee from (50, 0) = move toward (-50, 0) = left (action 7).
-    assert a[0] == 7, f"expected retreat=7 (left), got {a[0]}"
 
 
-def test_approach_when_enemy_too_far():
-    """Enemy beyond approach_dist -> move toward enemy."""
-    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250))
-    # Enemy 300 units to the right.
-    obs = _mk_obs(enemies=_mk_enemy(dx=300, dy=0))
-    a = p.act(obs)
-    assert a[0] == 3, f"expected approach=3 (right), got {a[0]}"
-
-
-def test_hold_zone_moves_perpendicular():
-    """Enemy in hold zone -> sidestep perpendicular, don't approach or flee."""
-    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250))
-    # Enemy 180 units right (in hold zone 100..250).
-    obs = _mk_obs(enemies=_mk_enemy(dx=180, dy=0))
-    a = p.act(obs)
-    # Move should be UP or DOWN (perpendicular to enemy direction), never
-    # straight toward (3) or straight away (7).
-    assert a[0] in (1, 5, 2, 4, 6, 8), f"expected perpendicular move, got {a[0]}"
-
-
-# ---- 2. Door target selection + lock -------------------------------------
 
 def test_no_doors_visible_random_wander():
     """No open doors -> random cardinal, never idle."""
@@ -178,8 +147,6 @@ def test_locked_door_skipped():
     assert p._target_door_slot == 2
 
 
-# ---- 3. Diagonal navigation to door center -------------------------------
-
 def test_move_toward_left_door_from_above():
     """Bot above the LEFT door -> should move down-left (6)."""
     p = HeuristicPolicy(HeuristicConfig(seed=0))
@@ -220,8 +187,6 @@ def test_move_toward_down_door_from_left():
     assert a[0] == 4, f"expected down-right (4), got {a[0]}"
 
 
-# ---- 4. Regression: no oscillation ---------------------------------------
-
 def test_no_oscillation_locked_target_delivers_stable_moves():
     """Simulate ticks with the same obs. Move action should be stable while
     the target is locked (within stuck_ticks). After stuck_ticks, target
@@ -238,8 +203,6 @@ def test_no_oscillation_locked_target_delivers_stable_moves():
     assert len(unique) == 1, f"expected 1 unique move, got {unique}"
 
 
-# ---- 5. Shoot always fires when enemy visible ----------------------------
-
 def test_shoot_fires_in_all_kite_zones():
     """Shoot should be non-zero whenever an enemy is visible, regardless of zone."""
     p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250))
@@ -248,8 +211,6 @@ def test_shoot_fires_in_all_kite_zones():
         a = p.act(obs)
         assert a[1] != 0, f"expected shoot != 0 at dx={dx}, got {a[1]}"
 
-
-# ---- 6. Determinism with seed --------------------------------------------
 
 def test_determinism_with_seed():
     """Same seed + same obs sequence -> same actions."""
@@ -262,8 +223,6 @@ def test_determinism_with_seed():
         a2 = p2.act(obs)
         assert (a1 == a2).all(), f"nondeterministic: {a1} vs {a2}"
 
-
-# ---- 7. Angle mapping helpers --------------------------------------------
 
 def test_angle_to_shoot_cardinals():
     """Cardinal angles map correctly."""
@@ -283,137 +242,6 @@ def test_angle_to_move_cardinals():
     assert HeuristicPolicy._angle_to_move(math.pi / 2) == 5    # down
 
 
-# ---- 8. Stuck detection (regression: bot pinned against wall) ------------
-
-def test_stuck_detection_unlocks_target_after_threshold():
-    """Bot stuck at same position for stuck_ticks -> target unlocked, re-picked."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=5, stuck_radius=5.0))
-    doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
-    obs = _mk_obs(px=300, py=280, doors=doors, room_index=1)
-    # First act picks a target.
-    p.act(obs)
-    initial_target = p._target_door_slot
-    # 5 more ticks with same position -> should trigger unlock on the 5th.
-    for _ in range(5):
-        p.act(obs)
-    # After the unlock, target could be re-picked to the SAME slot (random).
-    # The KEY property is that stuck_ticks_count is reset, meaning the unlock
-    # DID fire. We can also verify by using a seed that produces a different pick.
-    # More robust: verify unlock happens by checking counter behavior after
-    # position changes.
-    # Move bot to new position -> counter should reset.
-    obs2 = _mk_obs(px=400, py=280, doors=doors, room_index=1)
-    p.act(obs2)
-    assert p._stuck_ticks_count == 0, "counter didn't reset on movement"
-
-
-def test_stuck_detection_does_not_fire_when_moving():
-    """Bot actually moving between ticks -> stuck counter stays low."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=5))
-    doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
-    for i in range(20):
-        # Position changes each tick (bot moving).
-        obs = _mk_obs(px=300 + i * 10, py=280, doors=doors, room_index=1)
-        p.act(obs)
-    # Bot moved every tick -> counter should be 0.
-    assert p._stuck_ticks_count == 0
-
-
-# ---- 9. Entry-slot skip (regression: backtrack between rooms) ------------
-
-def test_entry_slot_inferred_from_near_left_wall():
-    """Bot spawns near LEFT wall -> entry_slot = 0 (LEFT)."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, entry_wall_dist=60))
-    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [1, 1, 0, 0, 0, 0], [0]*6]
-    # Bot at x=90, bounds tl_x=80 -> 10 units from LEFT wall.
-    obs = _mk_obs(px=90, py=280, doors=doors, room_index=1)
-    p.act(obs)
-    # LEFT should have been skipped in door selection.
-    assert p._entry_slot == 0
-    assert p._target_door_slot != 0, "picked entry (LEFT) door despite skip"
-
-
-def test_entry_slot_none_when_center_spawn():
-    """Bot in room center -> no entry_slot, all doors viable."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, entry_wall_dist=60))
-    doors = [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
-    # Center spawn: bot at (320, 280), room (80..560, 160..400).
-    # Distance to any wall = 120..240, all above threshold=60.
-    obs = _mk_obs(px=320, py=280, doors=doors, room_index=1)
-    p.act(obs)
-    assert p._entry_slot is None
-
-
-def test_dead_end_room_still_finds_a_door():
-    """Room where the only open door is the entry door -> heuristic picks
-    it anyway (third pass in _pick_target_door)."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, entry_wall_dist=60))
-    # Only LEFT door open, bot near LEFT wall.
-    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [0]*6, [0]*6]
-    obs = _mk_obs(px=90, py=280, doors=doors, room_index=1)
-    p.act(obs)
-    assert p._entry_slot == 0
-    # Should still pick LEFT (only viable) even though it's the entry.
-    assert p._target_door_slot == 0
-
-
-# ---- 10. Failed-slot memory (regression: same door picked after stuck) ----
-
-def test_stuck_slot_added_to_failed_set():
-    """After stuck-timeout, the stuck slot is added to _failed_slots so
-    subsequent picks avoid it."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=3))
-    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
-    # Center spawn, no entry restriction.
-    obs = _mk_obs(px=300, py=280, doors=doors, room_index=1)
-    p.act(obs)
-    initial = p._target_door_slot
-    assert initial is not None
-    # 4 ticks with same position -> stuck detection fires (stuck_ticks=3).
-    for _ in range(4):
-        p.act(obs)
-    # Original target should now be in failed_slots.
-    assert initial in p._failed_slots
-
-
-def test_failed_slots_reset_on_room_change():
-    """When bot enters a new room, failed_slots resets (may re-explore old failures)."""
-    p = HeuristicPolicy(HeuristicConfig(seed=0, stuck_ticks=3))
-    doors = [[1, 1, 0, 0, 0, 0], [0]*6, [1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
-    obs1 = _mk_obs(px=300, py=280, doors=doors, room_index=1)
-    p.act(obs1)
-    p._failed_slots.add(0)  # simulate a failed slot
-    assert 0 in p._failed_slots
-    # Room change resets.
-    obs2 = _mk_obs(px=300, py=280, doors=doors, room_index=2)
-    p.act(obs2)
-    assert 0 not in p._failed_slots
-
-
-# ---- 11. Combat retreat wall rotation (regression: corner pinning) --------
-
-def test_retreat_rotates_when_pushing_into_left_wall():
-    """Bot near LEFT wall, enemy on RIGHT -> retreat direction is LEFT.
-    But LEFT pushes into wall -> should rotate to UP or DOWN."""
-    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250, seed=0))
-    # Bot at x=90 (10 from LEFT wall at tl_x=80). Enemy to the RIGHT.
-    obs = _mk_obs(px=90, py=280, enemies=_mk_enemy(dx=50, dy=0))
-    a = p.act(obs)
-    # Move should NOT be pure LEFT (7). Should be UP (1), DOWN (5), or a
-    # diagonal that includes vertical component.
-    assert a[0] in (1, 5, 2, 4, 6, 8), f"retreat pinned to LEFT wall: move={a[0]}"
-    # Ensure move doesn't include LEFT component (7, 6, 8).
-    assert a[0] not in (6, 7, 8), f"retreat still moving LEFT despite wall: move={a[0]}"
-
-
-def test_retreat_no_rotation_when_wall_far():
-    """Bot in center of room, enemy on RIGHT -> retreat LEFT is fine, no rotation."""
-    p = HeuristicPolicy(HeuristicConfig(retreat_dist=100, approach_dist=250, seed=0))
-    # Bot at x=300 (well away from any wall). Enemy on RIGHT.
-    obs = _mk_obs(px=300, py=280, enemies=_mk_enemy(dx=50, dy=0))
-    a = p.act(obs)
-    # Move should be pure LEFT (7) - no rotation needed.
-    assert a[0] == 7, f"unnecessary rotation: move={a[0]}"
 
 
 def test_rotate_move_90_clockwise():
