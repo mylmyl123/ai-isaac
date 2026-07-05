@@ -56,17 +56,32 @@ class SyncVecEnv:
         terms = np.zeros(self.n, dtype=bool)
         truncs = np.zeros(self.n, dtype=bool)
         infos = []
+        # DreamerV3 needs the terminal obs *before* auto-reset so it can train
+        # the continue-flag / reward decoder on the actual last-of-episode state.
+        # PPO ignores this field — it only uses `dones` masking. Fully
+        # backward-compatible: existing callers keep unpacking the 5-tuple.
+        terminal_obs: list[dict[str, Any] | None] = []
         for i, env in enumerate(self.envs):
             o, r, term, trunc, info = env.step(actions[i])
             rewards[i] = r
             terms[i] = term
             truncs[i] = trunc
             if term or trunc:
+                # Preserve pre-reset obs for Dreamer's replay writer.
+                terminal_obs.append(o)
                 # Auto-reset for on-policy training convenience.
                 o, info = env.reset()
+            else:
+                terminal_obs.append(None)
             obs.append(o)
             infos.append(info)
         self._last_obs = obs
+        # Attach terminal_obs on infos too, for callers that only unpack the
+        # 5-tuple (i.e. existing PPO code path). Zero risk to PPO — it never
+        # reads info["terminal_obs"].
+        for i, tobs in enumerate(terminal_obs):
+            if tobs is not None:
+                infos[i]["terminal_obs"] = tobs
         return obs, rewards, terms, truncs, infos
 
     def close(self):

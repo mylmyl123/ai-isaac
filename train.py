@@ -44,6 +44,8 @@ sys.path.insert(0, str(REPO / "python"))
 
 from isaac_rl.env import register_on_crash  # noqa: E402
 from isaac_rl.ppo import PPOConfig, _cfg_from_yaml, train  # noqa: E402
+from isaac_rl.dreamer.config import DreamerConfig, cfg_from_yaml as _dreamer_cfg_from_yaml  # noqa: E402
+from isaac_rl.dreamer.train import train as dreamer_train  # noqa: E402
 
 
 log = logging.getLogger("train")
@@ -312,6 +314,13 @@ def maybe_start_tensorboard(logdir: Path, port: int = 6006) -> subprocess.Popen 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="Path to a YAML config under python/isaac_rl/configs/")
+    ap.add_argument(
+        "--algo", choices=("ppo", "dreamer"), default="ppo",
+        help="Which trainer to run. 'ppo' (default) uses the existing recurrent-PPO stack. "
+             "'dreamer' uses the DreamerV3 world-model trainer under python/isaac_rl/dreamer/. "
+             "Config paths differ: PPO configs live in python/isaac_rl/configs/, Dreamer configs "
+             "in python/isaac_rl/dreamer/configs/.",
+    )
     ap.add_argument("--isaac", default=None, help="Absolute path to isaac-ng.exe (overrides config + auto-detect)")
     ap.add_argument("--n-envs", type=int, default=None, help="Override n_envs from the config")
     ap.add_argument("--base-port", type=int, default=None, help="Override base_port from the config")
@@ -358,8 +367,11 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    # Load and reconcile config.
-    cfg = _cfg_from_yaml(args.config)
+    # Load and reconcile config. Dispatch to the right loader based on --algo.
+    if args.algo == "dreamer":
+        cfg = _dreamer_cfg_from_yaml(args.config)
+    else:
+        cfg = _cfg_from_yaml(args.config)
     if args.n_envs is not None:
         cfg.n_envs = args.n_envs
     if args.base_port is not None:
@@ -369,11 +381,13 @@ def main() -> int:
         log.info("will resume training from checkpoint: %s", args.resume)
 
     # Wire BC / demo-collection args onto the config so ppo.py can act on them.
-    cfg.collect_demos_n = args.collect_demos
-    cfg.bc_pretrain_file = args.bc_pretrain_file
-    cfg.bc_epochs = args.bc_epochs
-    cfg.bc_batch_size = args.bc_batch_size
-    cfg.bc_lr = args.bc_lr
+    # These fields only exist on PPOConfig; skip them for the dreamer path.
+    if args.algo != "dreamer":
+        cfg.collect_demos_n = args.collect_demos
+        cfg.bc_pretrain_file = args.bc_pretrain_file
+        cfg.bc_epochs = args.bc_epochs
+        cfg.bc_batch_size = args.bc_batch_size
+        cfg.bc_lr = args.bc_lr
     for kv in args.override:
         k, _, v = kv.partition("=")
         try:
@@ -513,7 +527,10 @@ def main() -> int:
         log.info("=" * 72)
 
     try:
-        train(cfg)
+        if args.algo == "dreamer":
+            dreamer_train(cfg)
+        else:
+            train(cfg)
     except KeyboardInterrupt:
         log.info("training interrupted by user")
     except Exception as e:
