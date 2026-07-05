@@ -157,6 +157,21 @@ def train(cfg: DreamerConfig) -> None:
     np.random.seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
 
+    # ---- Speed knobs (2026-07-05) --------------------------------------
+    # TF32 matmul on Ampere+ (only matters when NOT using bf16/fp16 autocast).
+    if getattr(cfg, "tf32", True) and device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    # cuDNN autotuner: 30s warmup cost, ~5% steady-state speedup.
+    if getattr(cfg, "cudnn_benchmark", True) and device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    amp_str = getattr(cfg, "amp_dtype", "off")
+    if amp_str in ("bf16", "fp16") and device.type == "cuda":
+        log.info("AMP enabled: dtype=%s (Ampere+ recommended: bf16)", amp_str)
+    elif device.type == "cuda":
+        log.info("AMP disabled (running in fp32 + TF32=%s)", getattr(cfg, "tf32", True))
+
     # Per-section profiler. Times are dumped to TB every log_every updates as
     # time/<section>_ms (mean-per-call) and time_pct/<section> (share of total
     # interval). Reveals where wall-clock is going: env-step, encoder, RSSM

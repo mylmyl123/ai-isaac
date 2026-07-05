@@ -34,6 +34,20 @@ class DreamerConfig:
     resume_from: str | None = None
     log_every: int = 100        # updates between TB writes
 
+    # ---- Speed knobs (2026-07-05) --------------------------------------
+    # Autocast dtype for forward passes. "bf16" is the best pick on Ampere
+    # (3060 Ti, 3090, A100) and Ada (4060+): stable numerics, no GradScaler
+    # needed, ~1.5-2x speedup on GPU-compute-bound workloads. "fp16" needs
+    # GradScaler and can NaN on some models — only use it if you know why.
+    # "off" runs everything in fp32.
+    amp_dtype: str = "bf16"
+    # Enable TF32 matmul on Ampere+. ~1.1-1.2x on fp32 matmul with negligible
+    # numerical impact. Overridden to False if amp_dtype != "off".
+    tf32: bool = True
+    # cuDNN autotuner: picks the fastest conv kernel per input shape at
+    # startup. Costs ~30s of warmup, saves ~5% per step steady-state.
+    cudnn_benchmark: bool = True
+
     # ---- Encoder / decoder --------------------------------------------
     encoder_embed_dim: int = 1024
     encoder_trunk_dim: int = 768

@@ -47,6 +47,12 @@ def _to_tensor(x: np.ndarray | torch.Tensor, device: torch.device) -> torch.Tens
     return torch.as_tensor(x, dtype=torch.float32, device=device)
 
 
+class _NullContext:
+    """no-op context manager used when AMP is disabled."""
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+
+
 class IsaacWorldModel(nn.Module):
     """Encoder + RSSM + Decoder + reward head + continue head.
 
@@ -130,8 +136,22 @@ class IsaacWorldModel(nn.Module):
             name="Cont",
         )
 
+        # AMP autocast dtype (set once at init based on cfg.amp_dtype). Wraps
+        # forward passes to run bf16/fp16 matmul + attention. On Ampere+ we
+        # default to bf16 — same throughput as fp16 with better numerics, no
+        # GradScaler needed (bf16 has fp32-equivalent dynamic range).
+        amp_str = getattr(cfg, "amp_dtype", "off")
+        if amp_str == "bf16":
+            self._amp_dtype = torch.bfloat16
+        elif amp_str == "fp16":
+            self._amp_dtype = torch.float16
+        else:
+            self._amp_dtype = None
+
         # ---- Optimizer (vendor Optimizer wraps AMP + grad clip) --------
-        # On CPU, torch.cuda.amp.GradScaler is a no-op; safe to instantiate.
+        # We handle autocast ourselves (see train_step); the vendor Optimizer's
+        # GradScaler is only needed for fp16. With bf16 it's a no-op, so
+        # keep use_amp=False and the GradScaler stays disabled.
         self._opt = tools.Optimizer(
             "model",
             list(self.parameters()),
@@ -140,7 +160,7 @@ class IsaacWorldModel(nn.Module):
             cfg.world_model_grad_clip,
             cfg.weight_decay,
             opt="adam",
-            use_amp=False,
+            use_amp=(amp_str == "fp16"),
         )
 
         self.to(device)
@@ -208,49 +228,58 @@ class IsaacWorldModel(nn.Module):
         is_terminal = _to_tensor(batch["is_terminal"], device)
         _toc("wm_obs_to_gpu", t)
 
-        # ---- encode -----------------------------------------------------
-        t = _tic()
-        embed = self.encoder(obs_t)                         # [B, T, embed_dim]
-        _toc("wm_encode", t)
-
-        # ---- rssm observe ----------------------------------------------
-        t = _tic()
-        post, prior = self.dynamics.observe(embed, action, is_first)
-        _toc("wm_rssm_observe", t)
-
-        # ---- kl loss ---------------------------------------------------
-        t = _tic()
-        kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
-            post, prior, cfg.kl_free_bits, cfg.kl_dyn_scale, cfg.kl_rep_scale,
+        # AMP: wrap the whole forward + loss compute in autocast so matmul /
+        # attention / decoder heads run in bf16/fp16. The final `.backward()`
+        # is handled by the vendor Optimizer with (or without) GradScaler.
+        amp_enabled = self._amp_dtype is not None and is_cuda
+        _amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=self._amp_dtype)
+            if amp_enabled
+            else _NullContext()
         )
-        _toc("wm_kl", t)
-        # kl_loss shape [B, T].
+        with _amp_ctx:
+            # ---- encode -----------------------------------------------------
+            t = _tic()
+            embed = self.encoder(obs_t)                         # [B, T, embed_dim]
+            _toc("wm_encode", t)
 
-        # ---- decoder + reward + cont ------------------------------------
-        t = _tic()
-        feat = self.dynamics.get_feat(post)                  # [B, T, feat_size]
-        recon_dists = self.decoder(feat)
-        reward_dist = self.reward_head(feat)
-        cont_dist = self.cont_head(feat)
-        _toc("wm_decode", t)
+            # ---- rssm observe ----------------------------------------------
+            t = _tic()
+            post, prior = self.dynamics.observe(embed, action, is_first)
+            _toc("wm_rssm_observe", t)
 
-        # Reconstruction losses per key.
-        t = _tic()
-        losses: dict[str, torch.Tensor] = {}
-        for key, dist in recon_dists.items():
-            target = obs_t[key]
-            losses[key] = -dist.log_prob(target)             # [B, T]
+            # ---- kl loss ---------------------------------------------------
+            t = _tic()
+            kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
+                post, prior, cfg.kl_free_bits, cfg.kl_dyn_scale, cfg.kl_rep_scale,
+            )
+            _toc("wm_kl", t)
 
-        # Reward: symlog-disc log_prob expects target shape (..., 1).
-        losses["reward"] = -reward_dist.log_prob(reward.unsqueeze(-1)) * cfg.reward_loss_scale
-        cont_target = (1.0 - is_terminal).unsqueeze(-1)
-        losses["cont"] = -cont_dist.log_prob(cont_target) * cfg.cont_loss_scale
+            # ---- decoder + reward + cont ------------------------------------
+            t = _tic()
+            feat = self.dynamics.get_feat(post)                  # [B, T, feat_size]
+            recon_dists = self.decoder(feat)
+            reward_dist = self.reward_head(feat)
+            cont_dist = self.cont_head(feat)
+            _toc("wm_decode", t)
 
-        model_loss = sum(losses.values()) + kl_loss
-        total = model_loss.mean()
-        _toc("wm_losses", t)
+            # Reconstruction losses per key.
+            t = _tic()
+            losses: dict[str, torch.Tensor] = {}
+            for key, dist in recon_dists.items():
+                target = obs_t[key]
+                losses[key] = -dist.log_prob(target)             # [B, T]
 
-        # ---- optimize (fwd+bwd+step) -------------------------------------
+            # Reward: symlog-disc log_prob expects target shape (..., 1).
+            losses["reward"] = -reward_dist.log_prob(reward.unsqueeze(-1)) * cfg.reward_loss_scale
+            cont_target = (1.0 - is_terminal).unsqueeze(-1)
+            losses["cont"] = -cont_dist.log_prob(cont_target) * cfg.cont_loss_scale
+
+            model_loss = sum(losses.values()) + kl_loss
+            total = model_loss.mean()
+            _toc("wm_losses", t)
+
+        # ---- optimize (fwd+bwd+step, backward runs outside autocast) -----
         t = _tic()
         metrics = self._opt(total, list(self.parameters()))
         _toc("wm_backward", t)
@@ -318,6 +347,15 @@ class IsaacImagBehavior(nn.Module):
                 p.requires_grad_(False)
             self._slow_updates = 0
 
+        # AMP dtype mirrors WM's setting.
+        amp_str = getattr(cfg, "amp_dtype", "off")
+        if amp_str == "bf16":
+            self._amp_dtype = torch.bfloat16
+        elif amp_str == "fp16":
+            self._amp_dtype = torch.float16
+        else:
+            self._amp_dtype = None
+
         # ---- Optimizers ------------------------------------------------
         self._actor_opt = tools.Optimizer(
             "actor",
@@ -327,7 +365,7 @@ class IsaacImagBehavior(nn.Module):
             cfg.actor_grad_clip,
             cfg.weight_decay,
             opt="adam",
-            use_amp=False,
+            use_amp=(amp_str == "fp16"),
         )
         self._critic_opt = tools.Optimizer(
             "critic",
@@ -337,7 +375,7 @@ class IsaacImagBehavior(nn.Module):
             cfg.critic_grad_clip,
             cfg.weight_decay,
             opt="adam",
-            use_amp=False,
+            use_amp=(amp_str == "fp16"),
         )
 
         # Reward EMA for advantage normalization (DreamerV3).
@@ -505,14 +543,21 @@ class IsaacImagBehavior(nn.Module):
         cfg = self.cfg
         self._update_slow()
 
-        feats, states, actions = self._imagine(start_state, cfg.imag_horizon)
-        target, weights, base = self._compute_targets(feats, states)
+        amp_enabled = self._amp_dtype is not None and self._device.type == "cuda"
+        _amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=self._amp_dtype)
+            if amp_enabled
+            else _NullContext()
+        )
+        with _amp_ctx:
+            feats, states, actions = self._imagine(start_state, cfg.imag_horizon)
+            target, weights, base = self._compute_targets(feats, states)
 
-        actor_loss, actor_metrics = self._actor_loss(feats, actions, target, weights, base)
-        # Actor step
+            actor_loss, actor_metrics = self._actor_loss(feats, actions, target, weights, base)
         self._actor_opt(actor_loss, list(self.actor.parameters()))
 
-        critic_loss, critic_metrics = self._critic_loss(feats, target, weights)
+        with _amp_ctx:
+            critic_loss, critic_metrics = self._critic_loss(feats, target, weights)
         self._critic_opt(critic_loss, list(self.critic.parameters()))
 
         metrics = {}
