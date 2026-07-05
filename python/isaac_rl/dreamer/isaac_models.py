@@ -25,6 +25,7 @@ Public API:
 from __future__ import annotations
 
 import copy
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -177,54 +178,82 @@ class IsaacWorldModel(nn.Module):
         Returns (post, context, metrics). ``post`` is the RSSM posterior state
         (batched, with grad detached) — used by ImagBehavior as start states
         for imagination rollouts. ``context`` carries embed/feat/kl for logging.
+
+        Populates ``self.last_step_times`` with per-section wall-clock in ms
+        (CUDA-synced), so the trainer can propagate them to TB. Sections:
+        obs_to_gpu, encode, rssm_observe, kl, decode, losses, backward.
         """
         cfg = self.cfg
         device = self._device
-        # numpy -> torch on device
+        is_cuda = device.type == "cuda"
+        times: dict[str, float] = {}
+
+        def _tic():
+            if is_cuda:
+                torch.cuda.synchronize()
+            return time.perf_counter()
+
+        def _toc(name: str, t0: float):
+            if is_cuda:
+                torch.cuda.synchronize()
+            times[name] = 1000.0 * (time.perf_counter() - t0)
+
+        # ---- obs marshaling (numpy -> torch on device) --------------------
+        t = _tic()
         obs_t = {k: _to_tensor(v, device) for k, v in batch.items()
                  if k not in ("action", "reward", "is_first", "is_terminal")}
         action = _to_tensor(batch["action"], device)         # [B, T, num_actions]
         reward = _to_tensor(batch["reward"], device)         # [B, T]
         is_first = _to_tensor(batch["is_first"], device)     # [B, T]
         is_terminal = _to_tensor(batch["is_terminal"], device)
+        _toc("wm_obs_to_gpu", t)
 
         # ---- encode -----------------------------------------------------
+        t = _tic()
         embed = self.encoder(obs_t)                         # [B, T, embed_dim]
+        _toc("wm_encode", t)
 
         # ---- rssm observe ----------------------------------------------
+        t = _tic()
         post, prior = self.dynamics.observe(embed, action, is_first)
+        _toc("wm_rssm_observe", t)
 
         # ---- kl loss ---------------------------------------------------
+        t = _tic()
         kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
             post, prior, cfg.kl_free_bits, cfg.kl_dyn_scale, cfg.kl_rep_scale,
         )
+        _toc("wm_kl", t)
         # kl_loss shape [B, T].
 
         # ---- decoder + reward + cont ------------------------------------
+        t = _tic()
         feat = self.dynamics.get_feat(post)                  # [B, T, feat_size]
         recon_dists = self.decoder(feat)
         reward_dist = self.reward_head(feat)
         cont_dist = self.cont_head(feat)
+        _toc("wm_decode", t)
 
         # Reconstruction losses per key.
+        t = _tic()
         losses: dict[str, torch.Tensor] = {}
         for key, dist in recon_dists.items():
             target = obs_t[key]
             losses[key] = -dist.log_prob(target)             # [B, T]
 
-        # Reward: symlog-disc log_prob expects target shape (..., 1). Reward
-        # from replay is [B, T] scalar; unsqueeze.
+        # Reward: symlog-disc log_prob expects target shape (..., 1).
         losses["reward"] = -reward_dist.log_prob(reward.unsqueeze(-1)) * cfg.reward_loss_scale
-        # Cont: target is (1 - is_terminal). vendor dist=binary expects [B, T, 1].
         cont_target = (1.0 - is_terminal).unsqueeze(-1)
         losses["cont"] = -cont_dist.log_prob(cont_target) * cfg.cont_loss_scale
 
-        # ---- total loss ------------------------------------------------
-        model_loss = sum(losses.values()) + kl_loss           # [B, T]
+        model_loss = sum(losses.values()) + kl_loss
         total = model_loss.mean()
+        _toc("wm_losses", t)
 
-        # ---- optimize --------------------------------------------------
+        # ---- optimize (fwd+bwd+step) -------------------------------------
+        t = _tic()
         metrics = self._opt(total, list(self.parameters()))
+        _toc("wm_backward", t)
 
         # ---- log breakdown --------------------------------------------
         metrics.update({f"loss/{k}": float(v.mean().item()) for k, v in losses.items()})
@@ -232,6 +261,9 @@ class IsaacWorldModel(nn.Module):
         metrics["loss/kl_dyn"] = float(dyn_loss.mean().item())
         metrics["loss/kl_rep"] = float(rep_loss.mean().item())
         metrics["loss/total"] = float(total.item())
+
+        # Expose timings for the trainer to log.
+        self.last_step_times = times
 
         # Detach posterior for behavior training.
         post_detached = {k: v.detach() for k, v in post.items()}

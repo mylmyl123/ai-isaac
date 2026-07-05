@@ -50,6 +50,89 @@ ACTION_FACTORS_TUPLE = tuple(int(x) for x in ACTION_FACTORS.tolist())
 ONEHOT_DIM = int(sum(ACTION_FACTORS_TUPLE))
 
 
+class _Prof:
+    """Lightweight per-section wall-clock profiler with CUDA sync.
+
+    Uses time.perf_counter with torch.cuda.synchronize() bracketing so GPU
+    ops actually finish before the timer stops. Accumulates per-section
+    totals across the interval; on dump we log the mean-per-call time to
+    TB as ``time/<section>_ms`` and share-of-total as ``time_pct/<section>``.
+
+    Usage:
+        prof = _Prof(device)
+        with prof("env_step"):
+            ...
+        prof.dump_to_writer(writer, global_step)
+        prof.reset()
+    """
+
+    def __init__(self, device: torch.device, enabled: bool = True):
+        self._device = device
+        self._is_cuda = device.type == "cuda"
+        self._enabled = enabled
+        self._sums: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._active: str | None = None
+        self._t0: float = 0.0
+
+    def __call__(self, section: str):
+        return _ProfContext(self, section)
+
+    def _start(self, section: str):
+        if not self._enabled:
+            return
+        if self._is_cuda:
+            torch.cuda.synchronize()
+        self._active = section
+        self._t0 = time.perf_counter()
+
+    def _stop(self):
+        if not self._enabled or self._active is None:
+            return
+        if self._is_cuda:
+            torch.cuda.synchronize()
+        dt = time.perf_counter() - self._t0
+        self._sums[self._active] = self._sums.get(self._active, 0.0) + dt
+        self._counts[self._active] = self._counts.get(self._active, 0) + 1
+        self._active = None
+
+    def dump_to_writer(self, writer, step: int, log_lines: bool = False):
+        if not self._enabled or writer is None:
+            return
+        for k, total_s in self._sums.items():
+            n = self._counts.get(k, 1)
+            ms = 1000.0 * total_s / max(1, n)
+            writer.add_scalar(f"time/{k}_ms", ms, step)
+        total = sum(self._sums.values())
+        if total > 0:
+            for k, s in self._sums.items():
+                writer.add_scalar(f"time_pct/{k}", 100.0 * s / total, step)
+        if log_lines:
+            parts = sorted(self._sums.keys(), key=lambda k: -self._sums[k])
+            summary = ", ".join(
+                f"{k}={1000.0 * self._sums[k] / max(1, self._counts.get(k, 1)):.1f}ms"
+                for k in parts
+            )
+            log.info("prof: %s", summary)
+
+    def reset(self):
+        self._sums.clear()
+        self._counts.clear()
+
+
+class _ProfContext:
+    def __init__(self, prof: _Prof, section: str):
+        self._prof = prof
+        self._section = section
+
+    def __enter__(self):
+        self._prof._start(self._section)
+        return self
+
+    def __exit__(self, *args):
+        self._prof._stop()
+
+
 def _obs_batch_to_torch(obs_list: list[dict], device: torch.device) -> dict[str, torch.Tensor]:
     """Stack a list of env obs (nested dicts) into a batched flat-dict tensor set."""
     return batch_obs_to_tensors(obs_list, device)
@@ -73,6 +156,13 @@ def train(cfg: DreamerConfig) -> None:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
+
+    # Per-section profiler. Times are dumped to TB every log_every updates as
+    # time/<section>_ms (mean-per-call) and time_pct/<section> (share of total
+    # interval). Reveals where wall-clock is going: env-step, encoder, RSSM
+    # observe, decoder, WM backward, imagination, actor/critic, replay sample,
+    # obs marshaling. Disabled on CPU (no meaningful CUDA sync).
+    prof = _Prof(device, enabled=True)
 
     # ---- reward config -------------------------------------------------
     from ..reward import RewardConfig
@@ -224,17 +314,19 @@ def train(cfg: DreamerConfig) -> None:
         # This mirrors NM512's per-env-step update schedule.
 
         # (a) One env step using the current policy.
-        obs_t = _obs_batch_to_torch(obs_list, device)
-        # Reset RSSM state on newly-first steps.
-        is_first_t = torch.as_tensor(is_first_flags.astype(np.float32), device=device)
-        with torch.no_grad():
-            embed = world_model.encode_obs(obs_t)
-            prev_action_t = torch.as_tensor(prev_action_onehot, device=device)
-            post, _ = world_model.obs_step(rssm_state, prev_action_t, embed, is_first_t)
-            feat = world_model.dynamics.get_feat(post)
-            action_dist = behavior.actor(feat)
-            action_onehot_t = action_dist.sample()             # [n_envs, ONEHOT_DIM]
-            action_onehot = action_onehot_t.cpu().numpy()
+        with prof("act_marshal_obs"):
+            obs_t = _obs_batch_to_torch(obs_list, device)
+            # Reset RSSM state on newly-first steps.
+            is_first_t = torch.as_tensor(is_first_flags.astype(np.float32), device=device)
+        with prof("act_forward"):
+            with torch.no_grad():
+                embed = world_model.encode_obs(obs_t)
+                prev_action_t = torch.as_tensor(prev_action_onehot, device=device)
+                post, _ = world_model.obs_step(rssm_state, prev_action_t, embed, is_first_t)
+                feat = world_model.dynamics.get_feat(post)
+                action_dist = behavior.actor(feat)
+                action_onehot_t = action_dist.sample()             # [n_envs, ONEHOT_DIM]
+                action_onehot = action_onehot_t.cpu().numpy()
         # RSSM state carries forward.
         rssm_state = post
 
@@ -243,21 +335,23 @@ def train(cfg: DreamerConfig) -> None:
             torch.as_tensor(action_onehot), ACTION_FACTORS_TUPLE,
         ).numpy().astype(np.int64)
 
-        next_obs_list, rewards_np, terms, truncs, infos = env.step(env_action)
+        with prof("env_step"):
+            next_obs_list, rewards_np, terms, truncs, infos = env.step(env_action)
 
         # Push transitions to replay. is_first is *current* obs's is_first,
         # meaning "the RSSM should reset at this step". The current obs was
         # observed BEFORE the action; if this env just reset, is_first_flags
         # reflects that.
-        for i in range(cfg.n_envs):
-            replay.add(
-                flatten_dict_obs(obs_list[i]),
-                action_onehot[i],
-                float(rewards_np[i]),
-                is_first=bool(is_first_flags[i]),
-                is_terminal=bool(terms[i]),
-                is_last=bool(terms[i] or truncs[i]),
-            )
+        with prof("replay_add"):
+            for i in range(cfg.n_envs):
+                replay.add(
+                    flatten_dict_obs(obs_list[i]),
+                    action_onehot[i],
+                    float(rewards_np[i]),
+                    is_first=bool(is_first_flags[i]),
+                    is_terminal=bool(terms[i]),
+                    is_last=bool(terms[i] or truncs[i]),
+                )
         global_step += cfg.n_envs
         ep_rewards += rewards_np
         ep_lens += 1
@@ -287,10 +381,17 @@ def train(cfg: DreamerConfig) -> None:
         for _ in range(n_updates):
             if len(replay) < cfg.batch_size * cfg.seq_len:
                 break
-            batch = replay.sample(cfg.batch_size, cfg.seq_len, rng=rng)
-            post_batch, ctx, wmm = world_model.train_step(batch)
+            with prof("replay_sample"):
+                batch = replay.sample(cfg.batch_size, cfg.seq_len, rng=rng)
+            with prof("wm_train_step"):
+                post_batch, ctx, wmm = world_model.train_step(batch)
             wm_metrics = wmm
-            bmm = behavior.train_step(post_batch)
+            # Propagate WM sub-timers up to the outer profiler.
+            for _name, _ms in getattr(world_model, "last_step_times", {}).items():
+                prof._sums[_name] = prof._sums.get(_name, 0.0) + (_ms / 1000.0)
+                prof._counts[_name] = prof._counts.get(_name, 0) + 1
+            with prof("beh_train_step"):
+                bmm = behavior.train_step(post_batch)
             beh_metrics = bmm
             update += 1
 
@@ -328,6 +429,10 @@ def train(cfg: DreamerConfig) -> None:
                 for k, vs in completed_extras.items():
                     if vs:
                         writer.add_scalar(f"reward/{k}", float(np.mean(vs[-64:])), global_step)
+                # Per-section timing dump. Log a summary line every 10 dumps so
+                # the terminal shows what's dominating without spamming.
+                prof.dump_to_writer(writer, global_step, log_lines=(update % (cfg.log_every * 10) == 0))
+                prof.reset()
             heartbeat_t = time.time()
 
         # ---- checkpoint -----------------------------------------------
