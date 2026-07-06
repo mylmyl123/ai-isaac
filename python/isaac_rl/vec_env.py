@@ -67,10 +67,20 @@ class SyncVecEnv:
             terms[i] = term
             truncs[i] = trunc
             if term or trunc:
-                # Preserve pre-reset obs for Dreamer's replay writer.
+                # Preserve pre-reset obs AND the terminal step's info dict
+                # (which carries reward_breakdown from the RewardShaper). Both
+                # PPO and Dreamer log reward_breakdown from completed episodes;
+                # if we let env.reset() overwrite info, they see empty breakdowns
+                # every time — silent bug that hid room_clear/kill/damage
+                # events from TensorBoard for the entire history of the project.
                 terminal_obs.append(o)
-                # Auto-reset for on-policy training convenience.
-                o, info = env.reset()
+                terminal_info = info                                  # preserve
+                o, reset_info = env.reset()
+                info = reset_info
+                # Splice reward_breakdown (and any other reward-side keys) back
+                # in from the terminal step so completed_extras logging works.
+                if isinstance(terminal_info, dict) and "reward_breakdown" in terminal_info:
+                    info["reward_breakdown"] = terminal_info["reward_breakdown"]
             else:
                 terminal_obs.append(None)
             obs.append(o)

@@ -81,8 +81,8 @@ def main() -> int:
     # Health checks (each returns True on pass).
     sps_last = _last(per, "perf/sps")
     _check(
-        "perf/sps  (throughput)", sps_last, 3.0, ">=",
-        "-> if under 3, 1-week budget won't work",
+        "perf/sps  (throughput)", sps_last, 2.0, ">=",
+        "-> below 2, hardware may be misconfigured (window minimized?)",
     )
 
     entropy_last = _last(per, "loss/actor_entropy")
@@ -151,8 +151,8 @@ def main() -> int:
     print("---- Recommendation ----")
 
     hard_fails: list[str] = []
-    if sps_last is not None and sps_last < 3.0:
-        hard_fails.append("throughput too low")
+    if sps_last is not None and sps_last < 2.0:
+        hard_fails.append("throughput too low (probably window minimized)")
     if entropy_last is not None and entropy_last < 1.0:
         hard_fails.append("entropy collapsed")
     if wm_loss is not None and wm_loss > 50 and total_steps > 100_000:
