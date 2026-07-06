@@ -10,7 +10,8 @@
 # Reverted seq_len 16 -> 32 (better temporal credit assignment). Kept the
 # XS model dims (RSSM 256, encoder 512, decoder 256). Kept pure-speedup
 # optimizations: AMP bf16, shared-trunk decoder, TF32, cuDNN benchmark,
-# torch.compile on RSSM. Expected steady-state: 3-5 sps.
+# torch.compile on RSSM. train_ratio bumped 4 -> 8 for 2x sample efficiency.
+# Expected steady-state on 3060 Ti: 1.8-2.2 sps (was 2.65 at train_ratio=4).
 #
 # Compute footprint: ~5M WM params (was ~23M default). Halves memory and
 # per-update compute by ~4x. Expected sample-efficiency loss vs full
@@ -123,9 +124,12 @@ reward_ema: true
 # ---- training loop -------------------------------------------------
 prefill_steps: 2500
 # train_ratio: WM grad-steps per env-step (total, across all envs).
-# XS on 3060 Ti target: ~15-25 sps at train_ratio=4.
-# You can override this from run.ps1 with -TrainRatio N.
-train_ratio: 4                  # was 16 (default)
+# 2026-07-06 REV: bumped 4 -> 8 after 10h/100k analysis showed the agent
+# was clearly learning (ep_reward_best 0 -> 37 monotonic climb) but slowly.
+# GPU is at 93%; env is fast (1-8ms). Doubling gradient updates per env-step
+# nets ~2x sample efficiency at ~30% throughput cost. Expected: convergence
+# in ~half the env-steps (~1M vs ~2M), wall-clock ~4-5 days vs 6-8.
+train_ratio: 8                  # was 4
 replay_capacity: 500_000        # 500K * ~7KB per obs ~= 3.5 GB RAM
 
 # ---- reward (same as fixed stage1_single_room.yaml v2) --------------
