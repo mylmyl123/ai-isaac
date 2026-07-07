@@ -23,6 +23,7 @@ import logging
 import math
 import signal
 import time
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ except ImportError:
     SummaryWriter = None
 
 from ..spaces import ACTION_FACTORS, flatten_dict_obs
+from ..reward import REWARD_BREAKDOWN_KEYS
 from ..torch_utils import batch_obs_to_tensors
 from ..vec_env import build_vec_env
 from .action import indices_to_onehot, onehot_to_indices
@@ -232,7 +234,32 @@ def train(cfg: DreamerConfig) -> None:
     ep_lens = np.zeros(cfg.n_envs, dtype=np.int64)
     completed_rewards: list[float] = []
     completed_lens: list[int] = []
-    completed_extras: dict[str, list[float]] = {}
+    # Pre-populate with every known reward key so "never fired" components
+    # still show up as flat-zero traces in TB. Bounded deque (last 512 eps)
+    # prevents unbounded memory growth on long runs. See REWARD_BREAKDOWN_KEYS
+    # in reward.py for the source of truth.
+    _EXTRAS_WINDOW = 512
+    completed_extras: dict[str, deque[float]] = {
+        k: deque(maxlen=_EXTRAS_WINDOW) for k in REWARD_BREAKDOWN_KEYS
+    }
+
+    def _record_ep_extras(bd: dict) -> None:
+        """Append per-episode reward-breakdown to completed_extras.
+
+        Zero-fills known keys that didn't appear this episode so every reward
+        component gets a datapoint per episode (needed for meaningful
+        frac_nonzero and mean stats). Unknown keys (e.g. from a newer env) are
+        added on the fly with a bounded deque.
+        """
+        seen: set[str] = set()
+        for k, v in (bd or {}).items():
+            if k not in completed_extras:
+                completed_extras[k] = deque(maxlen=_EXTRAS_WINDOW)
+            completed_extras[k].append(float(v))
+            seen.add(k)
+        for k in REWARD_BREAKDOWN_KEYS:
+            if k not in seen:
+                completed_extras[k].append(0.0)
 
     global_step = 0
     update = 0
@@ -312,8 +339,7 @@ def train(cfg: DreamerConfig) -> None:
                 ep_rewards[i] = 0.0
                 ep_lens[i] = 0
                 info = infos[i] if i < len(infos) else {}
-                for k, v in (info.get("reward_breakdown") or {}).items():
-                    completed_extras.setdefault(k, []).append(float(v))
+                _record_ep_extras(info.get("reward_breakdown") or {})
         # is_first on next step is True if this step ended an episode.
         is_first_flags = np.logical_or(terms, truncs)
         obs_list = next_obs_list
@@ -378,8 +404,7 @@ def train(cfg: DreamerConfig) -> None:
                 ep_rewards[i] = 0.0
                 ep_lens[i] = 0
                 info = infos[i] if i < len(infos) else {}
-                for k, v in (info.get("reward_breakdown") or {}).items():
-                    completed_extras.setdefault(k, []).append(float(v))
+                _record_ep_extras(info.get("reward_breakdown") or {})
         # Reset RSSM state row + one-hot action for env rows that just terminated.
         for i in range(cfg.n_envs):
             if terms[i] or truncs[i]:
@@ -443,8 +468,18 @@ def train(cfg: DreamerConfig) -> None:
                     if isinstance(v, (int, float)):
                         writer.add_scalar(k, v, global_step)
                 for k, vs in completed_extras.items():
-                    if vs:
-                        writer.add_scalar(f"reward/{k}", float(np.mean(vs[-64:])), global_step)
+                    if not vs:
+                        continue
+                    # Last 64 episodes: mean of the per-episode sum of this
+                    # component + fraction of those episodes where it fired.
+                    tail = list(vs)[-64:]
+                    arr = np.asarray(tail, dtype=np.float32)
+                    writer.add_scalar(f"reward/{k}", float(arr.mean()), global_step)
+                    writer.add_scalar(
+                        f"reward/{k}_frac_nonzero",
+                        float((arr != 0.0).mean()),
+                        global_step,
+                    )
                 # Per-section timing dump. Log a summary line every 10 dumps so
                 # the terminal shows what's dominating without spamming.
                 prof.dump_to_writer(writer, global_step, log_lines=(update % (cfg.log_every * 10) == 0))

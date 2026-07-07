@@ -54,6 +54,66 @@ def test_behavior_train_step_runs():
     assert np.isfinite(metrics["loss/critic"])
 
 
+def test_diagnostic_metrics_present():
+    """B3+B7: verify the 2026-07-06 debugging metrics are emitted.
+
+    These caught the entropy-vs-reinforce imbalance and are needed for
+    tuning actor_entropy on future runs. Guard against silent regression.
+    """
+    cfg = DreamerConfig(device="cpu", batch_size=2, seq_len=8, imag_horizon=4)
+    wm = IsaacWorldModel(cfg)
+    beh = IsaacImagBehavior(cfg, wm)
+    rng = np.random.default_rng(4)
+    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 14, rng)
+    post, _, m_wm = wm.train_step(batch)
+    m_beh = beh.train_step(post)
+
+    # B7: KL free-bits saturation frac (WM).
+    assert "loss/kl_free_bits_frac" in m_wm
+    assert 0.0 <= m_wm["loss/kl_free_bits_frac"] <= 1.0
+
+    # B3: actor advantage + reinforce diagnostics (behavior).
+    for key in (
+        "loss/actor_adv_std",
+        "loss/actor_adv_abs_mean",
+        "loss/actor_target_mean",
+        "loss/actor_target_std",
+        "loss/actor_logprob_mean",
+        "loss/actor_reinforce_mag",
+        "loss/actor_entropy_bonus_mag",
+    ):
+        assert key in m_beh, f"missing diagnostic metric: {key}"
+        assert np.isfinite(m_beh[key]), f"{key} not finite: {m_beh[key]}"
+
+    # Sanity: entropy bonus and reinforce should both be non-negative in
+    # magnitude (they're .abs().mean() / coef * entropy).
+    assert m_beh["loss/actor_reinforce_mag"] >= 0.0
+    assert m_beh["loss/actor_entropy_bonus_mag"] >= 0.0
+
+
+def test_reward_breakdown_keys_cover_shaper():
+    """B4: REWARD_BREAKDOWN_KEYS must be a superset of what RewardShaper emits.
+
+    Detects new add(...) calls in reward.py that aren't registered for TB
+    logging (which would silently create per-run key drift and hide new
+    reward signals in the same way `kill`/`damage_dealt` were hidden on
+    the 2026-07-06 run).
+    """
+    import re
+    from pathlib import Path
+    from isaac_rl.reward import REWARD_BREAKDOWN_KEYS
+
+    src = Path(__file__).resolve().parents[2] / "python" / "isaac_rl" / "reward.py"
+    text = src.read_text()
+    emitted = set(re.findall(r'add\("([a-z_]+)"', text))
+    registered = set(REWARD_BREAKDOWN_KEYS)
+    missing = emitted - registered
+    assert not missing, (
+        f"reward.py emits keys not registered in REWARD_BREAKDOWN_KEYS: {missing}. "
+        "Add them to REWARD_BREAKDOWN_KEYS so TB logging picks them up."
+    )
+
+
 def test_world_model_loss_decreases_over_updates():
     """Sanity: on the same batch, WM total loss should trend down over 5 updates."""
     cfg = DreamerConfig(device="cpu", batch_size=2, seq_len=8, imag_horizon=4)

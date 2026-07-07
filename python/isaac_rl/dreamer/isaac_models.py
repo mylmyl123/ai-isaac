@@ -314,6 +314,12 @@ class IsaacWorldModel(nn.Module):
             kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
                 post, prior, cfg.kl_free_bits, cfg.kl_dyn_scale, cfg.kl_rep_scale,
             )
+            # Free-bits diagnostic: fraction of KL-elements above the free
+            # threshold. If this is ~1.0 the clip isn't binding (KL is
+            # unconstrained, so raising kl_free_bits is pointless). If it's
+            # ~0.0 the KL is fully clipped and free_bits should be lowered.
+            with torch.no_grad():
+                kl_free_bits_frac = float((kl_value > cfg.kl_free_bits).float().mean().item())
             _toc("wm_kl", t)
 
             # ---- decoder + reward + cont ------------------------------------
@@ -350,6 +356,7 @@ class IsaacWorldModel(nn.Module):
         metrics["loss/kl"] = float(kl_value.mean().item())
         metrics["loss/kl_dyn"] = float(dyn_loss.mean().item())
         metrics["loss/kl_rep"] = float(rep_loss.mean().item())
+        metrics["loss/kl_free_bits_frac"] = kl_free_bits_frac
         metrics["loss/total"] = float(total.item())
 
         # Expose timings for the trainer to log.
@@ -560,12 +567,24 @@ class IsaacImagBehavior(nn.Module):
         actor_target = log_prob * adv.detach()
         actor_loss = -(weights[:-1] * actor_target).mean()
         # Entropy bonus across imagined trajectory.
-        actor_loss = actor_loss - cfg.actor_entropy * ent.mean()
+        entropy_bonus = cfg.actor_entropy * ent.mean()
+        actor_loss = actor_loss - entropy_bonus
 
+        # ---- diagnostics -------------------------------------------------
+        # Track the two competing loss magnitudes so we can see when entropy
+        # bonus is swamping the reinforce signal (the 2026-07-06 XS pathology).
+        reinforce_mag = (weights[:-1] * actor_target).abs().mean()
         metrics = {
             "loss/actor": float(actor_loss.item()),
             "loss/actor_entropy": float(ent.mean().item()),
             "loss/actor_adv_mean": float(adv.mean().item()),
+            "loss/actor_adv_std": float(adv.std().item()),
+            "loss/actor_adv_abs_mean": float(adv.abs().mean().item()),
+            "loss/actor_target_mean": float(target.mean().item()),
+            "loss/actor_target_std": float(target.std().item()),
+            "loss/actor_logprob_mean": float(log_prob.mean().item()),
+            "loss/actor_reinforce_mag": float(reinforce_mag.item()),
+            "loss/actor_entropy_bonus_mag": float(entropy_bonus.item()),
         }
         return actor_loss, metrics
 

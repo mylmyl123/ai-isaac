@@ -165,6 +165,30 @@ class RewardConfig:
 ROOM_TYPE_BOSS = 5
 
 
+# All reward-breakdown keys the RewardShaper can emit. Kept in sync with the
+# add("...") calls in RewardShaper.__call__ below. Logging (TB) pre-populates
+# per-episode aggregates with zeros for every key so "never fired" reward
+# components appear as flat-zero traces instead of being invisible (which
+# hid the exploration crisis on the 2026-07-06 run: kill/damage_dealt/
+# new_room/room_clear had literally never fired in 711 episodes but there
+# was no TB scalar to see it).
+REWARD_BREAKDOWN_KEYS: tuple[str, ...] = (
+    # per-tick / dense
+    "step", "hp_delta_red", "hp_delta_other", "full_hp_tick",
+    "idle_penalty", "stationary_penalty", "at_kite_dist", "aim_at_enemy",
+    "shoot_when_enemy", "seek_door", "door_pbrs", "pbrs_approach",
+    "clear_idle_extra",
+    # events
+    "damage_dealt", "kill",
+    "pickup_heart", "pickup_coin", "pickup_key", "pickup_bomb", "pickup_collectible",
+    "new_room", "backtrack", "boss_room_first_entry",
+    "room_clear", "room_clear_speed", "room_clear_no_damage",
+    "floor_cleared", "beat_mom",
+    # terminals
+    "death", "idle_death", "crash_penalty",
+)
+
+
 @dataclass
 class RewardState:
     damage_reward_this_room: float = 0.0

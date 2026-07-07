@@ -270,6 +270,13 @@ class RSSM(nn.Module):
             return {"mean": mean, "std": std}
 
     def kl_loss(self, post, prior, free, dyn_scale, rep_scale):
+        # NOTE: dyn_loss and rep_loss return NUMERICALLY IDENTICAL values.
+        # KL(A || B) == KL(sg(A) || B) at forward-time — stop_gradient only
+        # affects backward flow. So `loss/kl_dyn` and `loss/kl_rep` scalars
+        # will always match (both = the same KL). The DIFFERENCE is which
+        # side receives gradient: rep_loss updates the posterior (encoder),
+        # dyn_loss updates the prior (RSSM dynamics). This is intentional
+        # (DreamerV3 KL-balancing). Do not "fix" the identical logged values.
         kld = torchd.kl.kl_divergence
         dist = lambda x: self.get_dist(x)
         sg = lambda x: {k: v.detach() for k, v in x.items()}
