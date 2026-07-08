@@ -132,7 +132,14 @@ prefill_steps: 2500
 # GPU is at 93%; env is fast (1-8ms). Doubling gradient updates per env-step
 # nets ~2x sample efficiency at ~30% throughput cost. Expected: convergence
 # in ~half the env-steps (~1M vs ~2M), wall-clock ~4-5 days vs 6-8.
-train_ratio: 8                  # was 4
+# 2026-07-07 REV: reverted 8 -> 4. The 24h/110k run showed SPS crashed to
+# 1.24 (want >= 2). With the static_scan rewrite (commit e28bd3f) WM step
+# is ~20% faster; combined with halved updates/env-step, env progress
+# roughly doubles (est ~2.5 SPS). Updates/hour stays comparable because
+# the individual update is faster. Sample-efficiency loss vs 8 is offset
+# by 2x more diverse rollout data — net wins for exploration since
+# kill/damage_dealt/new_room haven't fired once in the previous run.
+train_ratio: 4                  # was 8
 replay_capacity: 500_000        # 500K * ~7KB per obs ~= 3.5 GB RAM
 
 # ---- reward (same as fixed stage1_single_room.yaml v2) --------------
