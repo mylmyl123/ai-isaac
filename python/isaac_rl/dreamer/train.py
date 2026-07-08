@@ -242,6 +242,16 @@ def train(cfg: DreamerConfig) -> None:
     completed_extras: dict[str, deque[float]] = {
         k: deque(maxlen=_EXTRAS_WINDOW) for k in REWARD_BREAKDOWN_KEYS
     }
+    # Track episode-end reason (shaper_terminated / truncated / mod_socket_error).
+    # If mod_socket_error rate is high, learning is broken: the mod's terminal
+    # obs never reaches Python's shaper, so the agent sees only -1 crash
+    # penalty with no HP tracking or in-game events. This is what happened
+    # on the 2026-07-07 run (100% mod_socket_error, 0 learning signal).
+    _ENDS = ("shaper_terminated", "truncated", "mod_socket_error", "unknown")
+    completed_end_reasons: dict[str, deque[int]] = {
+        r: deque(maxlen=_EXTRAS_WINDOW) for r in _ENDS
+    }
+    _crash_warned = False
 
     def _record_ep_extras(bd: dict) -> None:
         """Append per-episode reward-breakdown to completed_extras.
@@ -260,6 +270,14 @@ def train(cfg: DreamerConfig) -> None:
         for k in REWARD_BREAKDOWN_KEYS:
             if k not in seen:
                 completed_extras[k].append(0.0)
+
+    def _record_ep_end_reason(info: dict) -> None:
+        """One-hot append the ep_end_reason from `info` to each reason's deque."""
+        reason = info.get("ep_end_reason", "unknown") if isinstance(info, dict) else "unknown"
+        if reason not in completed_end_reasons:
+            reason = "unknown"
+        for r in _ENDS:
+            completed_end_reasons[r].append(1 if r == reason else 0)
 
     global_step = 0
     update = 0
@@ -340,6 +358,7 @@ def train(cfg: DreamerConfig) -> None:
                 ep_lens[i] = 0
                 info = infos[i] if i < len(infos) else {}
                 _record_ep_extras(info.get("reward_breakdown") or {})
+                _record_ep_end_reason(info)
         # is_first on next step is True if this step ended an episode.
         is_first_flags = np.logical_or(terms, truncs)
         obs_list = next_obs_list
@@ -405,6 +424,7 @@ def train(cfg: DreamerConfig) -> None:
                 ep_lens[i] = 0
                 info = infos[i] if i < len(infos) else {}
                 _record_ep_extras(info.get("reward_breakdown") or {})
+                _record_ep_end_reason(info)
         # Reset RSSM state row + one-hot action for env rows that just terminated.
         for i in range(cfg.n_envs):
             if terms[i] or truncs[i]:
@@ -480,6 +500,30 @@ def train(cfg: DreamerConfig) -> None:
                         float((arr != 0.0).mean()),
                         global_step,
                     )
+                # Episode-end reason distribution. `mod_socket_error` dominating
+                # (>50%) means the mod's terminal-obs send is failing every
+                # episode — usually because the Isaac window is backgrounded
+                # and Windows throttles it. Warn once when this happens.
+                for r in _ENDS:
+                    vs2 = completed_end_reasons[r]
+                    if not vs2:
+                        continue
+                    tail = list(vs2)[-64:]
+                    frac = float(np.mean(tail)) if tail else 0.0
+                    writer.add_scalar(f"rollout/ep_end_{r}_frac", frac, global_step)
+                mse_tail = list(completed_end_reasons["mod_socket_error"])[-64:]
+                if len(mse_tail) >= 32 and not _crash_warned:
+                    mse_frac = float(np.mean(mse_tail))
+                    if mse_frac > 0.5:
+                        log.warning(
+                            "HIGH SOCKET-ERROR RATE: %.0f%% of the last %d episodes ended via "
+                            "mod socket error, not the shaper. Check the Isaac window is "
+                            "focused + visible (backgrounded windows are throttled and drop "
+                            "the terminal obs, so the agent sees ONLY -1 crash penalty per "
+                            "episode with no HP or in-game reward signal).",
+                            100 * mse_frac, len(mse_tail),
+                        )
+                        _crash_warned = True
                 # Per-section timing dump. Log a summary line every 10 dumps so
                 # the terminal shows what's dominating without spamming.
                 prof.dump_to_writer(writer, global_step, log_lines=(update % (cfg.log_every * 10) == 0))

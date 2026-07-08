@@ -99,6 +99,45 @@ function Net:send(payload)
     self.sock:send(frame)
 end
 
+-- Send with a caller-specified timeout. Used for the terminal-obs send on
+-- player death: the default 50ms timeout is too short when Isaac is
+-- backgrounded and Windows throttles the process to ~3Hz (game window
+-- unfocused). Under throttling the socket write can take hundreds of ms to
+-- complete; if it doesn't, the mod drops the terminal frame and Python's
+-- recv_frame() eventually sees ConnectionError, applies a bare -1 crash
+-- penalty, and never gets the RewardShaper's death event. Result:
+-- 100% of episodes end with no learning signal (verified on the
+-- 2026-07-07 9.5h run at 100% crash rate).
+--
+-- Restores the previous timeout before returning so the regular exchange()
+-- loop keeps its short 50ms responsiveness on the next call.
+function Net:send_blocking(payload, timeout_s)
+    if not self.sock then self:_reconnect() end
+    local prev = self.timeout_s
+    self.sock:settimeout(timeout_s)
+    local frame = pack_u32_be(#payload) .. payload
+    local sent, err, last = self.sock:send(frame)
+    -- Always restore the short timeout for subsequent operations.
+    self.sock:settimeout(prev)
+    if sent then return true end
+    -- Same partial-write / timeout handling as Net:send. The main
+    -- difference is that we return a boolean so the caller (death handler)
+    -- can log a warning when the terminal obs was dropped.
+    if last and last > 0 and last < #frame then
+        Isaac.DebugString("[isaac-rl-bridge] send_blocking partial send (" .. tostring(last) .. "/" .. tostring(#frame) .. ") — closing socket")
+        if self.sock then
+            pcall(function() self.sock:close() end)
+            self.sock = nil
+        end
+        return false
+    end
+    if err == "timeout" then
+        Isaac.DebugString("[isaac-rl-bridge] send_blocking TIMED OUT after " .. tostring(timeout_s) .. "s — terminal frame dropped (window backgrounded? Isaac throttled?)")
+        return false
+    end
+    return false
+end
+
 -- Receive a length-prefixed frame. Returns the payload string or nil on timeout.
 function Net:recv()
     if not self.sock then self:_reconnect() end

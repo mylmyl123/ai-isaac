@@ -81,6 +81,10 @@ class SyncVecEnv:
                 # in from the terminal step so completed_extras logging works.
                 if isinstance(terminal_info, dict) and "reward_breakdown" in terminal_info:
                     info["reward_breakdown"] = terminal_info["reward_breakdown"]
+                # Same for ep_end_reason (added 2026-07-07 to distinguish
+                # real crashes from proper shaper-terminated episodes).
+                if isinstance(terminal_info, dict) and "ep_end_reason" in terminal_info:
+                    info["ep_end_reason"] = terminal_info["ep_end_reason"]
             else:
                 terminal_obs.append(None)
             obs.append(o)

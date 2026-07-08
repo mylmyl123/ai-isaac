@@ -408,8 +408,19 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
                     player = { is_dead = true, hp_red = 0 },
                     events = { { kind = "death" } },
                 }
+                -- CRITICAL: use send_blocking with a long (2s) timeout, not
+                -- the regular 50ms conn:send. When the Isaac window is
+                -- backgrounded, Windows throttles the process to a few Hz
+                -- and the socket write cannot complete in 50ms. The default
+                -- send() drops the frame on timeout, Python's recv_frame
+                -- eventually sees a ConnectionError, applies -1 crash
+                -- penalty and skips the RewardShaper entirely. The
+                -- 2026-07-07 9.5h run had 100% of episodes hit that path
+                -- — no HP tracking, no death event, no in-game rewards.
+                -- 2s is long enough to survive heavy throttling; it only
+                -- adds latency on the terminal tick which is discarded anyway.
                 local ok_send = pcall(function()
-                    conn:send(json.encode(minimal))
+                    return conn:send_blocking(json.encode(minimal), 2.0)
                 end)
                 if ok_send then
                     -- Consume Python's reset command so the socket buffer

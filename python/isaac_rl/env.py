@@ -276,10 +276,15 @@ class SocketIsaacEnv(gym.Env):
             send_frame(self._client, encode_action(a))
             raw = recv_frame(self._client)
         except (ConnectionError, OSError) as e:
+            # Distinguish which syscall failed to help diagnose whether it's
+            # a mod-side send timeout (terminal-obs dropped, Isaac was fine
+            # and continued running) vs. a game-process crash (Isaac died).
+            # `_try_accept_after_close` returning True inside
+            # `_handle_crash_and_reaccept` means Isaac was alive and just
+            # cycled its socket — that's the mod's in-process restart path
+            # or a dropped terminal-obs. If the reconnect fails, it's a real
+            # crash.
             log.warning("port %d: Isaac died mid-step (%s) — respawning", self.port, e)
-            # Kick off respawn and wait for the new Isaac to reconnect so the
-            # NEXT reset() (which the trainer will call because terminated=True)
-            # can just read the handshake+obs immediately.
             self._handle_crash_and_reaccept(read_first_obs=False)
             # Terminal step with penalty. Rewards from the shaper are optional
             # here; we hardcode a fixed penalty so training sees a clear signal
@@ -295,6 +300,11 @@ class SocketIsaacEnv(gym.Env):
                 "steps": self._steps,
                 "reward_breakdown": {"crash_penalty": -1.0},
                 "crashed": True,
+                # New: explicit episode-end reason. `mod_socket_error` covers
+                # BOTH "real Isaac crash" and "mod's terminal-obs send timed
+                # out" (the 2026-07-07 bug). If the crash rate here is high,
+                # check the Isaac window is focused/visible.
+                "ep_end_reason": "mod_socket_error",
             }
             return obs, -1.0, True, False, info
 
@@ -310,6 +320,14 @@ class SocketIsaacEnv(gym.Env):
             "steps": self._steps,
             "reward_breakdown": breakdown,
         }
+        # Tag the episode-end reason so trainers can log crash-vs-death rates.
+        # This is what tells us at a glance whether the socket layer is
+        # working: high `mod_socket_error` frac = window backgrounded /
+        # throttled / mod crashed. High `shaper_terminated` frac = normal.
+        if terminated:
+            info["ep_end_reason"] = "shaper_terminated"
+        elif truncated:
+            info["ep_end_reason"] = "truncated"
         return obs, reward, terminated, truncated, info
 
     def _try_accept_after_close(self, wait_s: float = 3.0) -> dict[str, Any] | None:
