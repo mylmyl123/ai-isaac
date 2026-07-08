@@ -102,6 +102,14 @@ class SocketIsaacEnv(gym.Env):
         self._last_action = np.zeros(len(ACTION_FACTORS), dtype=np.int64)
         self._last_seed: int | None = None
         self._steps = 0
+        # Per-episode reward-breakdown accumulator. Reset in reset(); summed
+        # each step from the shaper's per-step breakdown. Passed back to the
+        # trainer on the terminal step as `reward_breakdown_episode` so we
+        # can log the TRUE episode-total contribution of each reward
+        # component. Prior to 2026-07-08 we logged only the terminal-tick
+        # breakdown, which hid every non-terminal reward event (kill,
+        # damage_dealt, new_room, room_clear, pickup_*, etc.) from TB.
+        self._episode_breakdown: dict[str, float] = {}
         # Frame stacking: rolling buffer of past player states for the
         # "player_history" obs field. Shape [HISTORY_FRAMES, HISTORY_FEATS]:
         # each row is [nx, ny, vx, vy] normalised. Newest frame at index -1.
@@ -252,6 +260,7 @@ class SocketIsaacEnv(gym.Env):
                     raw = self._handle_crash_and_reaccept()
 
         self._steps = 0
+        self._episode_breakdown = {}
         self._last_action[:] = 0
         # B4: Sample new latent z for this episode.
         if self._z_dim > 0:
@@ -284,7 +293,10 @@ class SocketIsaacEnv(gym.Env):
             # cycled its socket — that's the mod's in-process restart path
             # or a dropped terminal-obs. If the reconnect fails, it's a real
             # crash.
-            log.warning("port %d: Isaac died mid-step (%s) — respawning", self.port, e)
+            log.warning(
+                "port %d: Isaac died mid-step (%s: %s) — respawning",
+                self.port, type(e).__name__, e,
+            )
             self._handle_crash_and_reaccept(read_first_obs=False)
             # Terminal step with penalty. Rewards from the shaper are optional
             # here; we hardcode a fixed penalty so training sees a clear signal
@@ -306,6 +318,13 @@ class SocketIsaacEnv(gym.Env):
                 # check the Isaac window is focused/visible.
                 "ep_end_reason": "mod_socket_error",
             }
+            # Fold crash_penalty into the per-episode running sum, then emit
+            # the whole episode-total breakdown so trainers can log per-key
+            # per-episode contributions (not just this terminal tick).
+            self._episode_breakdown["crash_penalty"] = (
+                self._episode_breakdown.get("crash_penalty", 0.0) - 1.0
+            )
+            info["reward_breakdown_episode"] = dict(self._episode_breakdown)
             return obs, -1.0, True, False, info
 
         self._last_action = a
@@ -314,6 +333,12 @@ class SocketIsaacEnv(gym.Env):
         obs = self._build_obs(raw)
 
         reward, terminated, breakdown = self.reward_shaper(raw, action=a)
+        # Accumulate the per-step breakdown into a per-episode running sum.
+        # This is the source of truth for TB reward/{k} logging — the shaper
+        # emits breakdown PER TICK, so summing over the episode gives the
+        # actual total contribution of each key.
+        for k, v in breakdown.items():
+            self._episode_breakdown[k] = self._episode_breakdown.get(k, 0.0) + float(v)
         truncated = self._steps >= self.max_steps
         info: dict[str, Any] = {
             "raw": raw,
@@ -326,8 +351,10 @@ class SocketIsaacEnv(gym.Env):
         # throttled / mod crashed. High `shaper_terminated` frac = normal.
         if terminated:
             info["ep_end_reason"] = "shaper_terminated"
+            info["reward_breakdown_episode"] = dict(self._episode_breakdown)
         elif truncated:
             info["ep_end_reason"] = "truncated"
+            info["reward_breakdown_episode"] = dict(self._episode_breakdown)
         return obs, reward, terminated, truncated, info
 
     def _try_accept_after_close(self, wait_s: float = 3.0) -> dict[str, Any] | None:

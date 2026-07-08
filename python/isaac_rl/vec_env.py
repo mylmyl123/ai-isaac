@@ -81,6 +81,12 @@ class SyncVecEnv:
                 # in from the terminal step so completed_extras logging works.
                 if isinstance(terminal_info, dict) and "reward_breakdown" in terminal_info:
                     info["reward_breakdown"] = terminal_info["reward_breakdown"]
+                # Same for the episode-total breakdown (2026-07-08). This is
+                # what trainers should PREFER for reward/{k} logging — the
+                # terminal-step breakdown alone hid all non-terminal reward
+                # events (kill, damage_dealt, new_room, room_clear, ...).
+                if isinstance(terminal_info, dict) and "reward_breakdown_episode" in terminal_info:
+                    info["reward_breakdown_episode"] = terminal_info["reward_breakdown_episode"]
                 # Same for ep_end_reason (added 2026-07-07 to distinguish
                 # real crashes from proper shaper-terminated episodes).
                 if isinstance(terminal_info, dict) and "ep_end_reason" in terminal_info:

@@ -357,7 +357,14 @@ def train(cfg: DreamerConfig) -> None:
                 ep_rewards[i] = 0.0
                 ep_lens[i] = 0
                 info = infos[i] if i < len(infos) else {}
-                _record_ep_extras(info.get("reward_breakdown") or {})
+                # Prefer the per-episode sum breakdown over the terminal-tick
+                # one. The terminal-tick breakdown is what shipped through
+                # 2026-07-07; the episode-total breakdown was added 2026-07-08
+                # after we discovered the terminal-only view hid all
+                # non-terminal reward events (kill, damage_dealt, new_room,
+                # room_clear, pickup_*) from TB.
+                bd = info.get("reward_breakdown_episode") or info.get("reward_breakdown") or {}
+                _record_ep_extras(bd)
                 _record_ep_end_reason(info)
         # is_first on next step is True if this step ended an episode.
         is_first_flags = np.logical_or(terms, truncs)
@@ -423,7 +430,8 @@ def train(cfg: DreamerConfig) -> None:
                 ep_rewards[i] = 0.0
                 ep_lens[i] = 0
                 info = infos[i] if i < len(infos) else {}
-                _record_ep_extras(info.get("reward_breakdown") or {})
+                bd = info.get("reward_breakdown_episode") or info.get("reward_breakdown") or {}
+                _record_ep_extras(bd)
                 _record_ep_end_reason(info)
         # Reset RSSM state row + one-hot action for env rows that just terminated.
         for i in range(cfg.n_envs):
