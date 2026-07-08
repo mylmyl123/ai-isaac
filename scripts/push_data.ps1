@@ -84,7 +84,16 @@ if (-not $tbEvents) {
     $tbJsonRel = "tb_dreamer_${stageTag}_${ts}.json"
     Write-Host "exporting TB scalars -> $tbJsonRel" -ForegroundColor Green
     python export_tb_summary.py $RunDir --out $tbJsonRel
-    git add $tbJsonRel
+    # `git add` prints an ignore-hint to stderr for some paths; under
+    # $ErrorActionPreference = "Stop" PowerShell can bail on the *next* pipe
+    # step. Swallow non-zero exit + hints explicitly. Sanity check the file
+    # actually got staged before continuing.
+    cmd /c "git add `"$tbJsonRel`" 2>&1" | Out-Null
+    $staged = git diff --cached --name-only
+    if ($staged -notcontains $tbJsonRel) {
+        Write-Warning "git add did not stage $tbJsonRel — retrying with -f"
+        cmd /c "git add -f `"$tbJsonRel`" 2>&1" | Out-Null
+    }
 }
 
 # ---- 2. Copy latest checkpoint --------------------------------------------
@@ -104,7 +113,9 @@ if (-not $NoCheckpoint) {
         if ($sizeMB -gt 100) {
             Write-Warning "Checkpoint is ${sizeMB} MB — GitHub rejects files >100MB. Consider -NoCheckpoint and use a bucket / scp / Google Drive."
         }
-        git add $ckptDstRel
+        # `.pt` is git-ignored in this repo; use -f to force-add so the
+        # ignore hint doesn't abort the outer script under strict mode.
+        cmd /c "git add -f `"$ckptDstRel`" 2>&1" | Out-Null
     }
 } else {
     Write-Host "skipping checkpoint (-NoCheckpoint)"
