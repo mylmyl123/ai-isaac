@@ -792,7 +792,14 @@ def args_type(default):
     return lambda x: parse_string(x) if isinstance(x, str) else parse_object(x)
 
 
-def static_scan(fn, inputs, start):
+def _static_scan_legacy(fn, inputs, start):
+    """Original O(T^2) implementation. Kept for parity testing only.
+
+    Every timestep does `torch.cat([outputs[k], last[k].unsqueeze(0)])` which
+    reallocates the whole growing tensor per step per key. On seq_len=32 with
+    ~10 stat keys this dominates wm_rssm_observe (~150ms / update). Replaced
+    by `static_scan` below which uses per-step lists + a single `torch.stack`.
+    """
     last = start
     indices = range(inputs[0].shape[0])
     flag = True
@@ -837,6 +844,79 @@ def static_scan(fn, inputs, start):
     if type(last) == type({}):
         outputs = [outputs]
     return outputs
+
+
+def static_scan(fn, inputs, start):
+    """Fast preallocated rewrite of the vendor static_scan.
+
+    Semantically identical to `_static_scan_legacy`: same output shape, same
+    autograd graph, same dtype. Difference: we collect per-step outputs into
+    Python lists and call `torch.stack(list, dim=0)` ONCE at the end, instead
+    of repeatedly concatenating a growing tensor at every timestep.
+
+    Impact: on the RSSM observe path (seq_len=32, ~10 stat tensors x 2 for
+    post+prior) this removes ~600 sequential cat kernels + their per-step
+    allocations per WM update. wm_rssm_observe was ~150ms/update on the
+    2026-07-06 XS run; expected to drop ~2x with this change.
+
+    Return convention (unchanged from legacy):
+      - If the fn's return is a dict, we return [outputs] (a length-1 list of
+        dict[str, [T, *v.shape]]). Callers of `imagine_with_action` unwrap
+        with `prior = static_scan(...)[0]`.
+      - If the fn's return is a tuple/list, we return a list matching that
+        structure, with tensors stacked on dim 0.
+
+    NOTE: buffers are allocated **lazily** after the first fn call, because
+    `start` may contain None placeholders (e.g. `(None, None)` in RSSM's
+    observe when no state is passed). The output structure is determined
+    by fn's return, not by start.
+    """
+    T = inputs[0].shape[0]
+    if T == 0:
+        # Legacy raised on empty input by leaving `outputs` unbound.
+        raise ValueError("static_scan called with T=0")
+
+    last = start
+    dict_mode = None
+    buffers = None
+
+    for t in range(T):
+        last = fn(last, *(_input[t] for _input in inputs))
+        if buffers is None:
+            # First iteration: allocate buffers based on fn's ACTUAL return
+            # structure (not `start`, which may be None-placeholder).
+            dict_mode = type(last) == type({})
+            if dict_mode:
+                buffers = {k: [] for k in last.keys()}
+            else:
+                buffers = []
+                for _last in last:
+                    if type(_last) == type({}):
+                        buffers.append({k: [] for k in _last.keys()})
+                    else:
+                        buffers.append([])
+        if dict_mode:
+            for k, v in last.items():
+                buffers[k].append(v)
+        else:
+            for j, _last in enumerate(last):
+                if type(_last) == type({}):
+                    for k, v in _last.items():
+                        buffers[j][k].append(v)
+                else:
+                    buffers[j].append(_last)
+
+    if dict_mode:
+        outputs = {k: torch.stack(vs, dim=0) for k, vs in buffers.items()}
+        return [outputs]
+    else:
+        result = []
+        for buf in buffers:
+            if type(buf) == type({}):
+                result.append({k: torch.stack(vs, dim=0) for k, vs in buf.items()})
+            else:
+                result.append(torch.stack(buf, dim=0))
+        return result
 
 
 class Every:
