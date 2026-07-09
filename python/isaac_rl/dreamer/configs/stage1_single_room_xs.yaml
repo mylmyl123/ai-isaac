@@ -106,8 +106,18 @@ critic_grad_clip: 100.0
 #   (log_prob * adv ~= 4 * 0.003 = 0.012). Drop to 3e-3 (still 10x paper) so
 #   the two are comparable and actor can actually move off uniform.
 actor_entropy: 3.0e-3
-imag_horizon: 15
-gamma: 0.997
+# 2026-07-09 v2: bumped from 15 -> 20 to give the critic a longer window
+# for evaluating multi-step consequences of actions. Combined with the
+# gamma bump below, effective planning horizon roughly doubles.
+imag_horizon: 20
+# 2026-07-09 v2: bumped from 0.997 -> 0.999 for longer effective horizon.
+# At 0.997: rewards 100 steps away discounted to 0.74, 1000 steps to 0.05.
+# At 0.999: rewards 100 steps at 0.905, 1000 steps at 0.37.
+# This is essential for the agent to value chains that take 60+ seconds
+# (shop-then-purchase, dungeon exploration, boss fight preparation).
+# Higher gamma means higher-variance value estimates — offset by the
+# slow_target critic and reward EMA which we already have.
+gamma: 0.999
 gae_lambda: 0.95
 unimix_ratio: 0.01
 
@@ -160,6 +170,13 @@ replay_capacity: 500_000        # 500K * ~7KB per obs ~= 3.5 GB RAM
 # only override we set here is the fixes to what the audit called out.
 reward:
   r_step: 0.0
+  # 2026-07-09 v2: chain rewards removed (r_chain_*, chain_*_window_ticks).
+  # Replaced by end-of-episode aggregate outcome bonuses + RND intrinsic
+  # curiosity. See docs/audit-2026-07-09.md and reward.py header comments.
+  # r_use_bomb: uses RewardConfig default of 0.02 (was 0.5) — small token
+  # so bombs aren't spammed; real signal comes from downstream outcomes.
+  # r_spend_coin: uses RewardConfig default of 0.0 — removed to avoid
+  # slot-machine addiction; coin-to-collectible flow already rewarded.
   r_room_clear: 5.0
   r_new_room: 5.0
   r_backtrack: -0.3

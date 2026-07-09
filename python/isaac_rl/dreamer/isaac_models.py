@@ -385,6 +385,30 @@ class IsaacImagBehavior(nn.Module):
 
         feat_size = cfg.rssm_stoch * cfg.rssm_discrete + cfg.rssm_deter
 
+        # ---- RND intrinsic curiosity (2026-07-09 v2) --------------------
+        # Optional — gated by cfg.rnd_enabled. Provides intrinsic reward for
+        # visiting novel states, enabling emergent multi-step behavior
+        # discovery without hand-scripting chains. See
+        # dreamer/intrinsic.py for full rationale.
+        if getattr(cfg, "rnd_enabled", False):
+            from .intrinsic import RND
+            self.rnd = RND(
+                feat_dim=feat_size,
+                embed_dim=getattr(cfg, "rnd_embed_dim", 128),
+                hidden=getattr(cfg, "rnd_hidden", 256),
+                target_hidden=getattr(cfg, "rnd_target_hidden", 128),
+            ).to(device)
+            # Separate optimizer for the predictor. Target is frozen.
+            self._rnd_opt = torch.optim.Adam(
+                self.rnd.predictor.parameters(),
+                lr=getattr(cfg, "rnd_lr", 1e-4),
+            )
+            self._rnd_scale = float(getattr(cfg, "rnd_intrinsic_scale", 0.1))
+        else:
+            self.rnd = None
+            self._rnd_opt = None
+            self._rnd_scale = 0.0
+
         # ---- Actor -----------------------------------------------------
         from ..spaces import ACTION_FACTORS
         self.actor = MultiDiscreteActionHead(
@@ -507,6 +531,15 @@ class IsaacImagBehavior(nn.Module):
 
         # Reward and continue prediction on the imagined feats.
         reward = wm.reward_head(feats).mode()                # [H+1, B, 1]
+        # RND intrinsic reward (2026-07-09 v2): add curiosity bonus to
+        # imagined reward so the critic learns Q-values that include
+        # exploration incentive, and the actor is trained to seek novel
+        # states through imagination. Detached feats so RND gradient
+        # doesn't flow back into the WM.
+        if self.rnd is not None and self._rnd_scale > 0.0:
+            with torch.no_grad():
+                intrinsic = self.rnd.intrinsic_reward(feats.detach())  # [H+1, B]
+            reward = reward + self._rnd_scale * intrinsic.unsqueeze(-1)
         cont = wm.cont_head(feats).mean                       # [H+1, B, 1]
         # Cont dist is Bernoulli through Independent(..., 1); its .mean is shape
         # [..., 1]. Reward's twohot .mode() also keeps the last dim.
@@ -662,4 +695,20 @@ class IsaacImagBehavior(nn.Module):
         metrics = {}
         metrics.update(actor_metrics)
         metrics.update(critic_metrics)
+
+        # ---- RND predictor training (2026-07-09 v2) -------------------
+        # Train the RND predictor on the same imagined features that fed
+        # the actor/critic. Using imagined feats (rather than replay feats)
+        # so the predictor sees the same state distribution that the
+        # critic evaluates — keeps intrinsic-reward magnitude calibrated
+        # to what the agent actually plans over. Detached feats so RND
+        # doesn't affect WM gradients.
+        if self.rnd is not None:
+            with _amp_ctx:
+                rnd_loss, rnd_metrics = self.rnd.update(feats.detach())
+            self._rnd_opt.zero_grad(set_to_none=True)
+            rnd_loss.backward()
+            self._rnd_opt.step()
+            metrics.update(rnd_metrics)
+
         return metrics

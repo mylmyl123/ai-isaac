@@ -78,9 +78,20 @@ class RewardConfig:
     # in the 2026-07-08 run, 0 out of 322 episodes ever used a bomb or key.
     # Bomb usage is especially important — it opens secret rooms and destroys
     # obstacle walls that gate progression.
-    r_use_bomb: float = 0.5       # bomb count decreased (placed a bomb)
-    r_use_key: float = 0.3        # key count decreased (opened door/chest)
-    r_spend_coin: float = 0.1     # coin count decreased in a shop (purchase)
+    # ---- NEW (2026-07-09): Consumable USE (bomb/key/coin decreases) -----
+    # 2026-07-09 v2: rewards DELIBERATELY SMALL. Rewarding the ACT of using
+    # resources encourages spam (bomb every tile, spend coins at slot
+    # machines). The real value is the outcome:
+    #   * bomb use → opens secret room (+r_secret_first_entry) or kills enemy
+    #     (+r_kill via bomb damage) or opens chest (+r_pickup_collectible)
+    #   * key use  → opens door (+r_new_room) or chest (+r_pickup_collectible)
+    #   * coin use → shop yields collectible (+r_pickup_collectible)
+    # Keep these as near-zero tokens to acknowledge the action, downstream
+    # outcomes drive actual behavior. r_spend_coin defaults to 0.0 to avoid
+    # slot-machine addiction.
+    r_use_bomb: float = 0.02
+    r_use_key: float = 0.05
+    r_spend_coin: float = 0.0
 
     # ---- NEW (2026-07-09): Room-type first-entry rewards ----------------
     # Isaac has ~20 room types. Currently only ROOM_TYPE_BOSS is rewarded.
@@ -112,22 +123,23 @@ class RewardConfig:
     r_use_item: float = 2.0
 
     # ---- NEW (2026-07-09): Boss kill bonus ------------------------------
-    # damage_to_npc events already carry is_boss=true when applicable, we
-    # just weren't using the flag. Boss kills are 100x more valuable than
-    # regular enemy kills — they gate floor progression.
+    # damage_to_npc events already carry is_boss=true when applicable.
     r_boss_kill: float = 20.0
 
-    # ---- NEW (2026-07-09): Chain rewards --------------------------------
-    # Multi-step behavior bonuses. Fire when a sequence of actions completes
-    # a mini-plan. Each is strictly larger than the sum of its component
-    # rewards so the agent prefers intentional chains over accidental
-    # co-occurrence. See __call__ for the state machine.
-    r_chain_bomb_reveals_secret: float = 8.0    # placed a bomb, then a secret room appeared
-                                                 # (bombed a wall) within N ticks
-    r_chain_shop_purchase: float = 3.0          # entered shop + coins spent + collectible picked up
-    r_chain_active_item_ready_and_used: float = 3.0  # held a full-charge active item + used it
-    chain_secret_window_ticks: int = 200        # 200 ticks (~13s) between bomb and secret room
-    chain_shop_window_ticks: int = 900          # 900 ticks (~60s) between shop entry and purchase
+    # ---- NEW (2026-07-09 v2): End-of-episode aggregate outcome bonuses ---
+    # Applied on the tick the episode terminates. Reward WHAT the agent
+    # achieved, not HOW it got there. Contrast with Phase D chain rewards
+    # (removed 2026-07-09 v2) which prescribed specific sequences — those
+    # were user-flagged as hard-coded / non-emergent. Aggregates give the
+    # agent full latitude in strategy while still shaping toward "complex
+    # play" (visit many room types, reach later floors, preserve HP,
+    # collect items efficiently). Emergent chain discovery is delegated to
+    # RND intrinsic curiosity (see dreamer/intrinsic.py) + longer imag_horizon
+    # + higher gamma.
+    r_diversity_end_bonus: float = 0.5       # × log(1 + room_types_seen)
+    r_depth_end_bonus: float = 3.0           # × max_floor_reached
+    r_survival_end_bonus: float = 2.0        # × (final_hp / max_hp), 0 if dead
+    r_efficiency_end_bonus: float = 1.0      # × (items_collected / max(1, rooms_visited))
 
     # ---- Per-step cost -------------------------------------------------
     r_step: float = -0.003                # was -0.001 — 3x to discourage wandering
@@ -280,8 +292,12 @@ REWARD_BREAKDOWN_KEYS: tuple[str, ...] = (
     "angel_first_entry", "chest_first_entry", "dice_first_entry",
     "room_clear", "room_clear_speed", "room_clear_no_damage",
     "floor_cleared", "beat_mom",
-    # chain rewards (2026-07-09)
+    # chain rewards (2026-07-09 v1) — REMOVED in v2 but kept in this tuple
+    # for backward-compat with old TB tag ordering. Never emitted in v2.
     "chain_bomb_reveals_secret", "chain_shop_purchase", "chain_active_item_ready_and_used",
+    # end-of-episode aggregate outcome bonuses (2026-07-09 v2)
+    "diversity_end_bonus", "depth_end_bonus",
+    "survival_end_bonus", "efficiency_end_bonus",
     # terminals
     "death", "idle_death", "crash_penalty",
 )
@@ -566,27 +582,24 @@ class RewardShaper:
                 add("pickup_coin", cfg.r_pickup_coin * dc)
                 st.beh_coins_earned += dc
             elif dc < 0:
-                # Coin count decreased. If we're in a shop, treat as purchase
-                # and fire the chain reward. Otherwise it's likely a slot
-                # machine or blood bank — still counts as "engaging with
-                # game mechanics".
+                # Coin count decreased. Small token reward via r_spend_coin
+                # (default 0.0 as of 2026-07-09 v2 — removed to avoid
+                # rewarding slot-machine spam; the real payoff is the
+                # collectible pickup that follows a shop purchase).
                 spent = -dc
                 st.beh_coins_spent += spent
-                # Base spend reward (small): the agent used coins for SOMETHING.
-                add("spend_coin", cfg.r_spend_coin * spent)
-                # Chain-reward state: mark purchase pending if in shop.
-                if st.current_room_type == ROOM_TYPE_SHOP:
-                    st.shop_purchase_pending = True
+                if cfg.r_spend_coin != 0.0:
+                    add("spend_coin", cfg.r_spend_coin * spent)
         if st.prev_bombs is not None:
             db = cur_bombs - st.prev_bombs
             if db > 0:
                 add("pickup_bomb", cfg.r_pickup_bomb * db)
             elif db < 0:
-                # Bomb count decreased — player placed a bomb. Reward the ACT
-                # of using this scarce resource, and start the secret-room
-                # chain state machine.
+                # Bomb count decreased — player placed a bomb. Small token
+                # reward: real payoff is the downstream outcome (opened
+                # secret room -> secret_first_entry, killed enemy -> kill,
+                # opened chest -> pickup_collectible).
                 add("use_bomb", cfg.r_use_bomb * (-db))
-                st.bomb_placed_tick = st.tick
                 st.beh_bombs_used += (-db)
         if st.prev_keys is not None:
             dk = cur_keys - st.prev_keys
@@ -685,25 +698,13 @@ class RewardShaper:
             elif kind == "pickup_collectible":
                 add("pickup_collectible", cfg.r_pickup_collectible)
                 st.beh_items_collected += 1
-                # Chain reward: if we're in a shop AND a purchase is pending
-                # (coins dropped in shop earlier), a shop-purchase chain
-                # completed.
-                if (
-                    st.current_room_type == ROOM_TYPE_SHOP
-                    and st.shop_purchase_pending
-                    and st.shop_entered_tick is not None
-                    and (st.tick - st.shop_entered_tick) < cfg.chain_shop_window_ticks
-                ):
-                    add("chain_shop_purchase", cfg.r_chain_shop_purchase)
-                    st.shop_purchase_pending = False
 
             elif kind == "use_item":
-                # Active item pressed (mod-side MC_USE_ITEM callback). Reward
-                # the act of using an active item. Chain reward fires if the
-                # item was fully charged.
+                # Active item pressed (mod-side MC_USE_ITEM callback). Active
+                # items have TOO DIVERSE outcomes to reward downstream, so
+                # we reward the act itself. was_charged is ignored (v2:
+                # removed chain reward that conditioned on it).
                 add("use_item", cfg.r_use_item)
-                if evt.get("was_charged"):
-                    add("chain_active_item_ready_and_used", cfg.r_chain_active_item_ready_and_used)
 
             elif kind == "new_room":
                 room_type = int(evt.get("room_type", 0) or 0)
@@ -728,20 +729,6 @@ class RewardShaper:
                 if room_type not in st.visited_room_types:
                     st.visited_room_types.add(room_type)
                     _add_room_first_entry(add, cfg, room_type)
-                # Chain: shop entry recorded here so subsequent coin drop +
-                # collectible pickup can complete the chain.
-                if room_type == ROOM_TYPE_SHOP:
-                    st.shop_entered_tick = st.tick
-                    st.shop_coins_at_entry = cur_coins
-                # Chain: bomb was placed recently AND a secret room appeared.
-                # This is a strong signal for "bombed a wall to reveal a
-                # secret room", one of Isaac's hallmark mechanics.
-                if room_type in (ROOM_TYPE_SECRET, ROOM_TYPE_SUPER_SECRET) and evt.get("is_new"):
-                    if (
-                        st.bomb_placed_tick is not None
-                        and (st.tick - st.bomb_placed_tick) < cfg.chain_secret_window_ticks
-                    ):
-                        add("chain_bomb_reveals_secret", cfg.r_chain_bomb_reveals_secret)
                 # Legacy boss-room-first-entry (kept for backward compat).
                 if room_type == ROOM_TYPE_BOSS:
                     sgi = evt.get("safe_grid_index")
@@ -965,5 +952,30 @@ class RewardShaper:
             else:
                 # No enemies: reset potential so we don't get spurious PBRS on next enemy encounter
                 st.prev_potential = None
+
+        # ---- End-of-episode aggregate outcome bonuses (2026-07-09 v2) ------
+        # When the episode terminates (any cause), reward WHAT the agent
+        # achieved this episode via aggregate metrics. Contrast with Phase D
+        # chains (removed) which prescribed specific action sequences.
+        # Aggregate outcomes let the agent choose ITS OWN strategy to hit them.
+        if terminated:
+            # Diversity: log(1 + N_room_types_visited). Sublinear so the first
+            # few types give the biggest signal (encourages first-time
+            # exploration) and later ones taper off.
+            n_types = len(st.beh_room_types_seen)
+            if n_types > 0 and cfg.r_diversity_end_bonus != 0.0:
+                add("diversity_end_bonus", cfg.r_diversity_end_bonus * math.log(1 + n_types))
+            # Depth: floors reached. Linear — later floors are strictly harder.
+            if st.beh_floors_reached > 0 and cfg.r_depth_end_bonus != 0.0:
+                add("depth_end_bonus", cfg.r_depth_end_bonus * float(st.beh_floors_reached))
+            # Survival: fraction of max_hp remaining, only if not dead.
+            if not st.dead and max_hp > 0 and cfg.r_survival_end_bonus != 0.0:
+                hp_frac = float((cur_red + cur_soul + cur_black) / max_hp)
+                add("survival_end_bonus", cfg.r_survival_end_bonus * hp_frac)
+            # Efficiency: items per room. Rewards high-value trajectories
+            # over long-idle ones. Guarded to avoid div-by-zero on 0-room eps.
+            if st.beh_rooms_visited > 0 and cfg.r_efficiency_end_bonus != 0.0:
+                eff = float(st.beh_items_collected) / float(st.beh_rooms_visited)
+                add("efficiency_end_bonus", cfg.r_efficiency_end_bonus * eff)
 
         return float(reward), bool(terminated), breakdown

@@ -80,30 +80,139 @@ def test_coin_pickup_via_delta():
     assert bd.get("pickup_coin") == pytest.approx(RewardConfig().r_pickup_coin * 2)
 
 
-def test_coin_spend_in_shop_fires_spend_and_chain():
-    """Coins going DOWN in a shop = purchase. Fires spend_coin, and if
-    followed by a collectible pickup, fires the chain reward."""
-    cfg = RewardConfig()
+def test_coin_spend_default_no_reward_no_chain():
+    """After 2026-07-09 v2: r_spend_coin default 0.0, no chain reward. Coins
+    dropped in shop only fire the collectible-pickup reward downstream."""
+    cfg = RewardConfig()  # default r_spend_coin = 0.0
     r = RewardShaper(cfg)
-    # Enter shop first (needed for chain state).
     r({
         "player": {"hp_red": 6, "hp_max": 6, "coins": 10},
         "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_SHOP,
                     "safe_grid_index": 42}],
     })
-    # Spend 5 coins in shop.
     _, _, bd_spend = r({"player": {"hp_red": 6, "hp_max": 6, "coins": 5}, "events": []})
-    assert bd_spend.get("spend_coin") == pytest.approx(cfg.r_spend_coin * 5)
-    # Pick up the collectible → chain fires.
+    assert bd_spend.get("spend_coin", 0.0) == 0.0
     _, _, bd_chain = r({
         "player": {"hp_red": 6, "hp_max": 6, "coins": 5},
         "events": [{"kind": "pickup_collectible"}],
     })
-    assert bd_chain.get("chain_shop_purchase") == cfg.r_chain_shop_purchase
+    assert "chain_shop_purchase" not in bd_chain
+    assert bd_chain.get("pickup_collectible") == cfg.r_pickup_collectible
+
+
+def test_bomb_use_small_no_chain():
+    """After 2026-07-09 v2: bomb-then-secret chain reward removed. The
+    r_secret_first_entry (+5) is enough downstream signal."""
+    cfg = RewardConfig()
+    r = RewardShaper(cfg)
+    r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 2}, "events": []})
+    _, _, bd = r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 1}, "events": []})
+    # Small token reward for bomb use.
+    assert bd.get("use_bomb") == cfg.r_use_bomb
+    assert cfg.r_use_bomb < 0.1, "bomb-use must be small to avoid spam incentive"
+    for _ in range(10):
+        r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 1}, "events": []})
+    _, _, bd2 = r({
+        "player": {"hp_red": 6, "hp_max": 6, "bombs": 1},
+        "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_SECRET,
+                    "safe_grid_index": 99}],
+    })
+    assert "chain_bomb_reveals_secret" not in bd2
+    assert bd2.get("secret_first_entry") == cfg.r_secret_first_entry
+
+
+def test_use_item_no_chain_regardless_of_charge():
+    """After 2026-07-09 v2: use_item fires the base reward regardless of
+    was_charged. Chain reward removed."""
+    cfg = RewardConfig()
+    for was_charged in (False, True):
+        r = RewardShaper(cfg)
+        _, _, bd = r({
+            "player": {"hp_red": 6, "hp_max": 6},
+            "events": [{"kind": "use_item", "was_charged": was_charged}],
+        })
+        assert bd.get("use_item") == cfg.r_use_item
+        assert "chain_active_item_ready_and_used" not in bd
+
+
+# ---------------------------------------------------------------------
+# End-of-episode aggregate outcome bonuses (2026-07-09 v2)
+# ---------------------------------------------------------------------
+
+def test_depth_end_bonus_fires_on_termination():
+    cfg = RewardConfig()
+    r = RewardShaper(cfg)
+    # Simulate: reach floor 2, then die (fires terminated=True).
+    r({"player": {"hp_red": 6, "hp_max": 6}, "events": [{"kind": "new_level", "stage": 1}]})
+    r({"player": {"hp_red": 6, "hp_max": 6}, "events": [{"kind": "new_level", "stage": 2}]})
+    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert term
+    assert bd.get("depth_end_bonus") == cfg.r_depth_end_bonus * 2
+
+
+def test_diversity_end_bonus_sublinear():
+    import math
+    cfg = RewardConfig()
+    r = RewardShaper(cfg)
+    # Visit 3 room types (default + shop + treasure).
+    for i, rt in enumerate([ROOM_TYPE_DEFAULT, ROOM_TYPE_SHOP, ROOM_TYPE_TREASURE]):
+        r({
+            "player": {"hp_red": 6, "hp_max": 6},
+            "events": [{"kind": "new_room", "is_new": True, "room_type": rt,
+                        "safe_grid_index": i}],
+        })
+    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert term
+    expected = cfg.r_diversity_end_bonus * math.log(1 + 3)
+    assert bd.get("diversity_end_bonus") == pytest.approx(expected)
+
+
+def test_survival_end_bonus_zero_when_dead():
+    cfg = RewardConfig()
+    r = RewardShaper(cfg)
+    r({"player": {"hp_red": 6, "hp_max": 6}, "events": []})
+    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert term
+    # Died → no survival bonus.
+    assert "survival_end_bonus" not in bd
+
+
+def test_survival_end_bonus_partial_hp():
+    cfg = RewardConfig()
+    r = RewardShaper(cfg)
+    r({"player": {"hp_red": 6, "hp_max": 6}, "events": []})
+    # Force terminate via a death event but with non-zero HP (mod-side death).
+    _, term, bd = r({
+        "player": {"hp_red": 3, "hp_max": 6},
+        "events": [{"kind": "death"}],
+    })
+    assert term
+    # st.dead is now True — no survival bonus.
+    assert "survival_end_bonus" not in bd
+
+
+def test_efficiency_end_bonus():
+    cfg = RewardConfig()
+    r = RewardShaper(cfg)
+    # 2 rooms visited, 1 item collected.
+    r({
+        "player": {"hp_red": 6, "hp_max": 6},
+        "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_DEFAULT,
+                    "safe_grid_index": 1}],
+    })
+    r({
+        "player": {"hp_red": 6, "hp_max": 6},
+        "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_TREASURE,
+                    "safe_grid_index": 2}, {"kind": "pickup_collectible"}],
+    })
+    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert term
+    # 1 item / 2 rooms = 0.5
+    assert bd.get("efficiency_end_bonus") == pytest.approx(cfg.r_efficiency_end_bonus * 0.5)
 
 
 def test_bomb_use_via_delta_fires_use_bomb():
-    """Bomb count going down = bomb placed. Fires use_bomb."""
+    """Bomb count going down = bomb placed. Fires small use_bomb reward."""
     cfg = RewardConfig()
     r = RewardShaper(cfg)
     r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 2}, "events": []})
@@ -111,32 +220,15 @@ def test_bomb_use_via_delta_fires_use_bomb():
     assert bd.get("use_bomb") == cfg.r_use_bomb
 
 
-def test_bomb_then_secret_room_fires_chain():
-    """Bomb placed then secret room entered within window = chain reward."""
-    cfg = RewardConfig(chain_secret_window_ticks=100)
+def test_bomb_then_secret_room_no_chain_only_secret_reward():
+    """After 2026-07-09 v2: chain_bomb_reveals_secret removed. Bombing a
+    wall + entering the secret room fires secret_first_entry (+5) only.
+    Emergent bomb-then-secret behavior must come from RND / value learning."""
+    cfg = RewardConfig()
     r = RewardShaper(cfg)
     r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 2}, "events": []})
-    # Place bomb.
     r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 1}, "events": []})
-    # 10 ticks pass.
     for _ in range(10):
-        r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 1}, "events": []})
-    # Enter secret room.
-    _, _, bd = r({
-        "player": {"hp_red": 6, "hp_max": 6, "bombs": 1},
-        "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_SECRET,
-                    "safe_grid_index": 99}],
-    })
-    assert bd.get("chain_bomb_reveals_secret") == cfg.r_chain_bomb_reveals_secret
-
-
-def test_bomb_then_secret_outside_window_does_not_fire_chain():
-    """If too many ticks pass between bomb and secret room, no chain reward."""
-    cfg = RewardConfig(chain_secret_window_ticks=10)
-    r = RewardShaper(cfg)
-    r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 2}, "events": []})
-    r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 1}, "events": []})
-    for _ in range(50):
         r({"player": {"hp_red": 6, "hp_max": 6, "bombs": 1}, "events": []})
     _, _, bd = r({
         "player": {"hp_red": 6, "hp_max": 6, "bombs": 1},
@@ -144,6 +236,11 @@ def test_bomb_then_secret_outside_window_does_not_fire_chain():
                     "safe_grid_index": 99}],
     })
     assert "chain_bomb_reveals_secret" not in bd
+    assert bd.get("secret_first_entry") == cfg.r_secret_first_entry
+
+
+# (test_bomb_then_secret_outside_window_does_not_fire_chain removed: chain
+#  rewards removed 2026-07-09 v2, so window semantics are moot.)
 
 
 def test_key_use_via_delta():
@@ -258,17 +355,6 @@ def test_use_item_event_fires_reward():
     })
     assert bd.get("use_item") == cfg.r_use_item
     assert "chain_active_item_ready_and_used" not in bd
-
-
-def test_use_item_when_charged_fires_chain():
-    cfg = RewardConfig()
-    r = RewardShaper(cfg)
-    _, _, bd = r({
-        "player": {"hp_red": 6, "hp_max": 6},
-        "events": [{"kind": "use_item", "was_charged": True}],
-    })
-    assert bd.get("use_item") == cfg.r_use_item
-    assert bd.get("chain_active_item_ready_and_used") == cfg.r_chain_active_item_ready_and_used
 
 
 # ---------------------------------------------------------------------

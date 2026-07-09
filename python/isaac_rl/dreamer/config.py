@@ -126,6 +126,17 @@ class DreamerConfig:
     train_ratio: int = 16          # WM gradient steps per env step, per env
     replay_capacity: int = 1_000_000
 
+    # ---- RND intrinsic curiosity (2026-07-09 v2) ----------------------
+    # Random Network Distillation for exploration. See dreamer/intrinsic.py
+    # for details. Enables emergent multi-step behavior discovery without
+    # hand-scripting chains (replaces the removed Phase D chain rewards).
+    rnd_enabled: bool = True
+    rnd_intrinsic_scale: float = 0.1     # weight of intrinsic reward vs extrinsic
+    rnd_embed_dim: int = 128             # RND target/predictor output dim
+    rnd_hidden: int = 256                # predictor hidden width
+    rnd_target_hidden: int = 128         # target hidden width (< predictor — critical)
+    rnd_lr: float = 1e-4                 # predictor learning rate
+
     # ---- Curriculum + reward (same as PPOConfig) -----------------------
     curriculum: list = field(default_factory=list)
     reward: dict = field(default_factory=dict)
