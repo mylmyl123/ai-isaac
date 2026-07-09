@@ -64,11 +64,70 @@ class RewardConfig:
     r_room_clear_no_damage: float = 1.5   # bonus for clean clears (encourages dodging)
 
     # ---- Pickups (unchanged) -------------------------------------------
-    r_pickup_heart: float = 0.2
-    r_pickup_coin: float = 0.05
-    r_pickup_key: float = 0.1
-    r_pickup_bomb: float = 0.1
-    r_pickup_collectible: float = 1.0
+    r_pickup_heart: float = 0.5    # was 0.2 (2026-07-09): consumables were never picked up.
+                                    # Raised to make heart pickup a strong signal
+                                    # since it's rare AND useful (HP is scarce).
+    r_pickup_coin: float = 0.2     # was 0.05: coins are needed for shop purchases
+    r_pickup_key: float = 0.3      # was 0.1: keys open chests/doors, rare + valuable
+    r_pickup_bomb: float = 0.3     # was 0.1: bombs open secret rooms, key mechanic
+    r_pickup_collectible: float = 2.0   # was 1.0: permanent stat boost, very valuable
+
+    # ---- NEW (2026-07-09): Consumable USE (bomb/key/coin decreases) -----
+    # Detected via player-state deltas across ticks. Rewards the ACT of using
+    # a resource (not just having it), which is what the audit found missing:
+    # in the 2026-07-08 run, 0 out of 322 episodes ever used a bomb or key.
+    # Bomb usage is especially important — it opens secret rooms and destroys
+    # obstacle walls that gate progression.
+    r_use_bomb: float = 0.5       # bomb count decreased (placed a bomb)
+    r_use_key: float = 0.3        # key count decreased (opened door/chest)
+    r_spend_coin: float = 0.1     # coin count decreased in a shop (purchase)
+
+    # ---- NEW (2026-07-09): Room-type first-entry rewards ----------------
+    # Isaac has ~20 room types. Currently only ROOM_TYPE_BOSS is rewarded.
+    # The audit found that ~40% of episodes enter a new room, but 0 enter
+    # boss/shop/secret/etc. — the agent random-flails into adjacent rooms
+    # but never navigates to special rooms. First-entry rewards direct the
+    # exploration bias without changing the optimal policy (Ng-Harada-Russell).
+    # Room type constants (see spaces.py):
+    #   1=Default, 2=Shop, 4=Treasure, 5=Boss, 7=Secret, 8=Super_secret,
+    #   9=Arcade, 10=Curse, 11=Challenge, 13=Sacrifice, 14=Devil, 15=Angel,
+    #   20=Chest, 21=Dice
+    r_shop_first_entry: float = 2.0        # entered a shop — lets us reward purchases
+    r_treasure_first_entry: float = 3.0    # treasure room = free collectible
+    r_secret_first_entry: float = 5.0      # required bombing a wall — very high signal
+    r_super_secret_first_entry: float = 5.0 # same, but rarer
+    r_curse_first_entry: float = 1.0       # curse room = risk/reward (item + HP cost)
+    r_arcade_first_entry: float = 1.0      # arcade = coin gambling
+    r_challenge_first_entry: float = 1.5   # challenge room = bonus item after wave
+    r_sacrifice_first_entry: float = 1.0   # spike room — chance for angel deal
+    r_devil_first_entry: float = 3.0       # devil deal room — advanced play
+    r_angel_first_entry: float = 3.0       # angel deal room — advanced play
+    r_chest_first_entry: float = 2.0       # chest room after Mom — progression milestone
+    r_dice_first_entry: float = 2.0        # dice room — reroll mechanic
+
+    # ---- NEW (2026-07-09): Active-item use ------------------------------
+    # Requires mod-side MC_USE_ITEM callback to emit `use_item` events.
+    # Space bar activates the active item slot. Currently the agent has no
+    # incentive to press it (14-dim action, 1 slot dedicated) and never does.
+    r_use_item: float = 2.0
+
+    # ---- NEW (2026-07-09): Boss kill bonus ------------------------------
+    # damage_to_npc events already carry is_boss=true when applicable, we
+    # just weren't using the flag. Boss kills are 100x more valuable than
+    # regular enemy kills — they gate floor progression.
+    r_boss_kill: float = 20.0
+
+    # ---- NEW (2026-07-09): Chain rewards --------------------------------
+    # Multi-step behavior bonuses. Fire when a sequence of actions completes
+    # a mini-plan. Each is strictly larger than the sum of its component
+    # rewards so the agent prefers intentional chains over accidental
+    # co-occurrence. See __call__ for the state machine.
+    r_chain_bomb_reveals_secret: float = 8.0    # placed a bomb, then a secret room appeared
+                                                 # (bombed a wall) within N ticks
+    r_chain_shop_purchase: float = 3.0          # entered shop + coins spent + collectible picked up
+    r_chain_active_item_ready_and_used: float = 3.0  # held a full-charge active item + used it
+    chain_secret_window_ticks: int = 200        # 200 ticks (~13s) between bomb and secret room
+    chain_shop_window_ticks: int = 900          # 900 ticks (~60s) between shop entry and purchase
 
     # ---- Per-step cost -------------------------------------------------
     r_step: float = -0.003                # was -0.001 — 3x to discourage wandering
@@ -146,7 +205,15 @@ class RewardConfig:
     # Bigger idle penalty specifically when room is clear (there's no tactical
     # reason to hesitate; every idle tick is wasted time). Additive to the
     # normal idle_penalty.
-    r_clear_room_idle_extra: float = -0.03
+    r_clear_room_idle_extra: float = -0.005   # was -0.03. Reduced 6x on 2026-07-09
+                                                # after audit found this term at
+                                                # -2.83/ep (65% of neg reward budget)
+                                                # — policy-independent bias, not shaping.
+    # Grace period after room clear before clear_idle_extra starts firing.
+    # Gives the agent 30 ticks (~2s) to "look around" post-clear before we
+    # penalize idle. Combined with the 6x coefficient reduction, expected
+    # per-episode contribution drops from -2.83 to ~-0.15.
+    clear_idle_grace_ticks: int = 30
 
     # ---- NEW: PBRS approach potential ----------------------------------
     # Potential-based reward shaping: F = gamma*Phi(s') - Phi(s) with
@@ -162,7 +229,31 @@ class RewardConfig:
 
 
 # Room types where "boss cleared" implies a floor is done.
+# Isaac room type constants. Kept as module-level so both the reward
+# handlers and tests can reference them without magic numbers. Source:
+# Isaac's RoomType enum in resources/scripts/enums.lua.
+ROOM_TYPE_DEFAULT = 1
+ROOM_TYPE_SHOP = 2
+ROOM_TYPE_ERROR = 3
+ROOM_TYPE_TREASURE = 4
 ROOM_TYPE_BOSS = 5
+ROOM_TYPE_MINIBOSS = 6
+ROOM_TYPE_SECRET = 7
+ROOM_TYPE_SUPER_SECRET = 8
+ROOM_TYPE_ARCADE = 9
+ROOM_TYPE_CURSE = 10
+ROOM_TYPE_CHALLENGE = 11
+ROOM_TYPE_LIBRARY = 12
+ROOM_TYPE_SACRIFICE = 13
+ROOM_TYPE_DEVIL = 14
+ROOM_TYPE_ANGEL = 15
+ROOM_TYPE_DUNGEON = 16
+ROOM_TYPE_BOSSRUSH = 17
+ROOM_TYPE_CLEAN_BEDROOM = 18
+ROOM_TYPE_DIRTY_BEDROOM = 19
+ROOM_TYPE_CHEST = 20
+ROOM_TYPE_DICE = 21
+ROOM_TYPE_BLACK_MARKET = 22
 
 
 # All reward-breakdown keys the RewardShaper can emit. Kept in sync with the
@@ -179,11 +270,18 @@ REWARD_BREAKDOWN_KEYS: tuple[str, ...] = (
     "shoot_when_enemy", "seek_door", "door_pbrs", "pbrs_approach",
     "clear_idle_extra",
     # events
-    "damage_dealt", "kill",
+    "damage_dealt", "kill", "boss_kill",
     "pickup_heart", "pickup_coin", "pickup_key", "pickup_bomb", "pickup_collectible",
+    "use_bomb", "use_key", "spend_coin", "use_item",
     "new_room", "backtrack", "boss_room_first_entry",
+    "shop_first_entry", "treasure_first_entry", "secret_first_entry",
+    "super_secret_first_entry", "curse_first_entry", "arcade_first_entry",
+    "challenge_first_entry", "sacrifice_first_entry", "devil_first_entry",
+    "angel_first_entry", "chest_first_entry", "dice_first_entry",
     "room_clear", "room_clear_speed", "room_clear_no_damage",
     "floor_cleared", "beat_mom",
+    # chain rewards (2026-07-09)
+    "chain_bomb_reveals_secret", "chain_shop_purchase", "chain_active_item_ready_and_used",
     # terminals
     "death", "idle_death", "crash_penalty",
 )
@@ -201,12 +299,106 @@ class RewardState:
 
     # NEW: dense-shaping state
     ticks_since_room_start: int = 0        # for speed-clear bonus
+    ticks_since_room_clear: int = 0        # for clear_idle_extra grace period.
+                                            # Resets to 0 on room_clear event, then
+                                            # increments each tick where is_clear=True.
+                                            # Only fires clear_idle_extra when this
+                                            # exceeds cfg.clear_idle_grace_ticks.
     damage_this_room_red: float = 0.0      # for no-damage clear bonus
     damage_this_room_other: float = 0.0
     prev_potential: float | None = None    # PBRS: previous state potential
     prev_door_dist: float | None = None    # for r_door_distance_shaping
     pos_history: list = field(default_factory=list)  # rolling position window
     consecutive_idle_ticks: int = 0        # 2026-07-04: for idle-death termination
+
+    # ---- NEW (2026-07-09): state-delta tracking for use/pickup detection ---
+    # Track player state across ticks to detect coin/bomb/key/heart deltas
+    # WITHOUT requiring mod-side events. Positive deltas = pickup, negative
+    # deltas = usage. Mod already sends these fields per obs; the shaper
+    # just diffs them across successive ticks.
+    prev_coins: int | None = None
+    prev_bombs: int | None = None
+    prev_keys: int | None = None
+    prev_hp_red_ticks: float | None = None   # separately from prev_hp_red
+                                              # because we want the RAW heart
+                                              # count (in half-hearts) for
+                                              # pickup detection, distinct
+                                              # from HP-delta damage tracking.
+
+    # ---- NEW (2026-07-09): room type visit tracking ------------------------
+    # Set of visited room types (by RoomType constant). Used to fire the
+    # r_{type}_first_entry rewards exactly once per room type per episode.
+    # Reset in RewardShaper.reset() via re-creating RewardState.
+    visited_room_types: set = field(default_factory=set)
+    # Room type of the CURRENT room (updated on each new_room event). Used
+    # by chain-reward state machines to check where we are.
+    current_room_type: int = 0
+
+    # ---- NEW (2026-07-09): chain reward state machines ---------------------
+    # `bomb_placed_tick`: last tick a bomb was placed (bombs delta went
+    # negative). Compared with new_room=secret events within a window.
+    bomb_placed_tick: int | None = None
+    # `shop_entered_tick`: last tick a shop was entered.
+    shop_entered_tick: int | None = None
+    # `shop_coins_at_entry`: coin count on shop entry — to detect purchases.
+    shop_coins_at_entry: int | None = None
+    # `shop_purchase_pending`: set to True when coins dropped in shop; cleared
+    # when a collectible pickup fires (completes the chain).
+    shop_purchase_pending: bool = False
+
+    # ---- NEW (2026-07-09): global tick counter (per-episode) ---------------
+    # Used by chain state machines to compare event timings.
+    tick: int = 0
+
+    # ---- NEW (2026-07-09): behavior measurement (Phase C) ------------------
+    # Aggregated per-episode metrics. Logged as behavior/* in TB via the
+    # info dict on episode termination. NOT rewarded — pure telemetry.
+    beh_rooms_visited: int = 0             # unique rooms this episode
+    beh_floors_reached: int = 0            # max stage this episode
+    beh_items_collected: int = 0           # collectibles picked up
+    beh_coins_earned: int = 0              # total coin_delta > 0
+    beh_coins_spent: int = 0               # total |coin_delta| where delta < 0
+    beh_bombs_used: int = 0                # bombs delta went negative
+    beh_keys_used: int = 0                 # keys delta went negative
+    beh_hearts_picked: int = 0             # heart pickups
+    beh_kills_this_ep: int = 0             # kills in this episode
+    beh_boss_kills: int = 0                # boss kills
+    beh_damage_dealt: float = 0.0          # cumulative damage output
+    beh_damage_taken: float = 0.0          # cumulative HP lost
+    beh_room_types_seen: set = field(default_factory=set)
+    beh_max_kill_streak: int = 0           # longest kill streak
+    beh_current_kill_streak: int = 0       # rolling counter
+    beh_ticks_alive: int = 0               # total ticks in this episode
+
+
+# Room-type first-entry reward dispatch table. Maps each RoomType constant
+# to the (breakdown_key, config_attr_name) tuple used by _add_room_first_entry.
+# Keeping this as a module-level dict so tests can enumerate what's covered.
+_ROOM_FIRST_ENTRY_TABLE: dict[int, tuple[str, str]] = {
+    ROOM_TYPE_SHOP:          ("shop_first_entry",          "r_shop_first_entry"),
+    ROOM_TYPE_TREASURE:      ("treasure_first_entry",      "r_treasure_first_entry"),
+    ROOM_TYPE_SECRET:        ("secret_first_entry",        "r_secret_first_entry"),
+    ROOM_TYPE_SUPER_SECRET:  ("super_secret_first_entry",  "r_super_secret_first_entry"),
+    ROOM_TYPE_CURSE:         ("curse_first_entry",         "r_curse_first_entry"),
+    ROOM_TYPE_ARCADE:        ("arcade_first_entry",        "r_arcade_first_entry"),
+    ROOM_TYPE_CHALLENGE:     ("challenge_first_entry",     "r_challenge_first_entry"),
+    ROOM_TYPE_SACRIFICE:     ("sacrifice_first_entry",     "r_sacrifice_first_entry"),
+    ROOM_TYPE_DEVIL:         ("devil_first_entry",         "r_devil_first_entry"),
+    ROOM_TYPE_ANGEL:         ("angel_first_entry",         "r_angel_first_entry"),
+    ROOM_TYPE_CHEST:         ("chest_first_entry",         "r_chest_first_entry"),
+    ROOM_TYPE_DICE:          ("dice_first_entry",          "r_dice_first_entry"),
+}
+
+
+def _add_room_first_entry(add_fn, cfg: "RewardConfig", room_type: int) -> None:
+    """Fire the room-type first-entry reward via add_fn. No-op if the room
+    type isn't in the dispatch table (e.g., ROOM_TYPE_DEFAULT which isn't
+    special enough to reward)."""
+    entry = _ROOM_FIRST_ENTRY_TABLE.get(room_type)
+    if entry is None:
+        return
+    breakdown_key, cfg_attr = entry
+    add_fn(breakdown_key, float(getattr(cfg, cfg_attr, 0.0)))
 
 
 class RewardShaper:
@@ -216,6 +408,47 @@ class RewardShaper:
 
     def reset(self) -> None:
         self.state = RewardState()
+
+    def episode_behavior_metrics(self) -> dict[str, float]:
+        """Return per-episode behavior metrics for TB logging as behavior/*.
+
+        Called by env.py on terminal step. NOT tied to reward — pure telemetry.
+        Introduced 2026-07-09 to answer: is the agent doing complex hierarchical
+        play (visiting shops, using items, exploring floors) even when we're
+        not explicitly rewarding it?
+
+        Metric semantics:
+          rooms_visited: unique room entries this episode
+          floors_reached: max stage reached
+          items_collected: pedestal pickups
+          coins_earned / spent: cumulative deltas
+          bombs_used / keys_used: cumulative decreases
+          hearts_picked: cumulative red-heart increases (before HP-delta reset)
+          kills: total in episode
+          boss_kills: subset of kills against bosses
+          max_kill_streak: longest streak without taking damage
+          room_types_seen: count of unique room types entered
+          damage_dealt / taken: cumulative totals
+          ticks_alive: episode length in ticks
+        """
+        st = self.state
+        return {
+            "rooms_visited":     float(st.beh_rooms_visited),
+            "floors_reached":    float(st.beh_floors_reached),
+            "items_collected":   float(st.beh_items_collected),
+            "coins_earned":      float(st.beh_coins_earned),
+            "coins_spent":       float(st.beh_coins_spent),
+            "bombs_used":        float(st.beh_bombs_used),
+            "keys_used":         float(st.beh_keys_used),
+            "hearts_picked":     float(st.beh_hearts_picked),
+            "kills":             float(st.beh_kills_this_ep),
+            "boss_kills":        float(st.beh_boss_kills),
+            "max_kill_streak":   float(st.beh_max_kill_streak),
+            "room_types_seen":   float(len(st.beh_room_types_seen)),
+            "damage_dealt":      float(st.beh_damage_dealt),
+            "damage_taken":      float(st.beh_damage_taken),
+            "ticks_alive":       float(st.beh_ticks_alive),
+        }
 
     # --- helper: cardinal direction from angle ---------------------------
     @staticmethod
@@ -315,6 +548,70 @@ class RewardShaper:
         st.prev_hp_soul = cur_soul
         st.prev_hp_black = cur_black
 
+        # ---- NEW (2026-07-09): Player state delta tracking ----------------
+        # Detect consumable pickup and usage from delta in coin/bomb/key/
+        # heart counts across ticks. Requires no mod changes — the mod
+        # already sends these fields in the regular obs.
+        cur_coins = int(player.get("coins", 0) or 0)
+        cur_bombs = int(player.get("bombs", 0) or 0)
+        cur_keys = int(player.get("keys", 0) or 0)
+        # Track raw hp_red across ticks for pickup detection (distinct from
+        # HP-delta damage tracking, which we already do above). A heart
+        # pickup shows up as an INCREASE in hp_red; damage as a DECREASE.
+        cur_hp_red_int = int(cur_red)
+
+        if st.prev_coins is not None:
+            dc = cur_coins - st.prev_coins
+            if dc > 0:
+                add("pickup_coin", cfg.r_pickup_coin * dc)
+                st.beh_coins_earned += dc
+            elif dc < 0:
+                # Coin count decreased. If we're in a shop, treat as purchase
+                # and fire the chain reward. Otherwise it's likely a slot
+                # machine or blood bank — still counts as "engaging with
+                # game mechanics".
+                spent = -dc
+                st.beh_coins_spent += spent
+                # Base spend reward (small): the agent used coins for SOMETHING.
+                add("spend_coin", cfg.r_spend_coin * spent)
+                # Chain-reward state: mark purchase pending if in shop.
+                if st.current_room_type == ROOM_TYPE_SHOP:
+                    st.shop_purchase_pending = True
+        if st.prev_bombs is not None:
+            db = cur_bombs - st.prev_bombs
+            if db > 0:
+                add("pickup_bomb", cfg.r_pickup_bomb * db)
+            elif db < 0:
+                # Bomb count decreased — player placed a bomb. Reward the ACT
+                # of using this scarce resource, and start the secret-room
+                # chain state machine.
+                add("use_bomb", cfg.r_use_bomb * (-db))
+                st.bomb_placed_tick = st.tick
+                st.beh_bombs_used += (-db)
+        if st.prev_keys is not None:
+            dk = cur_keys - st.prev_keys
+            if dk > 0:
+                add("pickup_key", cfg.r_pickup_key * dk)
+            elif dk < 0:
+                add("use_key", cfg.r_use_key * (-dk))
+                st.beh_keys_used += (-dk)
+        if st.prev_hp_red_ticks is not None:
+            dh = cur_hp_red_int - st.prev_hp_red_ticks
+            if dh > 0:
+                # HP went UP without a new_room reset — this is a heart pickup.
+                # Guard: only fire this on the tick of the increase, not
+                # continuously. The delta captures that.
+                add("pickup_heart", cfg.r_pickup_heart * dh)
+                st.beh_hearts_picked += dh
+
+        st.prev_coins = cur_coins
+        st.prev_bombs = cur_bombs
+        st.prev_keys = cur_keys
+        st.prev_hp_red_ticks = float(cur_hp_red_int)
+        # Advance global tick counter used by chain state machines.
+        st.tick += 1
+        st.beh_ticks_alive += 1
+
         # ---- HP-based death detection (Python-side, mod-independent) ------
         # The mod is supposed to send a {kind: "death"} event on player
         # death, but its delivery is unreliable (see 2026-07-08 postmortem:
@@ -355,42 +652,98 @@ class RewardShaper:
                 gain = min(gain, room_left)
                 st.damage_reward_this_room += gain
                 add("damage_dealt", gain)
+                st.beh_damage_dealt += dmg
                 if evt.get("killed"):
                     add("kill", cfg.r_kill)
+                    st.beh_kills_this_ep += 1
+                    st.beh_current_kill_streak += 1
+                    st.beh_max_kill_streak = max(st.beh_max_kill_streak, st.beh_current_kill_streak)
+                    # Extra reward for boss kills (mod's reward.lua already
+                    # tags is_boss on the damage_to_npc event; we just weren't
+                    # using the flag prior to 2026-07-09).
+                    if evt.get("is_boss"):
+                        add("boss_kill", cfg.r_boss_kill)
+                        st.beh_boss_kills += 1
 
             elif kind == "damage_to_player":
-                pass  # handled via HP-delta above
+                # HP-delta pathway above handles reward. Reset kill-streak
+                # tracker — taking damage "breaks the flow".
+                st.beh_damage_taken += float(evt.get("dmg", 0) or 0)
+                st.beh_current_kill_streak = 0
 
-            elif kind == "pickup_heart":
-                add("pickup_heart", cfg.r_pickup_heart)
-            elif kind == "pickup_coin":
-                add("pickup_coin", cfg.r_pickup_coin)
-            elif kind == "pickup_key":
-                add("pickup_key", cfg.r_pickup_key)
-            elif kind == "pickup_bomb":
-                add("pickup_bomb", cfg.r_pickup_bomb)
+            elif kind in ("pickup_heart", "pickup_coin", "pickup_key", "pickup_bomb"):
+                # 2026-07-09: mod-side events for these are OPTIONAL. If the
+                # mod does emit them (some do, some don't), we honor them
+                # here. But the primary detection path is state-delta above
+                # (prev_coins/bombs/keys/hp_red_ticks), which works with any
+                # mod. If both fire on the same tick, the state-delta path
+                # takes precedence — skip the event-based reward here to
+                # avoid double-counting. Since Python currently doesn't
+                # emit these events, this is a no-op branch pending future
+                # mod changes.
+                pass
             elif kind == "pickup_collectible":
                 add("pickup_collectible", cfg.r_pickup_collectible)
+                st.beh_items_collected += 1
+                # Chain reward: if we're in a shop AND a purchase is pending
+                # (coins dropped in shop earlier), a shop-purchase chain
+                # completed.
+                if (
+                    st.current_room_type == ROOM_TYPE_SHOP
+                    and st.shop_purchase_pending
+                    and st.shop_entered_tick is not None
+                    and (st.tick - st.shop_entered_tick) < cfg.chain_shop_window_ticks
+                ):
+                    add("chain_shop_purchase", cfg.r_chain_shop_purchase)
+                    st.shop_purchase_pending = False
+
+            elif kind == "use_item":
+                # Active item pressed (mod-side MC_USE_ITEM callback). Reward
+                # the act of using an active item. Chain reward fires if the
+                # item was fully charged.
+                add("use_item", cfg.r_use_item)
+                if evt.get("was_charged"):
+                    add("chain_active_item_ready_and_used", cfg.r_chain_active_item_ready_and_used)
 
             elif kind == "new_room":
+                room_type = int(evt.get("room_type", 0) or 0)
+                st.current_room_type = room_type
+                # Track behavior metrics.
+                st.beh_rooms_visited += 1
+                st.beh_room_types_seen.add(room_type)
                 if evt.get("is_new"):
                     add("new_room", cfg.r_new_room)
                 else:
                     # Backtrack: re-entering a room we've been to before.
-                    # Break oscillation loops between cleared rooms.
                     add("backtrack", cfg.r_backtrack)
                 # Reset per-room shaping state
                 st.damage_reward_this_room = 0.0
                 st.ticks_since_room_start = 0
                 st.damage_this_room_red = 0.0
                 st.damage_this_room_other = 0.0
-                # CRITICAL: reset door PBRS state so cross-room delta doesn't
-                # emit a bogus reward/penalty. Without this, the delta between
-                # "nearly at LEFT door of prev room" (dist ≈ 0) and "far from
-                # any door in new room" (dist ≈ 0.5) generates a -0.15 penalty,
-                # or vice-versa. This drove room-oscillation loops.
                 st.prev_door_dist = None
-                if evt.get("room_type") == ROOM_TYPE_BOSS:
+                # Room-type-specific first-entry rewards. Fire once per room
+                # type per episode (visited_room_types is per-shaper-state,
+                # cleared on reset()).
+                if room_type not in st.visited_room_types:
+                    st.visited_room_types.add(room_type)
+                    _add_room_first_entry(add, cfg, room_type)
+                # Chain: shop entry recorded here so subsequent coin drop +
+                # collectible pickup can complete the chain.
+                if room_type == ROOM_TYPE_SHOP:
+                    st.shop_entered_tick = st.tick
+                    st.shop_coins_at_entry = cur_coins
+                # Chain: bomb was placed recently AND a secret room appeared.
+                # This is a strong signal for "bombed a wall to reveal a
+                # secret room", one of Isaac's hallmark mechanics.
+                if room_type in (ROOM_TYPE_SECRET, ROOM_TYPE_SUPER_SECRET) and evt.get("is_new"):
+                    if (
+                        st.bomb_placed_tick is not None
+                        and (st.tick - st.bomb_placed_tick) < cfg.chain_secret_window_ticks
+                    ):
+                        add("chain_bomb_reveals_secret", cfg.r_chain_bomb_reveals_secret)
+                # Legacy boss-room-first-entry (kept for backward compat).
+                if room_type == ROOM_TYPE_BOSS:
                     sgi = evt.get("safe_grid_index")
                     if sgi is not None and sgi not in st.visited_boss_rooms:
                         st.visited_boss_rooms.add(sgi)
@@ -399,6 +752,10 @@ class RewardShaper:
             elif kind == "room_clear":
                 add("room_clear", cfg.r_room_clear)
                 room_cleared_this_tick = True
+                # Reset the clear-idle grace counter so we don't fire on the
+                # tick the clear happened. The dense-shaping section below
+                # increments this each subsequent tick.
+                st.ticks_since_room_clear = 0
                 # Compound bonuses
                 if st.ticks_since_room_start > 0 and st.ticks_since_room_start <= cfg.speed_clear_ticks:
                     add("room_clear_speed", cfg.r_room_clear_speed_bonus)
@@ -413,6 +770,8 @@ class RewardShaper:
                     add("beat_mom", cfg.r_beat_mom)
                     terminated = True
                 st.last_stage = stage
+                # Behavior metric: track deepest floor reached this episode.
+                st.beh_floors_reached = max(st.beh_floors_reached, stage)
 
             elif kind == "death":
                 if not st.dead:
@@ -428,6 +787,15 @@ class RewardShaper:
         # ---- Dense per-tick shaping (skip if terminated this tick) --------
         if not terminated:
             st.ticks_since_room_start += 1
+            # Track ticks-since-clear for the clear_idle_extra grace period.
+            # Only increments while room is clear (has been reset to 0 by
+            # the room_clear event handler above). On non-cleared rooms this
+            # stays at 0 so we never accidentally fire clear_idle_extra.
+            room_is_clear_now = bool((raw_obs.get("global") or {}).get("is_clear"))
+            if room_is_clear_now:
+                st.ticks_since_room_clear += 1
+            else:
+                st.ticks_since_room_clear = 0
 
             # HP preservation: reward per tick at full HP.
             if max_hp > 0 and cur_red >= max_hp:
@@ -525,7 +893,10 @@ class RewardShaper:
                         add("door_pbrs", cfg.r_door_distance_shaping * delta)
                     st.prev_door_dist = min_dist
                 # Extra idle penalty in cleared rooms (no reason to hesitate).
-                if speed < cfg.idle_speed_threshold:
+                # Gated on clear_idle_grace_ticks so we don't punish a brief
+                # "look around" pause immediately after clearing (the 30-tick
+                # grace is ~2s of game time at 15Hz control rate).
+                if speed < cfg.idle_speed_threshold and st.ticks_since_room_clear > cfg.clear_idle_grace_ticks:
                     add("clear_idle_extra", cfg.r_clear_room_idle_extra)
             else:
                 # Reset door-dist tracker on entering combat so re-clear

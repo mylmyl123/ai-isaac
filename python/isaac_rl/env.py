@@ -321,6 +321,7 @@ class SocketIsaacEnv(gym.Env):
                     "reward_breakdown_episode": dict(self._episode_breakdown),
                     "crashed": False,
                     "ep_end_reason": "mod_restart",
+                    "behavior_metrics": self.reward_shaper.episode_behavior_metrics(),
                 }
                 # NOTE: reconnected_raw came from a FRESH mod (post-restart),
                 # so it's a valid initial obs for the next episode. Store it
@@ -343,10 +344,8 @@ class SocketIsaacEnv(gym.Env):
                 "steps": self._steps,
                 "reward_breakdown": {"crash_penalty": -1.0},
                 "crashed": True,
-                # `isaac_crash` now specifically means "Isaac process died"
-                # (real crash). Mod-restart-during-death goes through the
-                # branch above with ep_end_reason="mod_restart".
                 "ep_end_reason": "isaac_crash",
+                "behavior_metrics": self.reward_shaper.episode_behavior_metrics(),
             }
             # Fold crash_penalty into the per-episode running sum, then emit
             # the whole episode-total breakdown.
@@ -381,9 +380,16 @@ class SocketIsaacEnv(gym.Env):
         if terminated:
             info["ep_end_reason"] = "shaper_terminated"
             info["reward_breakdown_episode"] = dict(self._episode_breakdown)
+            # Behavior metrics (Phase C, 2026-07-09): pure telemetry, not
+            # rewards. Trainer logs these under behavior/* so we can see
+            # whether the agent is starting to demonstrate emergent
+            # hierarchical play (visit shops, use items, reach later
+            # floors) even where we haven't explicitly rewarded it.
+            info["behavior_metrics"] = self.reward_shaper.episode_behavior_metrics()
         elif truncated:
             info["ep_end_reason"] = "truncated"
             info["reward_breakdown_episode"] = dict(self._episode_breakdown)
+            info["behavior_metrics"] = self.reward_shaper.episode_behavior_metrics()
         return obs, reward, terminated, truncated, info
 
     def _try_accept_after_close(self, wait_s: float = 3.0) -> dict[str, Any] | None:

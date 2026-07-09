@@ -91,6 +91,13 @@ class SyncVecEnv:
                 # real crashes from proper shaper-terminated episodes).
                 if isinstance(terminal_info, dict) and "ep_end_reason" in terminal_info:
                     info["ep_end_reason"] = terminal_info["ep_end_reason"]
+                # Behavior metrics (2026-07-09, Phase C): per-episode telemetry
+                # that the trainer logs under behavior/*. Purely observational —
+                # tells us whether the agent is doing hierarchical play (visit
+                # shops, use items, reach later floors) independent of the
+                # reward-shaping signal.
+                if isinstance(terminal_info, dict) and "behavior_metrics" in terminal_info:
+                    info["behavior_metrics"] = terminal_info["behavior_metrics"]
             else:
                 terminal_obs.append(None)
             obs.append(o)

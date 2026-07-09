@@ -258,6 +258,11 @@ def train(cfg: DreamerConfig) -> None:
     }
     _crash_warned = False
 
+    # 2026-07-09: Phase C behavior metrics. Aggregated in the shaper, emitted
+    # via info["behavior_metrics"] on each terminal step. Logged as
+    # `behavior/{metric}` scalars — pure telemetry, NOT rewards.
+    completed_behavior: dict[str, deque[float]] = {}
+
     def _record_ep_extras(bd: dict) -> None:
         """Append per-episode reward-breakdown to completed_extras.
 
@@ -283,6 +288,25 @@ def train(cfg: DreamerConfig) -> None:
             reason = "unknown"
         for r in _ENDS:
             completed_end_reasons[r].append(1 if r == reason else 0)
+
+    def _record_ep_behavior(info: dict) -> None:
+        """Record per-episode behavior metrics for TB logging. 2026-07-09 Phase C.
+
+        These are PURE TELEMETRY — not rewards. They answer 'is the agent
+        starting to do hierarchical Isaac gameplay' (visit shops, use items,
+        reach later floors, kill bosses) independent of what we're
+        explicitly shaping. See RewardShaper.episode_behavior_metrics() for
+        the metric set.
+        """
+        if not isinstance(info, dict):
+            return
+        beh = info.get("behavior_metrics")
+        if not isinstance(beh, dict):
+            return
+        for k, v in beh.items():
+            if k not in completed_behavior:
+                completed_behavior[k] = deque(maxlen=_EXTRAS_WINDOW)
+            completed_behavior[k].append(float(v))
 
     global_step = 0
     update = 0
@@ -371,7 +395,9 @@ def train(cfg: DreamerConfig) -> None:
                 bd = info.get("reward_breakdown_episode") or info.get("reward_breakdown") or {}
                 _record_ep_extras(bd)
                 _record_ep_end_reason(info)
+                _record_ep_behavior(info)
         # is_first on next step is True if this step ended an episode.
+        is_first_flags = np.logical_or(terms, truncs)
         is_first_flags = np.logical_or(terms, truncs)
         obs_list = next_obs_list
     log.info("prefill complete: replay has %d transitions", len(replay))
@@ -438,6 +464,7 @@ def train(cfg: DreamerConfig) -> None:
                 bd = info.get("reward_breakdown_episode") or info.get("reward_breakdown") or {}
                 _record_ep_extras(bd)
                 _record_ep_end_reason(info)
+                _record_ep_behavior(info)
         # Reset RSSM state row + one-hot action for env rows that just terminated.
         for i in range(cfg.n_envs):
             if terms[i] or truncs[i]:
@@ -513,6 +540,16 @@ def train(cfg: DreamerConfig) -> None:
                         float((arr != 0.0).mean()),
                         global_step,
                     )
+                # Phase C behavior metrics (2026-07-09). Same last-64-episode
+                # window as reward/{k}. Prefixed `behavior/` to keep them
+                # separate in TB. Purely telemetry — no gradient impact.
+                for k, vs in completed_behavior.items():
+                    if not vs:
+                        continue
+                    tail = list(vs)[-64:]
+                    arr = np.asarray(tail, dtype=np.float32)
+                    writer.add_scalar(f"behavior/{k}", float(arr.mean()), global_step)
+                    writer.add_scalar(f"behavior/{k}_max", float(arr.max()), global_step)
                 # Episode-end reason distribution. `mod_socket_error` dominating
                 # (>50%) means the mod's terminal-obs send is failing every
                 # episode — usually because the Isaac window is backgrounded

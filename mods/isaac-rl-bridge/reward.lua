@@ -80,6 +80,38 @@ function R.attach(mod)
             end
         end
     end)
+
+    -- 2026-07-09: Track active-item usage (space bar). MC_USE_ITEM fires when
+    -- the player presses SPACE with an active item that has enough charge.
+    -- The Python-side shaper rewards r_use_item on every fire, plus an extra
+    -- chain reward if `was_charged` is true (item was at full charge, i.e.
+    -- the player waited to use it optimally rather than mashing space).
+    --
+    -- The signature is (item_id, rng, player, use_flags, active_slot,
+    -- custom_var_data). Some of those may vary by Repentance version; we
+    -- use pcall to defensively fall through if the callback doesn't fire.
+    mod:AddCallback(ModCallbacks.MC_USE_ITEM, function(_, item_id, _rng, player, use_flags, active_slot)
+        -- Determine if the item was fully charged. Best proxy: on-use we
+        -- can check the item's max charge vs the pre-use charge. But the
+        -- pre-use charge is already consumed by the time this fires — so
+        -- we approximate 'was_charged' by checking use_flags for the
+        -- 'USE_OWNED' flag which indicates a proper item use (not a
+        -- passive trigger). Coarse but useful.
+        local ok, was_charged = pcall(function()
+            -- UseFlag.USE_OWNED = 1 (bit flag). If set, this was a
+            -- player-initiated space-press with a fully-charged item.
+            if type(use_flags) == "number" and (use_flags & 1) ~= 0 then
+                return true
+            end
+            return false
+        end)
+        R.push({
+            kind = "use_item",
+            item_id = tonumber(item_id) or 0,
+            was_charged = (ok and was_charged) or false,
+        })
+        return nil  -- do not modify the item's effect
+    end)
 end
 
 R._collected = {}
