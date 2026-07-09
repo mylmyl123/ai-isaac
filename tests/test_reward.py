@@ -33,6 +33,57 @@ def test_death_terminates():
     assert bd.get("death") == RewardConfig().r_death
 
 
+def test_hp_based_death_detection():
+    """HP-based termination fires when player HP drops to 0 without a mod
+    death event. Guards against the mod delivering a partial obs (or the
+    terminal-obs send failing entirely, as it did on the 2026-07-08 run)."""
+    r = RewardShaper()
+    # First tick: player alive with 6 red hearts. max_hp=6 so this is Isaac.
+    _, term1, bd1 = r({"player": {"hp_red": 6, "hp_max": 6}, "events": []})
+    assert not term1
+    assert "death" not in bd1
+    # Second tick: HP dropped to 0 (fatal damage). NO death event from the
+    # mod. Shaper must still terminate + apply r_death from HP inference.
+    _, term2, bd2 = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert term2, "HP-based death detection should terminate the episode"
+    assert bd2.get("death") == RewardConfig().r_death
+
+
+def test_hp_based_death_not_fired_on_first_obs_with_hp_zero():
+    """Don't fire the HP-based death on the very first obs even if HP is 0
+    (would incorrectly kill The Lost or an obs where the mod hasn't
+    populated HP fields yet)."""
+    r = RewardShaper()
+    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert not term
+    assert "death" not in bd
+
+
+def test_hp_based_death_not_fired_for_lost_character():
+    """Characters with max_hp = 0 (e.g. The Lost) live at 0 HP and should
+    not trigger the HP-based death path."""
+    r = RewardShaper()
+    # First obs: alive with 1 soul heart, no red, max_hp = 0.
+    _, term1, _ = r({"player": {"hp_red": 0, "hp_soul": 1, "hp_max": 0}, "events": []})
+    assert not term1
+    # HP goes to 0 total. max_hp still 0 -> not a death.
+    _, term2, bd2 = r({"player": {"hp_red": 0, "hp_soul": 0, "hp_max": 0}, "events": []})
+    assert not term2
+    assert "death" not in bd2
+
+
+def test_hp_based_death_fires_only_once():
+    """After HP-based death fires on tick N, subsequent ticks with HP=0
+    should NOT re-fire (st.dead is set)."""
+    r = RewardShaper()
+    r({"player": {"hp_red": 6, "hp_max": 6}, "events": []})
+    _, term1, bd1 = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    assert term1 and bd1.get("death") == RewardConfig().r_death
+    _, term2, bd2 = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    # st.dead is now True, HP-death check must not fire a second time.
+    assert "death" not in bd2
+
+
 def test_new_room_first_entry_only():
     r = RewardShaper()
     e1 = {"kind": "new_room", "is_new": True, "safe_grid_index": 42, "room_type": 1}

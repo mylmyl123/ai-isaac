@@ -276,6 +276,10 @@ class RewardShaper:
         st = self.state
         reward = cfg.r_step
         breakdown: dict[str, float] = {"step": cfg.r_step}
+        # Initialize early so the HP-based death detection below (inserted
+        # 2026-07-08) can read `terminated`. The original declaration at
+        # the start of the events loop is now redundant — kept as a no-op.
+        terminated: bool = False
 
         def add(name: str, x: float) -> None:
             nonlocal reward
@@ -293,6 +297,11 @@ class RewardShaper:
         speed = math.hypot(vx, vy)
 
         # ---- HP-delta damage-taken (also feeds damage-this-room) ----------
+        # Snapshot the previous-tick HP totals BEFORE we overwrite them, so
+        # the HP-based death detection below can check the "was alive last
+        # tick" condition (needed to distinguish real death from the
+        # first-obs state where prev is 0).
+        prev_alive = st.prev_hp_red > 0 or st.prev_hp_soul > 0 or st.prev_hp_black > 0
         if st.prev_hp_red or st.prev_hp_soul or st.prev_hp_black:
             d_red = st.prev_hp_red - cur_red
             d_other = (st.prev_hp_soul - cur_soul) + (st.prev_hp_black - cur_black)
@@ -306,8 +315,34 @@ class RewardShaper:
         st.prev_hp_soul = cur_soul
         st.prev_hp_black = cur_black
 
+        # ---- HP-based death detection (Python-side, mod-independent) ------
+        # The mod is supposed to send a {kind: "death"} event on player
+        # death, but its delivery is unreliable (see 2026-07-08 postmortem:
+        # 100% of episodes ended via mod_socket_error, 0 via shaper
+        # termination, despite the fact that the mod's fast-path AND render
+        # fallback both call handle_player_death). Rather than depend on
+        # the mod delivering the terminal frame, we terminate here whenever
+        # the player's total HP reaches 0 after having been >0 in a prior
+        # tick. Uses the same r_death reward as the mod-delivered event,
+        # so downstream training is unaffected.
+        #
+        # Uses `prev_alive` snapshotted above (before the prev fields were
+        # overwritten with this tick's HP). Also gates on max_hp > 0 to
+        # exclude Lost-style 0-max characters. In practice we run as Isaac
+        # (max_hp = 6), so this is belt-and-suspenders.
+        if not terminated and not st.dead:
+            total_cur = cur_red + cur_soul + cur_black
+            if max_hp > 0 and total_cur <= 0 and prev_alive:
+                st.dead = True
+                add("death", cfg.r_death)
+                terminated = True
+
         # ---- Events (kills, pickups, room/level, death) -------------------
-        terminated = False
+        # `terminated` was hoisted to the top of __call__ so the HP-based
+        # death check can read it; keeping this line as a no-op preserves
+        # blame-friendly diffs and future-proofs against someone deleting
+        # the hoist.
+        terminated = terminated or False
         room_cleared_this_tick = False
         for evt in raw_obs.get("events") or []:
             kind = evt.get("kind")
