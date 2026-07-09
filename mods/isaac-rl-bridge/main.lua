@@ -67,6 +67,16 @@ local pending_seed = nil
 -- the death animation — that combination is exactly what causes the
 -- Lua5.3.3r.dll 0xc0000005 crash that closes the Isaac window.
 local death_announced = false
+-- Track player HP across ticks so we can fire the death handler the
+-- moment HP crosses to zero (before player:IsDead() flips). Reset in
+-- MC_POST_GAME_STARTED. See handle_player_death for the rationale.
+local player_hp_prev = nil
+-- Forward-declare so callbacks defined below (line ~344, ~568) can reference
+-- it. The actual function body is defined further down where the other
+-- helpers live (line ~530). Without the forward-declare, Lua would resolve
+-- `handle_player_death` at callback-compile time as a global lookup, hit
+-- nil at runtime, and crash the mod on the first death.
+local handle_player_death
 
 -- Per-run state that Python's reward shaper wants to know about.
 local run_state = {
@@ -287,6 +297,7 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     reset_run_state()
     reset_cooldown = 30
     death_announced = false
+    player_hp_prev = nil  -- reset HP tracking so the first tick of a new run seeds it
     clear_cached_action()
     if MINIMAL_MODE then
         Isaac.DebugString("[isaac-rl-bridge] MINIMAL_MODE: run started, socket disabled")
@@ -390,55 +401,36 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     -- `restart` immediately. All subsequent ticks skip exchange entirely
     -- until MC_POST_GAME_STARTED clears the death_announced flag.
     local player = Isaac.GetPlayer(0)
-    if player and player:IsDead() then
-        if not death_announced then
-            death_announced = true
-            -- Zero all cached button state so no stale 'shoot right' / 'item'
-            -- press bleeds from the death tick into the game-over screen or
-            -- the next run's first frames.
-            clear_cached_action()
-            run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
-            -- Send a minimal terminal obs. No entity iteration — same schema
-            -- keys as the full obs so Python's encode_obs() can zero-fill
-            -- the missing fields without any special-case handling.
-            if conn then
-                local minimal = {
-                    schema = 2,
-                    tick = tick,
-                    player = { is_dead = true, hp_red = 0 },
-                    events = { { kind = "death" } },
-                }
-                -- CRITICAL: use send_blocking with a long (2s) timeout, not
-                -- the regular 50ms conn:send. When the Isaac window is
-                -- backgrounded, Windows throttles the process to a few Hz
-                -- and the socket write cannot complete in 50ms. The default
-                -- send() drops the frame on timeout, Python's recv_frame
-                -- eventually sees a ConnectionError, applies -1 crash
-                -- penalty and skips the RewardShaper entirely. The
-                -- 2026-07-07 9.5h run had 100% of episodes hit that path
-                -- — no HP tracking, no death event, no in-game rewards.
-                -- 2s is long enough to survive heavy throttling; it only
-                -- adds latency on the terminal tick which is discarded anyway.
-                local ok_send = pcall(function()
-                    return conn:send_blocking(json.encode(minimal), 2.0)
-                end)
-                if ok_send then
-                    -- Consume Python's reset command so the socket buffer
-                    -- doesn't hold a stale message across MC_POST_GAME_STARTED.
-                    pcall(function() conn:recv() end)
-                end
-            end
-            Isaac.DebugString("[isaac-rl-bridge] player died, issuing 'restart' (mid-run, in-process)")
-            Isaac.ExecuteCommand("restart")
-            -- Isaac's restart tears down and rebuilds the whole run. On slower
-            -- machines the tail of that teardown can take a full second, and
-            -- iterating entities during it crashes isaac-ng.exe itself
-            -- (0xc0000005 access-violation deep in the engine, not Lua). Give
-            -- it a much longer cushion than the game-tick rate suggests. 60
-            -- ticks ≈ 2s at 30 Hz.
-            reset_cooldown = 60
+    -- Broadened trigger: catch dying BEFORE Isaac's IsDead flag flips.
+    -- Isaac defers the IsDead flag by 1-2 ticks after the fatal damage.
+    -- On some deaths MC_POST_UPDATE stops firing during that window,
+    -- causing this callback to NEVER see IsDead()=true and the whole
+    -- death path to fall through to the render watchdog. Also check
+    -- total HP <= 0 so we fire the moment damage is applied — catches
+    -- the death 1 tick earlier while the update callbacks are still
+    -- firing. Wrap in pcall because during the death animation any
+    -- player method can dereference freed C++ pointers (0xc0000005).
+    if player then
+        local hp_ok, total_hp = pcall(function()
+            return (player:GetHearts() or 0) + (player:GetSoulHearts() or 0) + (player:GetBlackHearts() or 0)
+        end)
+        -- Fire on either IsDead() (Isaac's official flag — may be delayed
+        -- by 1-2 ticks), or on the HP transition >0 → ≤0 (catches the
+        -- damage-application tick before IsDead flips). The transition
+        -- check is important: we can't just use `total_hp <= 0` because
+        -- some characters (e.g. The Lost) live at 0 HP. Only firing on
+        -- the CROSS-TO-ZERO transition avoids false positives.
+        local hp_transitioned_to_zero =
+            hp_ok and player_hp_prev ~= nil
+            and player_hp_prev > 0 and total_hp <= 0
+        local is_dying = player:IsDead() or hp_transitioned_to_zero
+        if hp_ok then
+            player_hp_prev = total_hp
         end
-        return
+        if is_dying then
+            handle_player_death("MC_POST_UPDATE")
+            return
+        end
     end
 
     if (tick % FRAME_SKIP) == 0 and conn then
@@ -531,6 +523,67 @@ local AUTO_START_AFTER_FRAMES = 240
 local death_render_frames = 0
 local DEATH_AUTO_RESTART_FRAMES = 120   -- ~2s at 60 render Hz
 
+-- Player death handling. When the player's HP reaches 0 Isaac starts a
+-- death animation and then transitions to the 'You Died' screen. During
+-- BOTH those phases the game is tearing down / has torn down its entity
+-- lists, and any call to Isaac.GetRoomEntities() / FindByType() / player
+-- methods can dereference freed C++ pointers — which crashes the Isaac
+-- process (Lua5.3.3r.dll 0xc0000005, verified via Event Viewer). The
+-- window closing on death was this crash, not our `restart` command.
+--
+-- Fix: on the FIRST tick of death, send Python a minimal terminal-obs
+-- (no entity iteration), swallow whatever it sends back, then fire
+-- `restart` immediately. All subsequent ticks skip exchange entirely
+-- until MC_POST_GAME_STARTED clears the death_announced flag.
+--
+-- 2026-07-08 REV: extracted into a helper so both MC_POST_UPDATE (fast
+-- path) and MC_POST_RENDER (fallback — fires when MC_POST_UPDATE stops
+-- during the death animation) call the same code. The old MC_POST_RENDER
+-- watchdog only fired `restart` without notifying Python, which caused
+-- 100% of episodes to be classified as mod_socket_error and skipped the
+-- shaper's death event (verified 2026-07-08 run: 85k steps, 222
+-- episodes, zero `reward/death` firings). Also broadened the trigger
+-- condition so we fire on HP<=0 even if player:IsDead() hasn't flipped
+-- yet, and captured the actual send_blocking return value (previously
+-- the pcall wrapper swallowed it, so we had no signal on failure).
+-- Body for the forward-declared `handle_player_death`. Assigning to the
+-- existing local (rather than `local function` here, which would create a
+-- NEW local scope and shadow the forward-declared one) so the callbacks
+-- above see the same function reference.
+handle_player_death = function(source)
+    if death_announced then return end
+    death_announced = true
+    clear_cached_action()
+    run_state.pending_events[#run_state.pending_events + 1] = { kind = "death" }
+    Isaac.DebugString("[isaac-rl-bridge] handle_player_death firing (source=" .. source .. ")")
+    if conn then
+        local minimal = {
+            schema = 2,
+            tick = tick,
+            player = { is_dead = true, hp_red = 0 },
+            events = { { kind = "death" } },
+        }
+        -- pcall returns (ok, retvals...). Capture BOTH so we know whether
+        -- send_blocking actually delivered the frame or timed out. Previous
+        -- code was `local ok = pcall(function() return send_blocking(...) end)`
+        -- which silently threw away the delivered=true/false return.
+        local pcall_ok, delivered = pcall(function()
+            return conn:send_blocking(json.encode(minimal), 2.0)
+        end)
+        if pcall_ok and delivered then
+            Isaac.DebugString("[isaac-rl-bridge] terminal-obs DELIVERED (source=" .. source .. ")")
+            -- Consume Python's reset command so the socket buffer doesn't
+            -- hold a stale message across MC_POST_GAME_STARTED.
+            pcall(function() conn:recv() end)
+        else
+            Isaac.DebugString("[isaac-rl-bridge] terminal-obs FAILED source=" .. source .. " pcall_ok=" .. tostring(pcall_ok) .. " delivered=" .. tostring(delivered))
+        end
+    end
+    Isaac.DebugString("[isaac-rl-bridge] issuing 'restart' from " .. source)
+    Isaac.ExecuteCommand("restart")
+    reset_cooldown = 60
+end
+
 -- MC_POST_UPDATE fires only during an active, unpaused run. The instant we see
 -- one, we know the run is live and disable the fallback permanently.
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
@@ -573,12 +626,17 @@ mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
         return
     end
     if player:IsDead() and not death_announced then
-        death_render_frames = death_render_frames + 1
-        if death_render_frames == DEATH_AUTO_RESTART_FRAMES then
-            Isaac.DebugString("[isaac-rl-bridge] render-watchdog: player dead 2s with no MC_POST_UPDATE handling, forcing 'restart'")
-            Isaac.ExecuteCommand("restart")
-            death_render_frames = 0
-        end
+        -- 2026-07-08 REV: previously waited DEATH_AUTO_RESTART_FRAMES
+        -- (~2s) of continuous player-dead render frames before firing
+        -- `restart`, and NEVER notified Python of the death. Result:
+        -- 100% of episodes appeared to Python as socket errors instead
+        -- of proper deaths, and the shaper never saw a `death` event
+        -- (verified 2026-07-08 run: zero `reward/death` firings across
+        -- 222 episodes). Now: fire the death handler on the FIRST
+        -- render frame where player is dead, going through the same
+        -- code path as MC_POST_UPDATE (delivers terminal obs to Python
+        -- so the shaper can apply r_death + hp deltas properly).
+        handle_player_death("MC_POST_RENDER")
     else
         death_render_frames = 0
     end
