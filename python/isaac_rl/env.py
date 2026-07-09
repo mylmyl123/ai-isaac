@@ -285,24 +285,55 @@ class SocketIsaacEnv(gym.Env):
             send_frame(self._client, encode_action(a))
             raw = recv_frame(self._client)
         except (ConnectionError, OSError) as e:
-            # Distinguish which syscall failed to help diagnose whether it's
-            # a mod-side send timeout (terminal-obs dropped, Isaac was fine
-            # and continued running) vs. a game-process crash (Isaac died).
-            # `_try_accept_after_close` returning True inside
-            # `_handle_crash_and_reaccept` means Isaac was alive and just
-            # cycled its socket — that's the mod's in-process restart path
-            # or a dropped terminal-obs. If the reconnect fails, it's a real
-            # crash.
+            # 2026-07-09 REDESIGN: split "mod cycled socket cleanly" from
+            # "Isaac process actually crashed". Prior code applied a fixed
+            # -1 crash_penalty on BOTH cases, which produced a ~-0.9/ep
+            # baseline drag regardless of policy quality (measured on the
+            # 2026-07-08 15h run: 90% of episodes ended via this path with
+            # crash_penalty firing). Now:
+            #   - mod cycled socket → the mod deliberately closed to restart
+            #     mid-run on player death. Isaac is alive and will reconnect
+            #     in <500 ms. HP-based death detection in the shaper (commit
+            #     8d72114) has already terminated the episode with r_death.
+            #     Applying an extra -1 on top is double-counting the death.
+            #     Return terminated=True with NO extra penalty.
+            #   - Isaac actually crashed → respawn path, apply -1 crash_penalty
+            #     as before. This is the rare true-crash case (SIGSEGV,
+            #     out-of-memory, etc.).
             log.warning(
-                "port %d: Isaac died mid-step (%s: %s) — respawning",
+                "port %d: connection interrupted mid-step (%s: %s) — checking if mod restart or real crash",
                 self.port, type(e).__name__, e,
             )
-            self._handle_crash_and_reaccept(read_first_obs=False)
-            # Terminal step with penalty. Rewards from the shaper are optional
-            # here; we hardcode a fixed penalty so training sees a clear signal
-            # 'don't do whatever led to this'. It's small enough not to dominate.
+            reconnected_raw = self._try_accept_after_close(wait_s=3.0)
             self._last_action = a
             self._steps += 1
+            if reconnected_raw is not None:
+                # Mod cycled its socket cleanly — in-process restart on death.
+                # Terminate the episode with 0 penalty; the shaper's HP-based
+                # death detection has already applied r_death on the last
+                # obs where HP transitioned to 0.
+                log.info("port %d: mod cycled socket (expected on death) — terminating cleanly", self.port)
+                obs = self._build_obs(reconnected_raw)
+                info: dict[str, Any] = {
+                    "raw": reconnected_raw,
+                    "steps": self._steps,
+                    "reward_breakdown": {},
+                    "reward_breakdown_episode": dict(self._episode_breakdown),
+                    "crashed": False,
+                    "ep_end_reason": "mod_restart",
+                }
+                # NOTE: reconnected_raw came from a FRESH mod (post-restart),
+                # so it's a valid initial obs for the next episode. Store it
+                # so env.reset() doesn't re-accept and lose the frame.
+                # (env.reset() checks self._client is not None; we've already
+                # set it via _try_accept_after_close.)
+                return obs, 0.0, True, False, info
+            # Real crash: no reconnection. Fall through to respawn.
+            log.warning(
+                "port %d: no reconnection within 3s — assuming real crash, respawning",
+                self.port,
+            )
+            self._handle_crash_and_reaccept(read_first_obs=False)
             crash_raw = _crash_penalty_obs(self.port)
             # Advance frame-stack even on crash to avoid stale history.
             self._update_player_history(crash_raw)
@@ -312,15 +343,13 @@ class SocketIsaacEnv(gym.Env):
                 "steps": self._steps,
                 "reward_breakdown": {"crash_penalty": -1.0},
                 "crashed": True,
-                # New: explicit episode-end reason. `mod_socket_error` covers
-                # BOTH "real Isaac crash" and "mod's terminal-obs send timed
-                # out" (the 2026-07-07 bug). If the crash rate here is high,
-                # check the Isaac window is focused/visible.
-                "ep_end_reason": "mod_socket_error",
+                # `isaac_crash` now specifically means "Isaac process died"
+                # (real crash). Mod-restart-during-death goes through the
+                # branch above with ep_end_reason="mod_restart".
+                "ep_end_reason": "isaac_crash",
             }
             # Fold crash_penalty into the per-episode running sum, then emit
-            # the whole episode-total breakdown so trainers can log per-key
-            # per-episode contributions (not just this terminal tick).
+            # the whole episode-total breakdown.
             self._episode_breakdown["crash_penalty"] = (
                 self._episode_breakdown.get("crash_penalty", 0.0) - 1.0
             )

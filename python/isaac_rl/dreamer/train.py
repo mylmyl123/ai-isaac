@@ -242,12 +242,17 @@ def train(cfg: DreamerConfig) -> None:
     completed_extras: dict[str, deque[float]] = {
         k: deque(maxlen=_EXTRAS_WINDOW) for k in REWARD_BREAKDOWN_KEYS
     }
-    # Track episode-end reason (shaper_terminated / truncated / mod_socket_error).
-    # If mod_socket_error rate is high, learning is broken: the mod's terminal
-    # obs never reaches Python's shaper, so the agent sees only -1 crash
-    # penalty with no HP tracking or in-game events. This is what happened
-    # on the 2026-07-07 run (100% mod_socket_error, 0 learning signal).
-    _ENDS = ("shaper_terminated", "truncated", "mod_socket_error", "unknown")
+    # Track episode-end reason. Categories (post 2026-07-09 crash-split):
+    #   - shaper_terminated: normal termination via shaper (death, floor clear, etc.)
+    #   - truncated: hit max_episode_steps
+    #   - mod_restart: mod cycled its socket cleanly (in-process restart on death).
+    #     NOT a penalty case — the HP-based death detection in the shaper
+    #     already handled the actual death.
+    #   - isaac_crash: Isaac process actually died (real crash). Applies -1 penalty.
+    #   - mod_socket_error: LEGACY (pre-2026-07-09) combined category. Kept for
+    #     backward-compatible tag names when reading old runs.
+    #   - unknown: catch-all fallback.
+    _ENDS = ("shaper_terminated", "truncated", "mod_restart", "isaac_crash", "mod_socket_error", "unknown")
     completed_end_reasons: dict[str, deque[int]] = {
         r: deque(maxlen=_EXTRAS_WINDOW) for r in _ENDS
     }
@@ -519,7 +524,16 @@ def train(cfg: DreamerConfig) -> None:
                     tail = list(vs2)[-64:]
                     frac = float(np.mean(tail)) if tail else 0.0
                     writer.add_scalar(f"rollout/ep_end_{r}_frac", frac, global_step)
-                mse_tail = list(completed_end_reasons["mod_socket_error"])[-64:]
+                # 2026-07-09: after crash-split, watch isaac_crash (real
+                # crash, applies -1 penalty) separately from mod_restart
+                # (clean mod cycle, no penalty). High isaac_crash rate =
+                # actual instability. High mod_restart rate = high death
+                # rate (agent dying a lot) which is normal for early
+                # training and NOT a problem — don't warn on it.
+                mse_tail = (
+                    list(completed_end_reasons["isaac_crash"])[-64:]
+                    or list(completed_end_reasons["mod_socket_error"])[-64:]
+                )
                 if len(mse_tail) >= 32 and not _crash_warned:
                     mse_frac = float(np.mean(mse_tail))
                     if mse_frac > 0.5:
