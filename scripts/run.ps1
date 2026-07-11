@@ -16,6 +16,9 @@
 #   .\scripts\run.ps1 -TrainRatio 4            # WM grad-steps per env-step
 #                                              #   (default 16 for full, 4 for XS)
 #   .\scripts\run.ps1 -Isaac "C:\path\isaac-ng.exe"    # override binary path
+#   .\scripts\run.ps1 -XS -Resume ckpts\latest.pt  # resume from checkpoint
+#                                              #   (Track B gating experiment: save
+#                                              #   the 40h WM investment)
 #
 # Isaac binary auto-detected from standard Steam install locations.
 
@@ -26,6 +29,7 @@ param(
     [int]$NEnvs = 0,             # 0 = use YAML default
     [int]$TrainRatio = 0,        # 0 = use YAML default
     [string]$Isaac = "",         # empty = auto-detect from Steam
+    [string]$Resume = "",        # path to checkpoint .pt to resume from
     [switch]$NoTensorboard
 )
 
@@ -81,6 +85,13 @@ if ($Smoke) {
 }
 if ($NEnvs -gt 0) { $overrides += "n_envs=$NEnvs" }
 if ($TrainRatio -gt 0) { $overrides += "train_ratio=$TrainRatio" }
+if ($Resume -ne "") {
+    if (-not (Test-Path $Resume)) {
+        Write-Error "Resume checkpoint not found: $Resume"
+        exit 1
+    }
+    $overrides += "resume_from=$Resume"
+}
 if ($overrides.Count -gt 0) {
     $cmd += "--override"
     $cmd += $overrides
@@ -91,6 +102,7 @@ Write-Host "==== Isaac RL — Dreamer stage $Stage$(if ($XS) { ' (XS variant)' }
 Write-Host "config:    $configPath"
 if ($Smoke)     { Write-Host "mode:      SMOKE (100k steps)" -ForegroundColor Yellow }
 if ($XS)        { Write-Host "model:     XS (9.5M params — targets consumer GPUs)" -ForegroundColor Green }
+if ($Resume)    { Write-Host "resume:    $Resume" -ForegroundColor Green }
 if ($Isaac)     { Write-Host "isaac:     $Isaac" }
 if ($overrides) { Write-Host "overrides: $($overrides -join ' ')" }
 Write-Host "cmd:       python $($cmd -join ' ')"
