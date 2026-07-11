@@ -612,6 +612,11 @@ class MLP(nn.Module):
         symlog_inputs=False,
         device="cuda",
         name="NoName",
+        # 2026-07-11 Track B: gating experiment needs value head range past
+        # r_beat_mom=+50. DiscDist previously hardcoded low=-20/high=20; wire
+        # them through so config.value_v_min/max actually take effect.
+        disc_low=-20.0,
+        disc_high=20.0,
     ):
         super(MLP, self).__init__()
         self._shape = (shape,) if isinstance(shape, int) else shape
@@ -627,6 +632,8 @@ class MLP(nn.Module):
         self._unimix_ratio = unimix_ratio
         self._symlog_inputs = symlog_inputs
         self._device = device
+        self._disc_low = disc_low
+        self._disc_high = disc_high
 
         self.layers = nn.Sequential()
         for i in range(layers):
@@ -738,7 +745,12 @@ class MLP(nn.Module):
                 )
             )
         elif dist == "symlog_disc":
-            dist = tools.DiscDist(logits=mean, device=self._device)
+            dist = tools.DiscDist(
+                logits=mean,
+                low=self._disc_low,
+                high=self._disc_high,
+                device=self._device,
+            )
         elif dist == "symlog_mse":
             dist = tools.SymlogDist(mean)
         else:

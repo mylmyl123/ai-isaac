@@ -106,10 +106,18 @@ critic_grad_clip: 100.0
 #   (log_prob * adv ~= 4 * 0.003 = 0.012). Drop to 3e-3 (still 10x paper) so
 #   the two are comparable and actor can actually move off uniform.
 actor_entropy: 3.0e-3
-# 2026-07-09 v2: bumped from 15 -> 20 to give the critic a longer window
-# for evaluating multi-step consequences of actions. Combined with the
-# gamma bump below, effective planning horizon roughly doubles.
-imag_horizon: 20
+# 2026-07-11 GATING EXPERIMENT (Track B, per docs/analysis-2026-07-11/):
+# Bumped 20 -> 120 to test whether the actor-entropy collapse observed in
+# the 40h v3 run (entropy 3.804 / 3.807 max, 99.92% uniform) is H_soft
+# (fixable via horizon extension) or H_hard (architectural attractor).
+# Rationale: imag_horizon=20 ticks / 15 Hz = 1.33s of imagined game time,
+# but Isaac's meaningful outcomes (room clear = 5-20s, floor = 60-120s,
+# boss = 30-60s) are 4-100x longer. At cont~=1 the critic hallucinates
+# V~=47 everywhere; adv_std collapses to 0.05, actor gets no signal.
+# Decision criterion: if entropy drops below 3.5 within 20k updates AND
+# actor_target_mean does not inflate proportionally -> H_soft -> commit to
+# BC-bootstrap. Else H_hard -> commit to Director hierarchical wrapper.
+imag_horizon: 120
 # 2026-07-09 v2: bumped from 0.997 -> 0.999 for longer effective horizon.
 # At 0.997: rewards 100 steps away discounted to 0.74, 1000 steps to 0.05.
 # At 0.999: rewards 100 steps at 0.905, 1000 steps at 0.37.
@@ -123,8 +131,13 @@ unimix_ratio: 0.01
 
 # ---- reward + value heads ------------------------------------------
 value_atoms: 255
-value_v_min: -20.0
-value_v_max: 20.0
+# 2026-07-11 GATING EXPERIMENT (Track B): bumped -20/+20 to -100/+100.
+# Reason: r_beat_mom = +50 was CLIPPED by the +20 upper bound. The critic
+# literally could not represent "beating Mom is worth 2x floor-clear" —
+# mechanical bug identified in the 2026-07-11 adversarial audit. New range
+# covers r_beat_mom (+50) with 2x headroom for episode-total accumulation.
+value_v_min: -100.0
+value_v_max: 100.0
 reward_head_layers: 2
 cont_head_layers: 2
 
@@ -133,6 +146,19 @@ slow_target: true
 slow_target_update: 1
 slow_target_fraction: 0.02
 reward_ema: true
+
+# ---- RND intrinsic (2026-07-11 GATING EXPERIMENT retune) -----------
+# v3 fix (2026-07-09) trained RND predictor on REAL post-features rather
+# than imagined feats. This reduced predictor_loss from ~1e-3 to ~5e-6
+# (predictor now generalizes much better to real replay distribution).
+# Consequence: intrinsic reward = 6.8e-6 * 0.1 = 6.8e-7 per step, which
+# is 5000x smaller than r_step=-0.003 — exploration bonus was effectively
+# ZERO for the 40h v3 run. Bumping scale 1000x (0.1 -> 100.0) restores
+# intrinsic magnitude to ~7e-4 per step, roughly matching r_step scale
+# so exploration can actually compete with the step penalty.
+# If the scale ends up too high (agent chases novelty to detriment of
+# task) reduce toward 10.0 next iteration.
+rnd_intrinsic_scale: 100.0
 
 # ---- training loop -------------------------------------------------
 prefill_steps: 2500

@@ -138,7 +138,9 @@ class IsaacWorldModel(nn.Module):
         self.decoder = IsaacObsDecoder(feat_size, dec_cfg)
 
         # ---- Reward + continue heads (vendor MLP with the right dist) ---
-        # symlog_disc = 255-bin twohot over symlog space [-20, 20].
+        # 2026-07-11 Track B: v_min/v_max now wired to DiscDist via disc_low/
+        # disc_high (vendor MLP patched). Previously the range was hardcoded
+        # at [-20, 20] which clipped r_beat_mom=+50 to +20.
         self.reward_head = networks.MLP(
             feat_size,
             (255,),
@@ -150,6 +152,8 @@ class IsaacWorldModel(nn.Module):
             outscale=0.0,
             device=str(device),
             name="Reward",
+            disc_low=cfg.value_v_min,
+            disc_high=cfg.value_v_max,
         )
         # Binary continue flag. NM512 uses dist="binary" which needs `shape=()`.
         self.cont_head = networks.MLP(
@@ -359,6 +363,40 @@ class IsaacWorldModel(nn.Module):
         metrics["loss/kl_free_bits_frac"] = kl_free_bits_frac
         metrics["loss/total"] = float(total.item())
 
+        # ---- cont-flag misprediction diagnostics (2026-07-11 Track B) ----
+        # Added for the imag_horizon gating experiment. The 40h v3 run
+        # showed loss/cont ~= 3.5e-4 which means the WM predicts continue~=1
+        # almost everywhere. That's fine when it's correct, but when the
+        # replay batch actually contains terminal steps and the model still
+        # predicts continue=1, we get an inflated value target because the
+        # imagined rollout never terminates in imagination even when the
+        # real trajectory did. These diagnostics expose the mismatch.
+        #
+        # * cont_pred_mean: mean predicted P(continue) across [B, T].
+        # * cont_target_mean: fraction of steps that are NOT terminal.
+        # * cont_terminal_pred: predicted P(continue) restricted to steps
+        #   where the truth is terminal (should be near 0; if near 1 the WM
+        #   is failing to predict episode ends and the actor/critic will
+        #   receive inflated targets).
+        # * cont_nonterminal_pred: predicted P(continue) on non-terminal
+        #   steps (should be near 1).
+        with torch.no_grad():
+            cont_pred = cont_dist.mean.squeeze(-1)          # [B, T]
+            cont_true = 1.0 - is_terminal                    # [B, T]
+            term_mask = is_terminal > 0.5
+            metrics["loss/cont_pred_mean"] = float(cont_pred.mean().item())
+            metrics["loss/cont_target_mean"] = float(cont_true.mean().item())
+            metrics["loss/cont_terminal_frac"] = float(term_mask.float().mean().item())
+            if term_mask.any():
+                metrics["loss/cont_terminal_pred"] = float(cont_pred[term_mask].mean().item())
+            else:
+                # No terminal step in the batch — leave unset. Trainer/TB
+                # will just skip logging this key.
+                metrics["loss/cont_terminal_pred"] = 1.0
+            nonterm_mask = ~term_mask
+            if nonterm_mask.any():
+                metrics["loss/cont_nonterminal_pred"] = float(cont_pred[nonterm_mask].mean().item())
+
         # Expose timings for the trainer to log.
         self.last_step_times = times
 
@@ -421,6 +459,7 @@ class IsaacImagBehavior(nn.Module):
         )
 
         # ---- Critic (255-bin twohot) -----------------------------------
+        # 2026-07-11 Track B: v_min/v_max wired (was hardcoded at [-20, 20]).
         self.critic = networks.MLP(
             feat_size,
             (255,),
@@ -432,6 +471,8 @@ class IsaacImagBehavior(nn.Module):
             outscale=0.0,
             device=str(device),
             name="Critic",
+            disc_low=cfg.value_v_min,
+            disc_high=cfg.value_v_max,
         )
         if cfg.slow_target:
             self._slow_critic = copy.deepcopy(self.critic)
