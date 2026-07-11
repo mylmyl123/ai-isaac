@@ -139,14 +139,13 @@ def test_use_item_no_chain_regardless_of_charge():
 # End-of-episode aggregate outcome bonuses (2026-07-09 v2)
 # ---------------------------------------------------------------------
 
-def test_depth_end_bonus_fires_on_termination():
+def test_depth_end_bonus_fires_on_finalize():
     cfg = RewardConfig()
     r = RewardShaper(cfg)
-    # Simulate: reach floor 2, then die (fires terminated=True).
     r({"player": {"hp_red": 6, "hp_max": 6}, "events": [{"kind": "new_level", "stage": 1}]})
     r({"player": {"hp_red": 6, "hp_max": 6}, "events": [{"kind": "new_level", "stage": 2}]})
-    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
-    assert term
+    # v3: aggregates fire via finalize_episode(), NOT inline in __call__.
+    _, bd = r.finalize_episode("shaper_terminated")
     assert bd.get("depth_end_bonus") == cfg.r_depth_end_bonus * 2
 
 
@@ -154,15 +153,13 @@ def test_diversity_end_bonus_sublinear():
     import math
     cfg = RewardConfig()
     r = RewardShaper(cfg)
-    # Visit 3 room types (default + shop + treasure).
     for i, rt in enumerate([ROOM_TYPE_DEFAULT, ROOM_TYPE_SHOP, ROOM_TYPE_TREASURE]):
         r({
             "player": {"hp_red": 6, "hp_max": 6},
             "events": [{"kind": "new_room", "is_new": True, "room_type": rt,
                         "safe_grid_index": i}],
         })
-    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
-    assert term
+    _, bd = r.finalize_episode("shaper_terminated")
     expected = cfg.r_diversity_end_bonus * math.log(1 + 3)
     assert bd.get("diversity_end_bonus") == pytest.approx(expected)
 
@@ -171,9 +168,8 @@ def test_survival_end_bonus_zero_when_dead():
     cfg = RewardConfig()
     r = RewardShaper(cfg)
     r({"player": {"hp_red": 6, "hp_max": 6}, "events": []})
-    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
-    assert term
-    # Died → no survival bonus.
+    r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
+    _, bd = r.finalize_episode("shaper_terminated")
     assert "survival_end_bonus" not in bd
 
 
@@ -181,20 +177,18 @@ def test_survival_end_bonus_partial_hp():
     cfg = RewardConfig()
     r = RewardShaper(cfg)
     r({"player": {"hp_red": 6, "hp_max": 6}, "events": []})
-    # Force terminate via a death event but with non-zero HP (mod-side death).
-    _, term, bd = r({
+    r({
         "player": {"hp_red": 3, "hp_max": 6},
         "events": [{"kind": "death"}],
     })
-    assert term
-    # st.dead is now True — no survival bonus.
+    # death event triggers st.dead=True, so no survival bonus.
+    _, bd = r.finalize_episode("shaper_terminated")
     assert "survival_end_bonus" not in bd
 
 
 def test_efficiency_end_bonus():
     cfg = RewardConfig()
     r = RewardShaper(cfg)
-    # 2 rooms visited, 1 item collected.
     r({
         "player": {"hp_red": 6, "hp_max": 6},
         "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_DEFAULT,
@@ -205,9 +199,7 @@ def test_efficiency_end_bonus():
         "events": [{"kind": "new_room", "is_new": True, "room_type": ROOM_TYPE_TREASURE,
                     "safe_grid_index": 2}, {"kind": "pickup_collectible"}],
     })
-    _, term, bd = r({"player": {"hp_red": 0, "hp_max": 6}, "events": []})
-    assert term
-    # 1 item / 2 rooms = 0.5
+    _, bd = r.finalize_episode("shaper_terminated")
     assert bd.get("efficiency_end_bonus") == pytest.approx(cfg.r_efficiency_end_bonus * 0.5)
 
 

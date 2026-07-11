@@ -309,26 +309,43 @@ class SocketIsaacEnv(gym.Env):
             self._steps += 1
             if reconnected_raw is not None:
                 # Mod cycled its socket cleanly — in-process restart on death.
-                # Terminate the episode with 0 penalty; the shaper's HP-based
-                # death detection has already applied r_death on the last
-                # obs where HP transitioned to 0.
+                # 2026-07-09 v3: apply r_death here since the shaper's
+                # HP-based detection often misses the terminal obs (the 40h
+                # v2 run had shaper_terminated_frac collapse to <1% while
+                # mod_restart hit 98%). Mod restart is overwhelmingly caused
+                # by player death, so applying r_death on this path is a
+                # correct default that recovers the missed signal.
+                # Also fire end-of-episode aggregate outcome bonuses.
                 log.info("port %d: mod cycled socket (expected on death) — terminating cleanly", self.port)
                 obs = self._build_obs(reconnected_raw)
+                bd: dict[str, float] = {}
+                total_reward = 0.0
+                # Only apply r_death if the shaper hasn't already emitted it
+                # (HP-based detection may have caught it on the prior tick).
+                if not self.reward_shaper.state.dead:
+                    self.reward_shaper.state.dead = True
+                    r_death = float(self.reward_shaper.cfg.r_death)
+                    bd["death"] = r_death
+                    total_reward += r_death
+                # End-of-episode aggregate outcome bonuses on ALL terminal
+                # paths (v3 fix for v2's bonuses-never-fire bug).
+                agg_total, agg_bd = self.reward_shaper.finalize_episode("mod_restart")
+                for k, v in agg_bd.items():
+                    bd[k] = bd.get(k, 0.0) + v
+                total_reward += agg_total
+                # Fold into episode-total breakdown.
+                for k, v in bd.items():
+                    self._episode_breakdown[k] = self._episode_breakdown.get(k, 0.0) + v
                 info: dict[str, Any] = {
                     "raw": reconnected_raw,
                     "steps": self._steps,
-                    "reward_breakdown": {},
+                    "reward_breakdown": bd,
                     "reward_breakdown_episode": dict(self._episode_breakdown),
                     "crashed": False,
                     "ep_end_reason": "mod_restart",
                     "behavior_metrics": self.reward_shaper.episode_behavior_metrics(),
                 }
-                # NOTE: reconnected_raw came from a FRESH mod (post-restart),
-                # so it's a valid initial obs for the next episode. Store it
-                # so env.reset() doesn't re-accept and lose the frame.
-                # (env.reset() checks self._client is not None; we've already
-                # set it via _try_accept_after_close.)
-                return obs, 0.0, True, False, info
+                return obs, total_reward, True, False, info
             # Real crash: no reconnection. Fall through to respawn.
             log.warning(
                 "port %d: no reconnection within 3s — assuming real crash, respawning",
@@ -377,17 +394,21 @@ class SocketIsaacEnv(gym.Env):
         # This is what tells us at a glance whether the socket layer is
         # working: high `mod_socket_error` frac = window backgrounded /
         # throttled / mod crashed. High `shaper_terminated` frac = normal.
-        if terminated:
-            info["ep_end_reason"] = "shaper_terminated"
-            info["reward_breakdown_episode"] = dict(self._episode_breakdown)
-            # Behavior metrics (Phase C, 2026-07-09): pure telemetry, not
-            # rewards. Trainer logs these under behavior/* so we can see
-            # whether the agent is starting to demonstrate emergent
-            # hierarchical play (visit shops, use items, reach later
-            # floors) even where we haven't explicitly rewarded it.
-            info["behavior_metrics"] = self.reward_shaper.episode_behavior_metrics()
-        elif truncated:
-            info["ep_end_reason"] = "truncated"
+        if terminated or truncated:
+            reason = "shaper_terminated" if terminated else "truncated"
+            # End-of-episode aggregate outcome bonuses (2026-07-09 v3). Fire
+            # on shaper_terminated AND truncated. Both are "we made it to
+            # the end of an episode via a controlled path" — aggregate
+            # outcomes are meaningful. (isaac_crash and mod_restart are
+            # handled in their own branches above.)
+            agg_total, agg_bd = self.reward_shaper.finalize_episode(reason)
+            if agg_total != 0.0:
+                reward = float(reward) + agg_total
+                for k, v in agg_bd.items():
+                    breakdown[k] = breakdown.get(k, 0.0) + v
+                    self._episode_breakdown[k] = self._episode_breakdown.get(k, 0.0) + v
+            info["ep_end_reason"] = reason
+            info["reward_breakdown"] = breakdown
             info["reward_breakdown_episode"] = dict(self._episode_breakdown)
             info["behavior_metrics"] = self.reward_shaper.episode_behavior_metrics()
         return obs, reward, terminated, truncated, info

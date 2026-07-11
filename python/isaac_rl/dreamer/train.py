@@ -492,7 +492,7 @@ def train(cfg: DreamerConfig) -> None:
                 prof._sums[_name] = prof._sums.get(_name, 0.0) + (_ms / 1000.0)
                 prof._counts[_name] = prof._counts.get(_name, 0) + 1
             with prof("beh_train_step"):
-                bmm = behavior.train_step(post_batch)
+                bmm = behavior.train_step(post_batch, ctx)
             beh_metrics = bmm
             update += 1
 

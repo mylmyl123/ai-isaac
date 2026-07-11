@@ -205,6 +205,13 @@ class RewardConfig:
     # dense gradient guiding the bot to exits.
     r_seek_door_when_clear: float = 0.05   # per tick, when velocity is toward an open door
     seek_door_speed_threshold: float = 0.2 # only credit motion when actually moving
+    # 2026-07-09 v3: per-episode cap on seek_door reward. The 40h v2 run
+    # showed the agent reward-hacked this term: 99% of episodes fired
+    # seek_door earning +6.3/ep on average, but only 37% of episodes
+    # actually entered a new room. Agent learned "hover near door with
+    # positive velocity" as a reward pump. Cap forces the agent to CROSS
+    # the door (+r_new_room=5) rather than accumulate infinite door-motion.
+    max_seek_door_reward_per_episode: float = 1.5
     # Potential-based shaping on distance-to-nearest-door when room is clear.
     # Unlike r_seek_door_when_clear (which requires motion), this reward is
     # STATE-BASED: the bot gets reward simply for BEING closer to a door.
@@ -386,6 +393,12 @@ class RewardState:
     beh_current_kill_streak: int = 0       # rolling counter
     beh_ticks_alive: int = 0               # total ticks in this episode
 
+    # ---- NEW (2026-07-09 v3): reward-hacking anti-abuse ---------------
+    # Per-episode accumulator for seek_door reward. Once this exceeds
+    # cfg.max_seek_door_reward_per_episode, no more seek_door fires. Prevents
+    # the "hover near door forever" reward-pump.
+    seek_door_reward_accum: float = 0.0
+
 
 # Room-type first-entry reward dispatch table. Maps each RoomType constant
 # to the (breakdown_key, config_attr_name) tuple used by _add_room_first_entry.
@@ -424,6 +437,52 @@ class RewardShaper:
 
     def reset(self) -> None:
         self.state = RewardState()
+
+    def finalize_episode(self, ep_end_reason: str | None = None) -> tuple[float, dict[str, float]]:
+        """Compute end-of-episode aggregate outcome bonuses.
+
+        MUST be called by env.py exactly once per episode termination, on ALL
+        terminal paths (shaper_terminated, truncated, mod_restart), NOT just
+        shaper_terminated. Returns (total_bonus_reward, per_key_breakdown).
+
+        Added 2026-07-09 v3 because the v2 run showed shaper_terminated_frac
+        collapsed to <1% while mod_restart dominated at 98% — aggregates were
+        never firing under v2's in-shaper implementation.
+
+        Args:
+            ep_end_reason: Optional reason string. "isaac_crash" (real crash)
+                skips aggregates — episode data unreliable. Other reasons emit.
+        """
+        cfg = self.cfg
+        st = self.state
+        breakdown: dict[str, float] = {}
+        total = 0.0
+        if ep_end_reason == "isaac_crash":
+            return 0.0, breakdown
+
+        def add(key: str, val: float) -> None:
+            nonlocal total
+            breakdown[key] = breakdown.get(key, 0.0) + val
+            total += val
+
+        n_types = len(st.beh_room_types_seen)
+        if n_types > 0 and cfg.r_diversity_end_bonus != 0.0:
+            add("diversity_end_bonus", cfg.r_diversity_end_bonus * math.log(1 + n_types))
+        if st.beh_floors_reached > 0 and cfg.r_depth_end_bonus != 0.0:
+            add("depth_end_bonus", cfg.r_depth_end_bonus * float(st.beh_floors_reached))
+        if not st.dead:
+            # Use last-seen HP snapshot from shaper state. On mod_restart we
+            # don't have a fresh HP obs — last known is best-effort.
+            total_hp = st.prev_hp_red + st.prev_hp_soul + st.prev_hp_black
+            max_hp = 6.0  # Isaac baseline. Could be dynamic later.
+            if cfg.r_survival_end_bonus != 0.0 and total_hp > 0:
+                hp_frac = min(1.0, total_hp / max_hp)
+                add("survival_end_bonus", cfg.r_survival_end_bonus * hp_frac)
+        if st.beh_rooms_visited > 0 and cfg.r_efficiency_end_bonus != 0.0:
+            eff = float(st.beh_items_collected) / float(st.beh_rooms_visited)
+            add("efficiency_end_bonus", cfg.r_efficiency_end_bonus * eff)
+
+        return float(total), breakdown
 
     def episode_behavior_metrics(self) -> dict[str, float]:
         """Return per-episode behavior metrics for TB logging as behavior/*.
@@ -911,9 +970,13 @@ class RewardShaper:
                     if alignment > best_alignment:
                         best_alignment = alignment
                 if best_alignment > 0:
-                    # Scale by alignment so straight-line motion gets full reward
-                    # and diagonal motion gets partial credit.
-                    add("seek_door", cfg.r_seek_door_when_clear * best_alignment)
+                    # 2026-07-09 v3: cap per-episode accumulation to prevent
+                    # reward-hacking ("hover near door forever" strategy).
+                    remaining = cfg.max_seek_door_reward_per_episode - st.seek_door_reward_accum
+                    if remaining > 0:
+                        gain = min(cfg.r_seek_door_when_clear * best_alignment, remaining)
+                        st.seek_door_reward_accum += gain
+                        add("seek_door", gain)
 
             # Nearest-enemy dependent shaping (aim, kite distance, PBRS).
             enemy = self._nearest_enemy(raw_obs)
@@ -953,29 +1016,10 @@ class RewardShaper:
                 # No enemies: reset potential so we don't get spurious PBRS on next enemy encounter
                 st.prev_potential = None
 
-        # ---- End-of-episode aggregate outcome bonuses (2026-07-09 v2) ------
-        # When the episode terminates (any cause), reward WHAT the agent
-        # achieved this episode via aggregate metrics. Contrast with Phase D
-        # chains (removed) which prescribed specific action sequences.
-        # Aggregate outcomes let the agent choose ITS OWN strategy to hit them.
-        if terminated:
-            # Diversity: log(1 + N_room_types_visited). Sublinear so the first
-            # few types give the biggest signal (encourages first-time
-            # exploration) and later ones taper off.
-            n_types = len(st.beh_room_types_seen)
-            if n_types > 0 and cfg.r_diversity_end_bonus != 0.0:
-                add("diversity_end_bonus", cfg.r_diversity_end_bonus * math.log(1 + n_types))
-            # Depth: floors reached. Linear — later floors are strictly harder.
-            if st.beh_floors_reached > 0 and cfg.r_depth_end_bonus != 0.0:
-                add("depth_end_bonus", cfg.r_depth_end_bonus * float(st.beh_floors_reached))
-            # Survival: fraction of max_hp remaining, only if not dead.
-            if not st.dead and max_hp > 0 and cfg.r_survival_end_bonus != 0.0:
-                hp_frac = float((cur_red + cur_soul + cur_black) / max_hp)
-                add("survival_end_bonus", cfg.r_survival_end_bonus * hp_frac)
-            # Efficiency: items per room. Rewards high-value trajectories
-            # over long-idle ones. Guarded to avoid div-by-zero on 0-room eps.
-            if st.beh_rooms_visited > 0 and cfg.r_efficiency_end_bonus != 0.0:
-                eff = float(st.beh_items_collected) / float(st.beh_rooms_visited)
-                add("efficiency_end_bonus", cfg.r_efficiency_end_bonus * eff)
+        # 2026-07-09 v3: aggregate outcome bonuses MOVED to finalize_episode()
+        # so they fire on ALL terminal paths (mod_restart, truncated, etc.),
+        # not just shaper_terminated. The 40h v2 run showed shaper_terminated
+        # fired only 0.7% of episodes — mod_restart dominated at 98%. Under
+        # v2's design, aggregates never fired.
 
         return float(reward), bool(terminated), breakdown

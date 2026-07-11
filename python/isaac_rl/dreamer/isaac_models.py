@@ -652,15 +652,19 @@ class IsaacImagBehavior(nn.Module):
                 d.data = frac * s.data + (1 - frac) * d.data
         self._slow_updates += 1
 
-    def train_step(self, start_state: dict[str, torch.Tensor]) -> dict[str, float]:
+    def train_step(self, start_state: dict[str, torch.Tensor], ctx: dict | None = None) -> dict[str, float]:
         """One imagination-based actor+critic gradient update.
 
         Uses the world model's RSSM to imagine forward for ``imag_horizon``
         steps from each start state. If torch.compile on the RSSM throws at
         runtime, catch it, revert to eager, and retry once.
+
+        ctx: optional context dict from world_model.train_step() containing
+            real post-features (`ctx['feat']`). Used for RND predictor
+            training (needs REAL features, not imagined).
         """
         try:
-            return self._train_step_inner(start_state)
+            return self._train_step_inner(start_state, ctx)
         except Exception as e:
             msg = str(e).lower()
             wm = self.world_model
@@ -668,10 +672,10 @@ class IsaacImagBehavior(nn.Module):
                 k in msg for k in ("triton", "torchdynamo", "compile", "torch._dynamo")
             ):
                 wm._revert_to_eager(str(e))
-                return self._train_step_inner(start_state)
+                return self._train_step_inner(start_state, ctx)
             raise
 
-    def _train_step_inner(self, start_state: dict[str, torch.Tensor]) -> dict[str, float]:
+    def _train_step_inner(self, start_state: dict[str, torch.Tensor], ctx: dict | None = None) -> dict[str, float]:
         cfg = self.cfg
         self._update_slow()
 
@@ -696,16 +700,28 @@ class IsaacImagBehavior(nn.Module):
         metrics.update(actor_metrics)
         metrics.update(critic_metrics)
 
-        # ---- RND predictor training (2026-07-09 v2) -------------------
-        # Train the RND predictor on the same imagined features that fed
-        # the actor/critic. Using imagined feats (rather than replay feats)
-        # so the predictor sees the same state distribution that the
-        # critic evaluates — keeps intrinsic-reward magnitude calibrated
-        # to what the agent actually plans over. Detached feats so RND
-        # doesn't affect WM gradients.
+        # ---- RND predictor training (2026-07-09 v3) -------------------
+        # v2 trained on feats.detach() from imagination — those are
+        # HALLUCINATED features from the WM prior, not real observations.
+        # Measured in the 40h run: predictor_loss collapsed from 1.3e-3 to
+        # 5.8e-6 in the first ~10 updates, then stayed at ~0 for the rest
+        # of the run because the WM prior generates a very narrow
+        # distribution of features that the predictor trivially memorizes.
+        # Intrinsic reward was effectively 0 for 95%+ of training.
+        #
+        # v3 CORRECT design (per Plan2Explore, Sekar et al.): train the
+        # predictor on REAL post-features from the WM's observe step on
+        # replay data. Predictor learns what real states look like -> high
+        # error on novel real states -> proper intrinsic exploration bonus.
+        # Intrinsic reward is still COMPUTED on imagined features (feats)
+        # for the critic target — that's correct.
         if self.rnd is not None:
+            real_feat = None
+            if ctx is not None and isinstance(ctx, dict):
+                real_feat = ctx.get("feat")
+            train_feat = real_feat if real_feat is not None else feats.detach()
             with _amp_ctx:
-                rnd_loss, rnd_metrics = self.rnd.update(feats.detach())
+                rnd_loss, rnd_metrics = self.rnd.update(train_feat)
             self._rnd_opt.zero_grad(set_to_none=True)
             rnd_loss.backward()
             self._rnd_opt.step()
