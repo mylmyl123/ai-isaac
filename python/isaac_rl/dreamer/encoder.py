@@ -40,6 +40,14 @@ from ..spaces import (
     ROOM_H,
     ROOM_W,
     SPATIAL_DIM,
+    # Track A (2026-07-12) obs keys.
+    CHARACTER_K,
+    ACTIVE_SLOTS, ACTIVE_FEATS,
+    TRINKET_SLOTS, TRINKET_FEATS,
+    CARD_SLOTS, CARD_FEATS,
+    PILL_SLOTS, PILL_FEATS,
+    TRANSFORMATION_COUNT,
+    DOOR_FEATS,
 )
 
 
@@ -153,12 +161,25 @@ class IsaacObsEncoder(nn.Module):
             nn.Conv2d(4, gc1, 3, padding=1), nn.ReLU(inplace=True),
             nn.Conv2d(gc1, gc2, 3, padding=1), nn.ReLU(inplace=True),
         )
-        self.doors_mlp = _mlp([4 * 6, 48], activate_final=True)
+        self.doors_mlp = _mlp([4 * DOOR_FEATS, 48], activate_final=True)
         self.spatial_mlp = _mlp([SPATIAL_DIM, 48, 48], activate_final=True)
         self.player_history_mlp = _mlp([PLAYER_HISTORY_DIM, 48, 48], activate_final=True)
 
+        # ---- Track A (2026-07-12) new streams ----
+        # Character one-hot -> 32-dim embedding via a small MLP.
+        self.character_mlp = _mlp([CHARACTER_K, 32], activate_final=True)
+        # Item slots: flatten (N, M) then MLP.
+        self.active_items_mlp = _mlp([ACTIVE_SLOTS * ACTIVE_FEATS, 32], activate_final=True)
+        self.trinkets_mlp     = _mlp([TRINKET_SLOTS * TRINKET_FEATS, 16], activate_final=True)
+        self.cards_mlp        = _mlp([CARD_SLOTS * CARD_FEATS, 16], activate_final=True)
+        self.pills_mlp        = _mlp([PILL_SLOTS * PILL_FEATS, 16], activate_final=True)
+        self.transformations_mlp = _mlp([TRANSFORMATION_COUNT, 32], activate_final=True)
+
         # Sum of per-stream output dims.
-        static_dims = 192 + 96 + 96 + 48 + 48 + 48   # player, global, passives, doors, spatial, history
+        # Was 528: player(192) + global(96) + passives(96) + doors(48) + spatial(48) + history(48)
+        # Track A adds: character(32) + active(32) + trinket(16) + card(16) + pill(16) + transform(32) = 144
+        # New total: 672 static dims into the trunk.
+        static_dims = 192 + 96 + 96 + 48 + 48 + 48 + 32 + 32 + 16 + 16 + 16 + 32
         trunk_in = static_dims + c.entity_dim + c.proj_dim + c.pickup_dim + gc2
         self.trunk = _mlp([trunk_in, c.trunk_dim, c.trunk_dim], activate_final=True)
 
@@ -209,8 +230,19 @@ class IsaacObsEncoder(nn.Module):
         spatial = self.spatial_mlp(_flat(obs["spatial"]))
         player_hist = self.player_history_mlp(_flat(obs["player_history"]))
 
+        # Track A streams. Backward compat: if a Box(N, M) obs is missing, the
+        # dict comes with a zero-filled Box already (spaces.zero_obs handles it).
+        character  = self.character_mlp(_flat(obs["character"]))
+        active     = self.active_items_mlp(_flat(obs["active_items"]).flatten(1))
+        trinkets   = self.trinkets_mlp(_flat(obs["trinkets"]).flatten(1))
+        cards      = self.cards_mlp(_flat(obs["cards"]).flatten(1))
+        pills      = self.pills_mlp(_flat(obs["pills"]).flatten(1))
+        transforms = self.transformations_mlp(_flat(obs["transformations"]))
+
         x = torch.cat(
-            [player, global_, passives, enemies, projs, pickups, grid, doors, spatial, player_hist],
+            [player, global_, passives, enemies, projs, pickups, grid, doors,
+             spatial, player_hist,
+             character, active, trinkets, cards, pills, transforms],
             dim=-1,
         )
         embed = self.embed_proj(self.trunk(x))

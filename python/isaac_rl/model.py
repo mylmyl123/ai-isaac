@@ -50,6 +50,7 @@ from .spaces import (
     ROOM_H,
     ROOM_W,
     SPATIAL_DIM,
+    DOOR_FEATS,   # Track A (2026-07-12): doors expanded 6 -> 18 feats.
 )
 
 
@@ -202,7 +203,7 @@ class IsaacPolicy(nn.Module):
             nn.Conv2d(4, gc1, 3, padding=1), nn.ReLU(inplace=True),
             nn.Conv2d(gc1, gc2, 3, padding=1), nn.ReLU(inplace=True),
         )
-        self.doors_mlp = _mlp([4 * 6, 48], activate_final=True, layer_norm=True)
+        self.doors_mlp = _mlp([4 * DOOR_FEATS, 48], activate_final=True, layer_norm=True)
         # Spatial features MLP (schema v2). Small dedicated pathway for
         # preprocessed room-position/wall-distance/door-direction features.
         # Feeding these as first-class inputs is far more sample-efficient

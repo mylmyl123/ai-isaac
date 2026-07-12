@@ -34,7 +34,9 @@ def test_zero_obs_matches_space():
 def test_encode_action_shape():
     a = np.array([3, 2], dtype=np.int64)
     d = encode_action(a)
-    assert d == {"move": 3, "shoot": 2}
+    # 2026-07-12 Track A: ACTION_FACTORS grew from [9,5] to [9,5,2,2,2]; short
+    # actions are zero-padded for the trailing factors.
+    assert d == {"move": 3, "shoot": 2, "use_item": 0, "drop_bomb": 0, "use_pillcard": 0}
 
 
 def test_action_space_shape():

@@ -26,6 +26,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+# 2026-07-12 Track A: trap-item penalty table. Keys are CollectibleType IDs;
+# values are reward deltas applied to the SAME step when `use_item=1` is
+# emitted while the agent holds the corresponding active. Prevents BC-then-RL
+# fine-tune from discovering and repeating suicide moves (e.g. Chaos Card
+# instant-kills anything it hits including the player). Extend as new trap
+# items surface via behavior analysis.
+TRAP_ITEM_PENALTIES: dict[int, float] = {
+    475: -20.0,  # Chaos Card — instant-kill on collision
+}
+
+
 @dataclass
 class RewardConfig:
     # ---- Terminal rewards (unchanged) ----------------------------------
@@ -71,6 +82,20 @@ class RewardConfig:
     r_pickup_key: float = 0.3      # was 0.1: keys open chests/doors, rare + valuable
     r_pickup_bomb: float = 0.3     # was 0.1: bombs open secret rooms, key mechanic
     r_pickup_collectible: float = 2.0   # was 1.0: permanent stat boost, very valuable
+
+    # 2026-07-12 Track A: quality-scaled pickup reward. Used when the mod
+    # emits a `pickup_collectible` event with a `quality` field (0-4).
+    # Rationale from audit: flat +2.0 taught the agent "any pedestal is
+    # good" including Chaos Card and other trap items. Isaac's ItemConfig
+    # exposes a curated quality score per collectible; use it to shape:
+    #   Q0 (bad, e.g. Wavy Cap) = 0.5
+    #   Q1 (mediocre, e.g. Piggy Bank) = 1.0
+    #   Q2 (average, e.g. Sad Onion) = 2.0 (same as old flat rate)
+    #   Q3 (good, e.g. Brimstone) = 3.5
+    #   Q4 (top-tier, e.g. Sacred Heart, Mom's Knife) = 6.0
+    # Fallback to r_pickup_collectible when event has no quality field
+    # (older mod builds).
+    r_pickup_collectible_by_quality: tuple[float, float, float, float, float] = (0.5, 1.0, 2.0, 3.5, 6.0)
 
     # ---- NEW (2026-07-09): Consumable USE (bomb/key/coin decreases) -----
     # Detected via player-state deltas across ticks. Rewards the ACT of using
@@ -305,6 +330,8 @@ REWARD_BREAKDOWN_KEYS: tuple[str, ...] = (
     # end-of-episode aggregate outcome bonuses (2026-07-09 v2)
     "diversity_end_bonus", "depth_end_bonus",
     "survival_end_bonus", "efficiency_end_bonus",
+    # 2026-07-12 Track A: trap-item penalty (Chaos Card etc.)
+    "trap_item",
     # terminals
     "death", "idle_death", "crash_penalty",
 )
@@ -755,7 +782,19 @@ class RewardShaper:
                 # mod changes.
                 pass
             elif kind == "pickup_collectible":
-                add("pickup_collectible", cfg.r_pickup_collectible)
+                # 2026-07-12 Track A: quality-scaled reward if event provides
+                # a `quality` field (mod-side MC_POST_PICKUP_UPDATE hook adds
+                # it via Isaac.GetItemConfig). Falls back to old flat rate.
+                q = evt.get("quality", -1)
+                try:
+                    q_int = int(q)
+                except (TypeError, ValueError):
+                    q_int = -1
+                if 0 <= q_int <= 4:
+                    r = cfg.r_pickup_collectible_by_quality[q_int]
+                else:
+                    r = cfg.r_pickup_collectible
+                add("pickup_collectible", r)
                 st.beh_items_collected += 1
 
             elif kind == "use_item":
@@ -1021,5 +1060,22 @@ class RewardShaper:
         # not just shaper_terminated. The 40h v2 run showed shaper_terminated
         # fired only 0.7% of episodes — mod_restart dominated at 98%. Under
         # v2's design, aggregates never fired.
+
+        # 2026-07-12 Track A: trap-item guard (e.g., Chaos Card instant-kill).
+        # Checks the CURRENT action's use_item factor AND the primary active-
+        # item id from raw_obs.player. Fires as a per-step penalty so BC-warm
+        # RL policies immediately learn "don't press space with this item."
+        # Uses raw player.active_item_id (int) rather than the encoded
+        # active_items obs — exact ID comparison, no float roundoff.
+        if action is not None and TRAP_ITEM_PENALTIES:
+            try:
+                a = list(action)
+                if len(a) >= 3 and int(a[2]) == 1:
+                    aid = int(player.get("active_item_id", 0) or 0)
+                    pen = TRAP_ITEM_PENALTIES.get(aid, 0.0)
+                    if pen != 0.0:
+                        add("trap_item", pen)
+            except (TypeError, ValueError, IndexError):
+                pass
 
         return float(reward), bool(terminated), breakdown

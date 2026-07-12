@@ -71,15 +71,25 @@ class MultiDiscreteActionHead(nn.Module):
         """Total one-hot-concat action dim = sum of factors. Used as RSSM's num_actions."""
         return int(sum(self.factors))
 
-    def forward(self, feat: torch.Tensor) -> "MultiDiscreteDist":
+    def forward(self, feat: torch.Tensor, action_mask: torch.Tensor | None = None) -> "MultiDiscreteDist":
         """Return a joint distribution over the MultiDiscrete action.
 
         Consumers of the joint dist call ``.sample()``, ``.log_prob(action)``,
         ``.entropy()``, ``.mode()`` — semantics match a single OneHotDist but
         over the concatenated one-hot representation.
+
+        2026-07-12 Track A: added optional ``action_mask``. Shape [..., sum(factors)]
+        matching the concatenated logits; each entry is 0 (allowed) or a large
+        negative value (masked). Added directly to logits before the OneHotDist
+        is built. Use case: forbid ``use_item=1`` when the agent holds no active,
+        forbid ``drop_bomb=1`` when bombs=0, etc. Default None = no masking.
         """
         h = self.trunk(feat)
         per_factor = [head(h) for head in self.heads]
+        if action_mask is not None:
+            # Split the mask by factor sizes and add to each per-factor logits.
+            mask_parts = list(torch.split(action_mask, list(self.factors), dim=-1))
+            per_factor = [logits + m for logits, m in zip(per_factor, mask_parts)]
         return MultiDiscreteDist(per_factor, unimix_ratio=self.unimix_ratio)
 
 

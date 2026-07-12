@@ -202,21 +202,45 @@ end
 
 local DOOR_SLOTS = { DoorSlot.LEFT0, DoorSlot.UP0, DoorSlot.RIGHT0, DoorSlot.DOWN0 }
 
+-- 2026-07-12 Track A: expanded from 6 feats [exists, open, locked, boss,
+-- treasure, secret] to 18 feats [exists, open, locked, then 15 one-hot
+-- flags for room types (boss, treasure, secret, shop, arcade, curse,
+-- sacrifice, devil, angel, library, miniboss, challenge, dungeon,
+-- planetarium, chest)]. The prior 3-of-15 encoding meant the agent could
+-- never distinguish e.g. shop from curse room via the door — both looked
+-- like plain "other".
+--
+-- Repentance API exposes most RoomType.ROOM_* constants but a few (LIBRARY,
+-- DUNGEON) are missing on some builds. Use numeric literals with TODO for
+-- those; verify with a real playthrough that the one-hots fire correctly.
 local function build_doors(room)
     local out = {}
     for i, slot in ipairs(DOOR_SLOTS) do
         local d = room:GetDoor(slot)
         if d then
+            local t = d.TargetRoomType
             out[i] = {
                 1,
                 (d:IsOpen() and 1) or 0,
                 (d:IsLocked() and 1) or 0,
-                (d.TargetRoomType == RoomType.ROOM_BOSS and 1) or 0,
-                (d.TargetRoomType == RoomType.ROOM_TREASURE and 1) or 0,
-                (d.TargetRoomType == RoomType.ROOM_SECRET and 1) or 0,
+                (t == RoomType.ROOM_BOSS and 1) or 0,
+                (t == RoomType.ROOM_TREASURE and 1) or 0,
+                (t == RoomType.ROOM_SECRET and 1) or 0,
+                (t == RoomType.ROOM_SHOP and 1) or 0,
+                (t == RoomType.ROOM_ARCADE and 1) or 0,
+                (t == RoomType.ROOM_CURSE and 1) or 0,
+                (t == RoomType.ROOM_SACRIFICE and 1) or 0,
+                (t == RoomType.ROOM_DEVIL and 1) or 0,
+                (t == RoomType.ROOM_ANGEL and 1) or 0,
+                (t == 8 and 1) or 0,   -- LIBRARY (TODO: verify RoomType.ROOM_LIBRARY constant)
+                (t == RoomType.ROOM_MINIBOSS and 1) or 0,
+                (t == RoomType.ROOM_CHALLENGE and 1) or 0,
+                (t == 16 and 1) or 0,  -- DUNGEON (TODO: verify RoomType.ROOM_DUNGEON constant)
+                (t == RoomType.ROOM_PLANETARIUM and 1) or 0,
+                (t == RoomType.ROOM_CHEST and 1) or 0,
             }
         else
-            out[i] = { 0, 0, 0, 0, 0, 0 }
+            out[i] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
         end
     end
     return out

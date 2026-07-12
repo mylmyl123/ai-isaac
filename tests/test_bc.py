@@ -19,6 +19,9 @@ from isaac_rl.spaces import (
     SPATIAL_DIM, PLAYER_HISTORY_DIM, Z_DIM,
     ACTION_FACTORS,
     flatten_dict_obs,
+    DOOR_FEATS, CHARACTER_K,
+    ACTIVE_SLOTS, ACTIVE_FEATS, TRINKET_SLOTS, TRINKET_FEATS,
+    CARD_SLOTS, CARD_FEATS, PILL_SLOTS, PILL_FEATS, TRANSFORMATION_COUNT,
 )
 ACTION_FACTORS_LEN = ACTION_FACTORS   # alias for len() below without misleading name
 
@@ -41,12 +44,19 @@ def _fake_encoded_obs() -> dict:
         },
         "passives": np.zeros(PASSIVES_K, dtype=np.int8),
         "room_grid": np.zeros((4, ROOM_H, ROOM_W), dtype=np.float32),
-        "doors": np.zeros((4, 6), dtype=np.float32),
+        "doors": np.zeros((4, DOOR_FEATS), dtype=np.float32),
         "global": np.zeros(GLOBAL_DIM, dtype=np.float32),
         "last_action": np.zeros(len(ACTION_FACTORS_LEN), dtype=np.int8),
         "spatial": np.zeros(SPATIAL_DIM, dtype=np.float32),
         "player_history": np.zeros(PLAYER_HISTORY_DIM, dtype=np.float32),
         "z": np.zeros(Z_DIM, dtype=np.float32),
+        # Track A (2026-07-12) keys.
+        "character": np.zeros(CHARACTER_K, dtype=np.int8),
+        "active_items": np.zeros((ACTIVE_SLOTS, ACTIVE_FEATS), dtype=np.float32),
+        "trinkets": np.zeros((TRINKET_SLOTS, TRINKET_FEATS), dtype=np.float32),
+        "cards": np.zeros((CARD_SLOTS, CARD_FEATS), dtype=np.float32),
+        "pills": np.zeros((PILL_SLOTS, PILL_FEATS), dtype=np.float32),
+        "transformations": np.zeros(TRANSFORMATION_COUNT, dtype=np.float32),
     }
 
 

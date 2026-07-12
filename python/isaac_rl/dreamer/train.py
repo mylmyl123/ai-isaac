@@ -141,14 +141,27 @@ def _obs_batch_to_torch(obs_list: list[dict], device: torch.device) -> dict[str,
 
 
 def _sample_random_action(n_envs: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    """Return (env_action[n_envs, 2] int64, onehot[n_envs, ONEHOT_DIM] float32)."""
+    """Return (env_action[n_envs, K] int64, onehot[n_envs, ONEHOT_DIM] float32).
+
+    K = len(ACTION_FACTORS). Prefill samples uniformly over move + shoot;
+    binary factors (use_item, drop_bomb, use_pillcard) are held at 0 during
+    prefill to avoid random self-damage (bomb drops) and pill/card use that
+    can crash or debuff the run. The BC/RL fine-tune stage re-enables these
+    via the extended action head.
+    """
+    K = len(ACTION_FACTORS_TUPLE)
     move = rng.integers(0, ACTION_FACTORS_TUPLE[0], size=n_envs)
     shoot = rng.integers(0, ACTION_FACTORS_TUPLE[1], size=n_envs)
-    env_action = np.stack([move, shoot], axis=1).astype(np.int64)
+    env_action = np.zeros((n_envs, K), dtype=np.int64)
+    env_action[:, 0] = move
+    env_action[:, 1] = shoot
+    # Remaining factors (use_item, drop_bomb, use_pillcard) stay at 0.
     onehot = np.zeros((n_envs, ONEHOT_DIM), dtype=np.float32)
-    for i in range(n_envs):
-        onehot[i, move[i]] = 1.0
-        onehot[i, ACTION_FACTORS_TUPLE[0] + shoot[i]] = 1.0
+    offset = 0
+    for f_idx, f_val in enumerate([move, shoot] + [np.zeros(n_envs, dtype=np.int64)] * (K - 2)):
+        for i in range(n_envs):
+            onehot[i, offset + int(f_val[i])] = 1.0
+        offset += ACTION_FACTORS_TUPLE[f_idx]
     return env_action, onehot
 
 

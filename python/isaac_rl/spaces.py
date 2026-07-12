@@ -13,12 +13,18 @@ from gymnasium import spaces
 SCHEMA_VERSION = 2
 
 # MultiDiscrete factors — mirrored in mods/isaac-rl-bridge/main.lua apply_action().
-# Simplified 2026-07-02: removed use_active / drop_bomb / pill_card action heads
-# (they were unused / harmful when triggered by random exploration — dropping
-# a bomb hurts the player, using unknown pills is often negative). Reduces
-# action space from 360 combos to 45 (8x smaller), speeds up convergence.
-ACTION_FACTORS = np.array([9, 5], dtype=np.int64)
-ACTION_KEYS = ("move", "shoot")
+# 2026-07-02 REV: simplified from [9, 5, 2, 2, 2] to [9, 5] because random-init
+#   exploration used the extra factors harmfully (bomb-drops damaged the agent,
+#   random pill use was often negative).
+# 2026-07-12 REV: RESTORED to [9, 5, 2, 2, 2] for Track A / BC-bootstrap. Human
+#   demos use these factors purposefully; the RL fine-tune restores masked
+#   heads on top of the BC-warm actor (mask forbids use_item when no active,
+#   forbids drop_bomb when bombs=0, etc.).
+# BREAKS OLD CHECKPOINTS: the actor head resizes from 14 logits (9+5) to 20
+# logits (9+5+2+2+2). Consistent with the H_hard pivot per verdict.md — we're
+# not resuming v3 anyway.
+ACTION_FACTORS = np.array([9, 5, 2, 2, 2], dtype=np.int64)
+ACTION_KEYS = ("move", "shoot", "use_item", "drop_bomb", "use_pillcard")
 
 
 def action_space() -> spaces.MultiDiscrete:
@@ -36,7 +42,38 @@ ENEMY_FEATS = 16
 PROJ_FEATS = 10
 PICKUP_FEATS = 8
 
-PASSIVES_K = 256
+# 2026-07-12: PASSIVES_K bumped 256 -> 733 for Track A. Isaac Repentance has
+# ~732 vanilla CollectibleType IDs. Old curated top-256 list silently ignored
+# high-ID items (Sacred Orb=691, Angelic Prism=528, etc.). Identity mapping
+# in mods/isaac-rl-bridge/tables.lua now covers all IDs.
+PASSIVES_K = 733
+
+# Character identity (Track A). 34 vanilla Isaac characters (0..33) + 1 unknown
+# slot for tainted/DLC characters we haven't classified yet. One-hot in obs.
+CHARACTER_K = 35
+
+# Item slot dims (Track A). Isaac supports 2 active-item slots (primary +
+# Schoolbag), 2 trinkets (primary + Mom's Purse), and 4 card / pill slots.
+# Each slot's obs is [normalized_id, ..., has_flag]; see decoders below.
+ACTIVE_SLOTS = 2
+ACTIVE_FEATS = 3       # [item_id/730, charge/max, has_flag]
+TRINKET_SLOTS = 2
+TRINKET_FEATS = 2      # [trinket_id/200, has_flag]
+CARD_SLOTS = 4
+CARD_FEATS = 2         # [card_id/100, has_flag]
+PILL_SLOTS = 4
+PILL_FEATS = 2         # [pill_id/25, has_flag]
+
+# Transformation counters (Track A). Isaac Repentance has 15 transformations
+# (Guppy=0 ... Super Bum=14). Each returns 0..N progress items collected;
+# transformation triggers at 3+ items. We store normalized counters in obs.
+TRANSFORMATION_COUNT = 15
+
+# Door features (Track A expansion). Was 6 [exists, open, locked, boss,
+# treasure, secret]; now 18 [exists, open, locked, then 15 one-hot flags for
+# room types (boss, treasure, secret, shop, arcade, curse, sacrifice, devil,
+# angel, library, miniboss, challenge, dungeon, planetarium, chest)].
+DOOR_FEATS = 18
 
 # Spatial obs (added schema v2). Preprocessed spatial features derived from
 # player position within the room. Fed as a small dense vector; forces the
@@ -66,7 +103,7 @@ def observation_space() -> spaces.Dict:
         "player":     spaces.Box(-np.inf, np.inf, shape=(PLAYER_DIM,), dtype=np.float32),
         "passives":   spaces.MultiBinary(PASSIVES_K),
         "room_grid":  spaces.Box(0.0, 1.0, shape=(4, ROOM_H, ROOM_W), dtype=np.float32),
-        "doors":      spaces.Box(0.0, 1.0, shape=(4, 6), dtype=np.float32),
+        "doors":      spaces.Box(0.0, 1.0, shape=(4, DOOR_FEATS), dtype=np.float32),
         "enemies": spaces.Dict({
             "feats": spaces.Box(-np.inf, np.inf, shape=(MAX_ENEMIES, ENEMY_FEATS), dtype=np.float32),
             "mask":  spaces.MultiBinary(MAX_ENEMIES),
@@ -89,6 +126,15 @@ def observation_space() -> spaces.Dict:
         # B4: Per-episode latent variable (Gaussian). Same across all steps
         # in the episode; changes at reset. Injected by the env wrapper.
         "z": spaces.Box(-np.inf, np.inf, shape=(Z_DIM,), dtype=np.float32),
+        # ---- Track A (2026-07-12): character + item slots + transformations ----
+        # New obs keys. All zero-fill when raw JSON is missing the field
+        # (backward compat with recordings before mod expansion).
+        "character":       spaces.MultiBinary(CHARACTER_K),
+        "active_items":    spaces.Box(0.0, 1.0, shape=(ACTIVE_SLOTS, ACTIVE_FEATS), dtype=np.float32),
+        "trinkets":        spaces.Box(0.0, 1.0, shape=(TRINKET_SLOTS, TRINKET_FEATS), dtype=np.float32),
+        "cards":           spaces.Box(0.0, 1.0, shape=(CARD_SLOTS, CARD_FEATS), dtype=np.float32),
+        "pills":           spaces.Box(0.0, 1.0, shape=(PILL_SLOTS, PILL_FEATS), dtype=np.float32),
+        "transformations": spaces.Box(0.0, 1.0, shape=(TRANSFORMATION_COUNT,), dtype=np.float32),
     })
 
 
@@ -153,12 +199,18 @@ def _decode_room_grid(raw: dict | None) -> np.ndarray:
 
 
 def _decode_doors(raw: list | None) -> np.ndarray:
-    out = np.zeros((4, 6), dtype=np.float32)
+    """Decode doors: 18 features per door (Track A expansion).
+
+    Layout: [exists, open, locked, then 15 one-hot flags for room types].
+    Backward compat: if raw has only 6 features per door (old schema), fill
+    the first 6 and leave the trailing 12 room-type flags zero.
+    """
+    out = np.zeros((4, DOOR_FEATS), dtype=np.float32)
     if not raw:
         return out
     for i in range(min(4, len(raw))):
-        row = raw[i] or [0, 0, 0, 0, 0, 0]
-        for j in range(min(6, len(row))):
+        row = raw[i] or []
+        for j in range(min(DOOR_FEATS, len(row))):
             out[i, j] = float(row[j] or 0)
     return out
 
@@ -261,6 +313,112 @@ def _decode_passives(raw: list | None) -> np.ndarray:
     return out
 
 
+# --- Track A decoders (character, actives, trinkets, cards, pills, transformations) ---
+
+def _decode_character(raw_player: dict | None) -> np.ndarray:
+    """Decode player_type -> one-hot MultiBinary(CHARACTER_K).
+
+    Isaac=0, Magdalene=1, Cain=2, Judas=3, ..., Tainted variants up to 33.
+    Values >= CHARACTER_K-1 collapse into the unknown-slot at index
+    CHARACTER_K-1. Missing raw returns all zeros.
+    """
+    out = np.zeros(CHARACTER_K, dtype=np.int8)
+    if not raw_player:
+        return out
+    pt = raw_player.get("player_type")
+    if pt is None:
+        return out
+    try:
+        idx = int(pt)
+    except (TypeError, ValueError):
+        return out
+    if idx < 0:
+        return out
+    if idx >= CHARACTER_K - 1:
+        out[CHARACTER_K - 1] = 1
+    else:
+        out[idx] = 1
+    return out
+
+
+def _decode_active_items(raw_player: dict | None) -> np.ndarray:
+    """Decode active-item slots. Box(ACTIVE_SLOTS, ACTIVE_FEATS).
+
+    Per slot: [id/730, charge/max_charge, has_flag]. Slot 0 is primary
+    (space bar); slot 1 is Schoolbag secondary.
+    """
+    out = np.zeros((ACTIVE_SLOTS, ACTIVE_FEATS), dtype=np.float32)
+    if not raw_player:
+        return out
+    # Slot 0: primary
+    id0 = float(raw_player.get("active_item_id", 0) or 0)
+    ch0 = float(raw_player.get("active_charge", 0) or 0)
+    mx0 = float(raw_player.get("active_max_charge", 0) or 0)
+    out[0, 0] = min(1.0, max(0.0, id0 / 730.0))
+    out[0, 1] = min(1.0, ch0 / max(1.0, mx0)) if mx0 > 0 else 0.0
+    out[0, 2] = 1.0 if id0 > 0 else 0.0
+    # Slot 1: Schoolbag
+    id1 = float(raw_player.get("active_item_id_2", 0) or 0)
+    ch1 = float(raw_player.get("active_charge_2", 0) or 0)
+    # Mod does not expose max_charge_2; use slot-0 max as approximation.
+    mx1 = mx0
+    out[1, 0] = min(1.0, max(0.0, id1 / 730.0))
+    out[1, 1] = min(1.0, ch1 / max(1.0, mx1)) if mx1 > 0 else 0.0
+    out[1, 2] = 1.0 if id1 > 0 else 0.0
+    return out
+
+
+def _decode_trinkets(raw_player: dict | None) -> np.ndarray:
+    out = np.zeros((TRINKET_SLOTS, TRINKET_FEATS), dtype=np.float32)
+    if not raw_player:
+        return out
+    for i, key in enumerate(("trinket_id_1", "trinket_id_2")):
+        if i >= TRINKET_SLOTS:
+            break
+        tid = float(raw_player.get(key, 0) or 0)
+        out[i, 0] = min(1.0, max(0.0, tid / 200.0))
+        out[i, 1] = 1.0 if tid > 0 else 0.0
+    return out
+
+
+def _decode_cards(raw_player: dict | None) -> np.ndarray:
+    out = np.zeros((CARD_SLOTS, CARD_FEATS), dtype=np.float32)
+    if not raw_player:
+        return out
+    for i in range(CARD_SLOTS):
+        cid = float(raw_player.get(f"card_id_{i+1}", 0) or 0)
+        out[i, 0] = min(1.0, max(0.0, cid / 100.0))
+        out[i, 1] = 1.0 if cid > 0 else 0.0
+    return out
+
+
+def _decode_pills(raw_player: dict | None) -> np.ndarray:
+    out = np.zeros((PILL_SLOTS, PILL_FEATS), dtype=np.float32)
+    if not raw_player:
+        return out
+    for i in range(PILL_SLOTS):
+        pid = float(raw_player.get(f"pill_id_{i+1}", 0) or 0)
+        out[i, 0] = min(1.0, max(0.0, pid / 25.0))
+        out[i, 1] = 1.0 if pid > 0 else 0.0
+    return out
+
+
+def _decode_transformations(raw_player: dict | None) -> np.ndarray:
+    out = np.zeros(TRANSFORMATION_COUNT, dtype=np.float32)
+    if not raw_player:
+        return out
+    arr = raw_player.get("transformations")
+    if not arr:
+        return out
+    for i, v in enumerate(arr[:TRANSFORMATION_COUNT]):
+        try:
+            n = float(v or 0)
+        except (TypeError, ValueError):
+            continue
+        out[i] = min(1.0, max(0.0, n / 10.0))
+    return out
+
+
 def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> dict[str, Any]:
     """Convert a JSON obs dict from Lua into a gym Dict observation."""
     obs = zero_obs()
@@ -284,6 +442,15 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
     obs["doors"] = _decode_doors(raw.get("doors"))
     obs["spatial"] = _compute_spatial(raw)
 
+    # Track A obs keys (2026-07-12). All zero-fill if raw JSON lacks the
+    # fields (older demos recorded before mod expansion still parse cleanly).
+    obs["character"] = _decode_character(p)
+    obs["active_items"] = _decode_active_items(p)
+    obs["trinkets"] = _decode_trinkets(p)
+    obs["cards"] = _decode_cards(p)
+    obs["pills"] = _decode_pills(p)
+    obs["transformations"] = _decode_transformations(p)
+
     for key, dim, feat_dim in [
         ("enemies", MAX_ENEMIES, ENEMY_FEATS),
         ("projectiles", MAX_PROJECTILES, PROJ_FEATS),
@@ -293,15 +460,36 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
         obs[key] = {"feats": feats, "mask": mask}
 
     if last_action is not None:
+        # Backward-compat: last_action from callers passing short arrays (len 2)
+        # is zero-padded up to len(ACTION_FACTORS) before normalization.
         denom = np.maximum(ACTION_FACTORS - 1, 1).astype(np.float32)
-        obs["last_action"][:] = np.asarray(last_action, dtype=np.float32) / denom
+        la = np.asarray(last_action, dtype=np.float32).reshape(-1)
+        if la.shape[0] < denom.shape[0]:
+            padded = np.zeros(denom.shape[0], dtype=np.float32)
+            padded[:la.shape[0]] = la
+            la = padded
+        elif la.shape[0] > denom.shape[0]:
+            la = la[:denom.shape[0]]
+        obs["last_action"][:] = la / denom
 
     return obs
 
 
 def encode_action(action: np.ndarray | list[int]) -> dict[str, int]:
+    """Convert a factor-index array to the {name: int} dict the mod expects.
+
+    Accepts short actions (fewer factors than ACTION_KEYS) for backward
+    compatibility with test fixtures written before Track A. Missing factors
+    default to 0 (no press / idle).
+    """
     a = np.asarray(action, dtype=np.int64).reshape(-1)
-    return {ACTION_KEYS[i]: int(a[i]) for i in range(len(ACTION_KEYS))}
+    n = min(len(a), len(ACTION_KEYS))
+    out = {ACTION_KEYS[i]: int(a[i]) for i in range(n)}
+    # Zero-fill any factors past what the caller provided (BC/RL callers pass
+    # all K factors; older tests may pass just move+shoot).
+    for i in range(n, len(ACTION_KEYS)):
+        out[ACTION_KEYS[i]] = 0
+    return out
 
 
 def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -322,6 +510,13 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         # Player history (frame stacking). Backward compat: zeros if missing.
         "player_history": obs.get("player_history", np.zeros(PLAYER_HISTORY_DIM, dtype=np.float32)),
         "z": obs.get("z", np.zeros(Z_DIM, dtype=np.float32)),
+        # Track A obs keys.
+        "character": obs.get("character", np.zeros(CHARACTER_K, dtype=np.int8)).astype(np.float32),
+        "active_items": obs.get("active_items", np.zeros((ACTIVE_SLOTS, ACTIVE_FEATS), dtype=np.float32)),
+        "trinkets": obs.get("trinkets", np.zeros((TRINKET_SLOTS, TRINKET_FEATS), dtype=np.float32)),
+        "cards": obs.get("cards", np.zeros((CARD_SLOTS, CARD_FEATS), dtype=np.float32)),
+        "pills": obs.get("pills", np.zeros((PILL_SLOTS, PILL_FEATS), dtype=np.float32)),
+        "transformations": obs.get("transformations", np.zeros(TRANSFORMATION_COUNT, dtype=np.float32)),
     }
     for key in ("enemies", "projectiles", "pickups"):
         out[f"{key}_feats"] = obs[key]["feats"]

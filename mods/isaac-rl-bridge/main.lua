@@ -453,6 +453,42 @@ mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
     reset_cooldown = math.max(reset_cooldown, 5)
 end)
 
+-- ---------------------------------------------------------------------------
+-- 2026-07-12 Track A: emit pickup_collectible event with the item's Quality.
+-- ---------------------------------------------------------------------------
+-- Fires when a collectible pedestal is grabbed (SubType transitions to 0).
+-- We hook MC_POST_PICKUP_UPDATE and detect the transition; MC_POST_PICKUP_INIT
+-- fires on spawn, not on pickup. Quality comes from Isaac.GetItemConfig()
+-- which is a stable engine call — pcall wrap for safety.
+--
+-- Consumed by python/isaac_rl/reward.py which now scales the pickup reward
+-- by quality (Q0=0.5, Q1=1.0, Q2=2.0, Q3=3.5, Q4=6.0) instead of a flat +2.
+local pedestal_last_subtype = {}  -- InitSeed -> last-seen SubType
+
+mod:AddCallback(ModCallbacks.MC_POST_PICKUP_UPDATE, function(_, pickup)
+    if MINIMAL_MODE then return end
+    if pickup.Variant ~= PickupVariant.PICKUP_COLLECTIBLE then return end
+    local seed = pickup.InitSeed
+    local prev = pedestal_last_subtype[seed]
+    local curr = pickup.SubType
+    -- Grab detected: subtype was non-zero (item present) and is now 0 (empty).
+    if prev and prev > 0 and curr == 0 then
+        local quality = -1
+        local ok, cfg = pcall(function()
+            return Isaac.GetItemConfig():GetCollectible(prev)
+        end)
+        if ok and cfg and cfg.Quality ~= nil then
+            quality = cfg.Quality
+        end
+        run_state.pending_events[#run_state.pending_events + 1] = {
+            kind = "pickup_collectible",
+            item_id = prev,
+            quality = quality,
+        }
+    end
+    pedestal_last_subtype[seed] = curr
+end)
+
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     tick = tick + 1
     run_state.frames_since_room = run_state.frames_since_room + 1

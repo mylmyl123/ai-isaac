@@ -51,6 +51,15 @@ from ..spaces import (
     ROOM_W,
     SPATIAL_DIM,
     Z_DIM,
+    # Track A (2026-07-12) constants.
+    DOOR_FEATS,
+    CHARACTER_K,
+    ACTIVE_SLOTS, ACTIVE_FEATS,
+    TRINKET_SLOTS, TRINKET_FEATS,
+    CARD_SLOTS, CARD_FEATS,
+    PILL_SLOTS, PILL_FEATS,
+    TRANSFORMATION_COUNT,
+    ACTION_FACTORS,
     flatten_dict_obs,
 )
 
@@ -62,9 +71,9 @@ OBS_SCHEMA: dict[str, tuple[tuple[int, ...], str]] = {
     "player":            ((PLAYER_DIM,), "float32"),
     "passives":          ((PASSIVES_K,), "float32"),
     "room_grid":         ((4, ROOM_H, ROOM_W), "float32"),
-    "doors":             ((4, 6), "float32"),
+    "doors":             ((4, DOOR_FEATS), "float32"),
     "global":            ((GLOBAL_DIM,), "float32"),
-    "last_action":       ((2,), "float32"),
+    "last_action":       ((int(len(ACTION_FACTORS)),), "float32"),
     "spatial":           ((SPATIAL_DIM,), "float32"),
     "player_history":    ((PLAYER_HISTORY_DIM,), "float32"),
     "z":                 ((Z_DIM,), "float32"),
@@ -74,6 +83,13 @@ OBS_SCHEMA: dict[str, tuple[tuple[int, ...], str]] = {
     "projectiles_mask":  ((MAX_PROJECTILES,), "float32"),
     "pickups_feats":     ((MAX_PICKUPS, PICKUP_FEATS), "float32"),
     "pickups_mask":      ((MAX_PICKUPS,), "float32"),
+    # Track A (2026-07-12): character + item slots + transformations.
+    "character":         ((CHARACTER_K,), "float32"),
+    "active_items":      ((ACTIVE_SLOTS, ACTIVE_FEATS), "float32"),
+    "trinkets":          ((TRINKET_SLOTS, TRINKET_FEATS), "float32"),
+    "cards":             ((CARD_SLOTS, CARD_FEATS), "float32"),
+    "pills":             ((PILL_SLOTS, PILL_FEATS), "float32"),
+    "transformations":   ((TRANSFORMATION_COUNT,), "float32"),
 }
 
 

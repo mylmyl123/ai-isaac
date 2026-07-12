@@ -52,6 +52,7 @@ from ..spaces import (
     ROOM_H,
     ROOM_W,
     SPATIAL_DIM,
+    DOOR_FEATS,   # Track A (2026-07-12).
 )
 
 
@@ -235,7 +236,7 @@ class IsaacObsDecoder(nn.Module):
     }
     _BERNOULLI_KEYS = {
         "passives":  (PASSIVES_K,),
-        "doors":     (4, 6),
+        "doors":     (4, DOOR_FEATS),
         "room_grid": (4, ROOM_H, ROOM_W),
     }
     _ENTITY_KEYS = {

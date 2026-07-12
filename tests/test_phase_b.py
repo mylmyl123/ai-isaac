@@ -16,6 +16,9 @@ from isaac_rl.spaces import (
     ENEMY_FEATS, GLOBAL_DIM, MAX_ENEMIES, MAX_PICKUPS, MAX_PROJECTILES,
     PASSIVES_K, PICKUP_FEATS, PLAYER_DIM, PLAYER_HISTORY_DIM, PROJ_FEATS,
     ROOM_H, ROOM_W, SPATIAL_DIM, Z_DIM,
+    ACTION_FACTORS, DOOR_FEATS, CHARACTER_K,
+    ACTIVE_SLOTS, ACTIVE_FEATS, TRINKET_SLOTS, TRINKET_FEATS,
+    CARD_SLOTS, CARD_FEATS, PILL_SLOTS, PILL_FEATS, TRANSFORMATION_COUNT,
 )
 
 
@@ -24,7 +27,7 @@ def _random_batch(B: int = 2, z_dim: int = 16) -> dict[str, torch.Tensor]:
         "player":            torch.randn(B, PLAYER_DIM),
         "global":            torch.randn(B, GLOBAL_DIM),
         "passives":          torch.zeros(B, PASSIVES_K),
-        "last_action":       torch.zeros(B, 2),
+        "last_action":       torch.zeros(B, len(ACTION_FACTORS)),
         "enemies_feats":     torch.randn(B, MAX_ENEMIES, ENEMY_FEATS),
         "enemies_mask":      torch.zeros(B, MAX_ENEMIES),
         "projectiles_feats": torch.randn(B, MAX_PROJECTILES, PROJ_FEATS),
@@ -32,9 +35,16 @@ def _random_batch(B: int = 2, z_dim: int = 16) -> dict[str, torch.Tensor]:
         "pickups_feats":     torch.randn(B, MAX_PICKUPS, PICKUP_FEATS),
         "pickups_mask":      torch.zeros(B, MAX_PICKUPS),
         "room_grid":         torch.zeros(B, 4, ROOM_H, ROOM_W),
-        "doors":             torch.zeros(B, 4, 6),
+        "doors":             torch.zeros(B, 4, DOOR_FEATS),
         "spatial":           torch.zeros(B, SPATIAL_DIM),
         "player_history":    torch.zeros(B, PLAYER_HISTORY_DIM),
+        # Track A (2026-07-12) keys.
+        "character":         torch.zeros(B, CHARACTER_K),
+        "active_items":      torch.zeros(B, ACTIVE_SLOTS, ACTIVE_FEATS),
+        "trinkets":          torch.zeros(B, TRINKET_SLOTS, TRINKET_FEATS),
+        "cards":             torch.zeros(B, CARD_SLOTS, CARD_FEATS),
+        "pills":             torch.zeros(B, PILL_SLOTS, PILL_FEATS),
+        "transformations":   torch.zeros(B, TRANSFORMATION_COUNT),
     }
     if z_dim > 0:
         b["z"] = torch.zeros(B, z_dim)

@@ -33,7 +33,7 @@ def test_world_model_train_step_runs():
     cfg = DreamerConfig(device="cpu", batch_size=2, seq_len=8, imag_horizon=4)
     wm = IsaacWorldModel(cfg)
     rng = np.random.default_rng(0)
-    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 14, rng)
+    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 20, rng)
     post, ctx, metrics = wm.train_step(batch)
     assert "loss/total" in metrics
     assert np.isfinite(metrics["loss/total"])
@@ -45,7 +45,7 @@ def test_behavior_train_step_runs():
     wm = IsaacWorldModel(cfg)
     beh = IsaacImagBehavior(cfg, wm)
     rng = np.random.default_rng(1)
-    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 14, rng)
+    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 20, rng)
     post, _, _ = wm.train_step(batch)
     metrics = beh.train_step(post)
     assert "loss/actor" in metrics
@@ -64,7 +64,7 @@ def test_diagnostic_metrics_present():
     wm = IsaacWorldModel(cfg)
     beh = IsaacImagBehavior(cfg, wm)
     rng = np.random.default_rng(4)
-    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 14, rng)
+    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 20, rng)
     post, _, m_wm = wm.train_step(batch)
     m_beh = beh.train_step(post)
 
@@ -119,7 +119,7 @@ def test_world_model_loss_decreases_over_updates():
     cfg = DreamerConfig(device="cpu", batch_size=2, seq_len=8, imag_horizon=4)
     wm = IsaacWorldModel(cfg)
     rng = np.random.default_rng(2)
-    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 14, rng)
+    batch = _fake_batch(cfg.batch_size, cfg.seq_len, 20, rng)
     losses = []
     for _ in range(5):
         _, _, m = wm.train_step(batch)
@@ -134,14 +134,18 @@ def test_replay_to_wm_end_to_end():
     beh = IsaacImagBehavior(cfg, wm)
     rng = np.random.default_rng(3)
 
-    replay = SequenceReplay(capacity=200, onehot_dim=14)
+    replay = SequenceReplay(capacity=200, onehot_dim=20)
     for i in range(100):
         flat = {}
         for k, (shape, dtype) in OBS_SCHEMA.items():
             flat[k] = np.zeros(shape, dtype=dtype)
-        action = np.zeros(14, dtype=np.float32)
-        action[rng.integers(0, 9)] = 1.0
-        action[9 + rng.integers(0, 5)] = 1.0
+        # Track A (2026-07-12) action space: [9, 5, 2, 2, 2] = 20 total one-hot dims.
+        action = np.zeros(20, dtype=np.float32)
+        action[rng.integers(0, 9)] = 1.0                          # move
+        action[9 + rng.integers(0, 5)] = 1.0                      # shoot
+        action[14 + rng.integers(0, 2)] = 1.0                     # use_item
+        action[16 + rng.integers(0, 2)] = 1.0                     # drop_bomb
+        action[18 + rng.integers(0, 2)] = 1.0                     # use_pillcard
         replay.add(flat, action, float(rng.standard_normal()) * 0.1,
                    is_first=(i == 0), is_terminal=False, is_last=False)
 
