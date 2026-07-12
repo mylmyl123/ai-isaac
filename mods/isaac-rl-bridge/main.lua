@@ -50,6 +50,23 @@ if NO_ONESHOT then
     Isaac.DebugString("[isaac-rl-bridge] NO_ONESHOT=1 — pill_card, drop_bomb, use_active will be ignored")
 end
 
+-- ISAAC_RL_RECORD: when set to "1", switches the mod into HUMAN DEMO RECORDING
+-- mode (for BC-bootstrap training data collection). In this mode:
+--   * MC_INPUT_ACTION returns nil so the human's keyboard/gamepad input
+--     passes through to Isaac unmodified (agent is NOT driving the game).
+--   * On every FRAME_SKIP tick, exchange() reads the human's current input
+--     state via Input.IsActionPressed, packages it as a MultiDiscrete([9,5])
+--     action tuple (same schema as the RL agent's output), attaches it to
+--     the obs payload, sends to Python, and does NOT block for a response.
+--   * apply_action is never called — no injected keys, no crash surface
+--     from one-shot events.
+-- The Python side (isaac_rl.record) accepts the stream and writes one JSONL
+-- line per tick to demos/session_<ts>.jsonl for later BC training.
+local RECORD_MODE = os.getenv("ISAAC_RL_RECORD") == "1"
+if RECORD_MODE then
+    Isaac.DebugString("[isaac-rl-bridge] RECORD_MODE=1 — human plays; obs+action stream written to Python")
+end
+
 local mod = RegisterMod("isaac-rl-bridge", 1)
 local conn = nil
 local tick = 0
@@ -217,6 +234,51 @@ local function collect_events()
     return dmg
 end
 
+-- Read the human's current input state and encode as (move_idx, shoot_idx)
+-- matching MultiDiscrete([9, 5]) — same encoding the RL agent emits.
+--
+-- Move factor (9): mirrors mv_table above.
+--   0 = idle
+--   1 = up          2 = up+right    3 = right       4 = down+right
+--   5 = down        6 = down+left   7 = left        8 = up+left
+-- Shoot factor (5):
+--   0 = no shoot    1 = up          2 = right       3 = down        4 = left
+--
+-- Diagonal shoot combinations are not representable in MultiDiscrete([9,5]);
+-- if the human presses two shoot directions simultaneously we pick the first
+-- one in priority order (up > right > down > left). This mirrors how the RL
+-- policy is constrained.
+local function read_human_action(player_idx)
+    player_idx = player_idx or 0
+    local up    = Input.IsActionPressed(ButtonAction.ACTION_UP, player_idx)
+    local down  = Input.IsActionPressed(ButtonAction.ACTION_DOWN, player_idx)
+    local left  = Input.IsActionPressed(ButtonAction.ACTION_LEFT, player_idx)
+    local right = Input.IsActionPressed(ButtonAction.ACTION_RIGHT, player_idx)
+    local move = 0
+    if up and right then move = 2
+    elseif up and left then move = 8
+    elseif down and right then move = 4
+    elseif down and left then move = 6
+    elseif up then move = 1
+    elseif right then move = 3
+    elseif down then move = 5
+    elseif left then move = 7
+    end
+
+    local sup    = Input.IsActionPressed(ButtonAction.ACTION_SHOOTUP, player_idx)
+    local sright = Input.IsActionPressed(ButtonAction.ACTION_SHOOTRIGHT, player_idx)
+    local sdown  = Input.IsActionPressed(ButtonAction.ACTION_SHOOTDOWN, player_idx)
+    local sleft  = Input.IsActionPressed(ButtonAction.ACTION_SHOOTLEFT, player_idx)
+    local shoot = 0
+    if sup then shoot = 1
+    elseif sright then shoot = 2
+    elseif sdown then shoot = 3
+    elseif sleft then shoot = 4
+    end
+
+    return { move = move, shoot = shoot }
+end
+
 local function exchange()
     local events = collect_events()
     -- Wrap Obs.build in pcall. It calls into Isaac's C bindings (GetRoomEntities,
@@ -229,6 +291,22 @@ local function exchange()
         Isaac.DebugString("[isaac-rl-bridge] Obs.build failed: " .. tostring(obs))
         return
     end
+
+    -- RECORD_MODE: read the human's current input, attach to obs, send, don't
+    -- wait for a response. The human's keys go into Isaac through the normal
+    -- input path (MC_INPUT_ACTION returns nil in this mode, so nothing is
+    -- injected on top of the human's actual keypresses).
+    if RECORD_MODE then
+        obs.human_action = read_human_action(0)
+        local ok, payload = pcall(json.encode, obs)
+        if not ok then
+            Isaac.DebugString("[isaac-rl-bridge] json.encode failed (record): " .. tostring(payload))
+            return
+        end
+        conn:send(payload)  -- fire-and-forget; Python is a passive listener
+        return
+    end
+
     local ok, payload = pcall(json.encode, obs)
     if not ok then
         Isaac.DebugString("[isaac-rl-bridge] json.encode failed: " .. tostring(payload))
@@ -449,6 +527,7 @@ end)
 
 mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, hook, action)
     if MINIMAL_MODE then return nil end   -- no input injection at all
+    if RECORD_MODE then return nil end    -- human plays; don't inject anything on top of real input
     -- Only inject cached inputs into a valid PLAYER entity. Isaac's input
     -- system also queries with entity=nil for menu / transition / You-Died-
     -- screen contexts. Feeding those stale gameplay inputs (SHOOTRIGHT, ITEM,
