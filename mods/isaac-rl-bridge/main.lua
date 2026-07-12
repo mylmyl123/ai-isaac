@@ -234,20 +234,28 @@ local function collect_events()
     return dmg
 end
 
--- Read the human's current input state and encode as (move_idx, shoot_idx)
--- matching MultiDiscrete([9, 5]) — same encoding the RL agent emits.
+-- Read the human's current input state and encode as (move, shoot, use_item,
+-- drop_bomb, use_pillcard) matching an *extended* MultiDiscrete([9, 5, 2, 2, 2]).
 --
--- Move factor (9): mirrors mv_table above.
---   0 = idle
---   1 = up          2 = up+right    3 = right       4 = down+right
---   5 = down        6 = down+left   7 = left        8 = up+left
--- Shoot factor (5):
---   0 = no shoot    1 = up          2 = right       3 = down        4 = left
+-- The last three factors (item / bomb / pillcard) are the action heads that
+-- were removed from the RL policy on 2026-07-02 (they were harmful when
+-- triggered by random exploration — a random actor would drop bombs on
+-- itself and use unidentified pills). Human demos re-introduce them here
+-- because a human plays them purposefully; the BC training loader picks up
+-- these fields, and the RL fine-tune restores masked heads on top of the
+-- BC-warm actor. Existing RL trainer code ignores unknown factors, so this
+-- is backward compatible.
 --
--- Diagonal shoot combinations are not representable in MultiDiscrete([9,5]);
--- if the human presses two shoot directions simultaneously we pick the first
--- one in priority order (up > right > down > left). This mirrors how the RL
--- policy is constrained.
+-- Factor meanings:
+--   move  (9): 0=idle, 1=up, 2=up+right, 3=right, 4=down+right,
+--              5=down,  6=down+left,  7=left,  8=up+left
+--   shoot (5): 0=none, 1=up, 2=right, 3=down, 4=left
+--   use_item     (2): 0=no,  1=yes (space bar / gamepad A)
+--   drop_bomb    (2): 0=no,  1=yes (E / gamepad LB)
+--   use_pillcard (2): 0=no,  1=yes (Q / gamepad RB)
+--
+-- Diagonal shoot combinations collapse to priority order up > right >
+-- down > left, matching the RL policy's constraint.
 local function read_human_action(player_idx)
     player_idx = player_idx or 0
     local up    = Input.IsActionPressed(ButtonAction.ACTION_UP, player_idx)
@@ -276,7 +284,22 @@ local function read_human_action(player_idx)
     elseif sleft then shoot = 4
     end
 
-    return { move = move, shoot = shoot }
+    -- One-shot buttons: sampled every FRAME_SKIP=2 game frames. Human
+    -- presses are typically 30-100ms (2-6 game frames) so a 15 Hz sample
+    -- reliably catches them. If we start missing single-frame taps we can
+    -- upgrade this to a MC_POST_UPDATE latch (OR-accumulate each game frame,
+    -- clear at exchange time).
+    local use_item     = Input.IsActionPressed(ButtonAction.ACTION_ITEM,     player_idx) and 1 or 0
+    local drop_bomb    = Input.IsActionPressed(ButtonAction.ACTION_BOMB,     player_idx) and 1 or 0
+    local use_pillcard = Input.IsActionPressed(ButtonAction.ACTION_PILLCARD, player_idx) and 1 or 0
+
+    return {
+        move = move,
+        shoot = shoot,
+        use_item = use_item,
+        drop_bomb = drop_bomb,
+        use_pillcard = use_pillcard,
+    }
 end
 
 local function exchange()

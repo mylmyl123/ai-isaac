@@ -34,12 +34,48 @@ def _client_send_frames(port: int, frames: list[dict], connect_delay: float = 0.
 
 
 def test_record_session_writes_jsonl(tmp_path: Path) -> None:
-    """One frame in -> one JSONL line out with the same content."""
+    """One frame in -> one JSONL line out with the same content, including
+    the extended human_action schema (move, shoot, use_item, drop_bomb,
+    use_pillcard) and the new player-side identity/item fields."""
     port = 9503
     frames = [
-        {"tick": 1, "schema": 2, "human_action": {"move": 3, "shoot": 0}, "player": {"hp": 6}},
-        {"tick": 2, "schema": 2, "human_action": {"move": 0, "shoot": 2}, "player": {"hp": 6}},
-        {"tick": 3, "schema": 2, "human_action": {"move": 8, "shoot": 4}, "player": {"hp": 5}},
+        {
+            "tick": 1, "schema": 2,
+            "human_action": {
+                "move": 3, "shoot": 0,
+                "use_item": 0, "drop_bomb": 0, "use_pillcard": 0,
+            },
+            "player": {
+                "hp_red": 6, "player_type": 0,
+                "active_item_id": 105, "active_charge": 6, "active_max_charge": 6,
+                "trinket_id_1": 0, "card_id_1": 0, "pill_id_1": 0,
+                "transformations": [0]*15,
+            },
+        },
+        {
+            "tick": 2, "schema": 2,
+            "human_action": {
+                "move": 0, "shoot": 2,
+                "use_item": 1, "drop_bomb": 0, "use_pillcard": 0,  # space pressed
+            },
+            "player": {
+                "hp_red": 6, "player_type": 0,
+                "active_item_id": 105, "active_charge": 6, "active_max_charge": 6,
+                "transformations": [0]*15,
+            },
+        },
+        {
+            "tick": 3, "schema": 2,
+            "human_action": {
+                "move": 8, "shoot": 4,
+                "use_item": 0, "drop_bomb": 1, "use_pillcard": 0,  # bomb dropped
+            },
+            "player": {
+                "hp_red": 5, "player_type": 13,  # Lilith
+                "active_item_id": 360, "active_charge": 2, "active_max_charge": 6,
+                "transformations": [0]*15,
+            },
+        },
     ]
 
     t = threading.Thread(target=_client_send_frames, args=(port, frames), daemon=True)

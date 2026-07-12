@@ -269,6 +269,62 @@ function Obs.build(tick, reward_events, run_state)
             can_shoot = player:CanShoot(),
             frame_count = player.FrameCount,
             is_dead = player:IsDead(),
+            -- ADDED 2026-07-12 for BC recording (Track A obs rehab).
+            -- All new fields are optional — the RL trainer's encode_obs
+            -- (schema v2) silently ignores them. The BC training loader
+            -- and, later, an expanded encoder will consume them.
+            --
+            -- Character identity. Repentance has 34 characters (Isaac=0,
+            -- Magdalene=1, Cain=2, Judas=3, ???=4, Eve=5, Samson=6, Azazel=7,
+            -- Lazarus=8, Eden=9, The Lost=10, Lazarus Risen=11, Black Judas=12,
+            -- Lilith=13, Keeper=14, Apollyon=15, The Forgotten=16, The Soul=17,
+            -- Bethany=18, Jacob=19, Esau=20, then 21-33 = Tainted variants).
+            -- Every character has different base HP, damage, active item,
+            -- passives. Without this the BC actor averages over characters
+            -- and Lilith (0 base damage) collapses to Isaac (3.5 damage).
+            player_type = player:GetPlayerType() or 0,
+            -- Active item: primary slot (space bar). GetActiveItem returns 0
+            -- when no active is held. GetActiveCharge and GetActiveMaxCharge
+            -- expose the charge bar so BC can learn 'save the D6 for the
+            -- shop pedestal' vs 'use it now on the cursed pedestal'.
+            active_item_id = player:GetActiveItem(0) or 0,
+            active_charge = player:GetActiveCharge(0) or 0,
+            active_max_charge = player:GetActiveMaxCharge(0) or 0,
+            -- Secondary active slot (Schoolbag = 2 active items).
+            active_item_id_2 = player:GetActiveItem(1) or 0,
+            active_charge_2 = player:GetActiveCharge(1) or 0,
+            -- Trinket slot (2 in Repentance if you have Mom's Purse).
+            trinket_id_1 = player:GetTrinket(0) or 0,
+            trinket_id_2 = player:GetTrinket(1) or 0,
+            -- Card / pill slot. Card is 0 if none held; pill is 0 if none.
+            -- Repentance supports up to 4 card/pill slots (GetCard(0..3)).
+            card_id_1 = player:GetCard(0) or 0,
+            card_id_2 = player:GetCard(1) or 0,
+            card_id_3 = player:GetCard(2) or 0,
+            card_id_4 = player:GetCard(3) or 0,
+            pill_id_1 = player:GetPill(0) or 0,
+            pill_id_2 = player:GetPill(1) or 0,
+            pill_id_3 = player:GetPill(2) or 0,
+            pill_id_4 = player:GetPill(3) or 0,
+            -- Transformation progress. Repentance has 15 forms indexed 0..14
+            -- (Guppy=0, Beelzebub=1, Fun Guy=2, Seraphim=3, Bob=4, Spun=5,
+            -- Yes Mother=6, Conjoined=7, Leviathan=8, Oh Crap=9, Bookworm=10,
+            -- Adult=11, Spider Baby=12, Stompy=13, Super Bum=14). Each
+            -- returns 0-N counter of transformation items collected. At 3+
+            -- the transformation triggers (e.g. Guppy = flight + fly-
+            -- spawning tears, Leviathan = flight + Brimstone + demon form).
+            -- pcall wrap in case a Repentance build doesn't expose the API.
+            transformations = (function()
+                local ok, res = pcall(function()
+                    local t = {}
+                    for i = 0, 14 do
+                        t[#t + 1] = player:GetPlayerFormCounter(i) or 0
+                    end
+                    return t
+                end)
+                if ok then return res end
+                return {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+            end)(),
         },
         passives = build_passives(player),
         room_grid = build_room_grid(room),
