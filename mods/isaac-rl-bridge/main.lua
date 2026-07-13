@@ -420,6 +420,31 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
         Isaac.ExecuteCommand("stage " .. tostring(pending_stage))
         pending_stage = nil
     end
+    if RECORD_MODE then
+        -- RECORD_MODE: keep the existing socket across run restarts. The
+        -- recorder is a single-accept server — if we close and reconnect
+        -- here, the mod's Net.connect(HOST, PORT) will hang forever waiting
+        -- for a new accept() that never comes, freezing Isaac. In training
+        -- mode the trainer's vec_env keeps re-accepting for every episode
+        -- boundary; the recorder has no such loop by design (one JSONL per
+        -- record session). If we don't have a conn yet, this is the first
+        -- start — fall through to the normal connect path.
+        if conn then
+            Isaac.DebugString("[isaac-rl-bridge] RECORD_MODE=1 — run restart; keeping existing socket to recorder")
+            -- Send a lightweight 'run started' marker so the recorder
+            -- can segment episodes inside a single JSONL. Non-fatal on send
+            -- failure since the connection is presumed still open.
+            local seed = Game():GetSeeds():GetStartSeed()
+            pcall(function()
+                conn:send(json.encode({
+                    hello = true, schema = 2, seed = seed,
+                    is_continued = is_continued,
+                    run_restart = true,
+                }))
+            end)
+            return
+        end
+    end
     if conn then conn:close() end
     conn = Net.connect(HOST, PORT, 0.05)   -- see net.lua for why 50 ms
     local seed = Game():GetSeeds():GetStartSeed()
