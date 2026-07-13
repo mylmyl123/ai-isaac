@@ -110,3 +110,47 @@ def test_record_session_timeout_when_no_client(tmp_path: Path) -> None:
         accept_timeout_s=0.5,   # short timeout
     )
     assert out_path is None
+
+
+def test_record_session_splits_runs_on_hello_and_discards_short(tmp_path: Path) -> None:
+    """Multiple runs separated by hello frames → multiple JSONL files.
+    Runs under min_ticks get unlinked; longer runs are kept."""
+    port = 9505
+    # Sequence: 5 obs (run 0), hello, 2 obs (run 1 — too short), hello, 4 obs (run 2).
+    # min_ticks=3 → run 0 (5 ticks) and run 2 (4 ticks) kept, run 1 (2 ticks) discarded.
+    frames = (
+        [{"tick": i, "kind": "obs", "run": 0} for i in range(5)]
+        + [{"hello": True, "schema": 2, "seed": 1, "is_continued": False, "run_restart": True}]
+        + [{"tick": i, "kind": "obs", "run": 1} for i in range(2)]
+        + [{"hello": True, "schema": 2, "seed": 2, "is_continued": False, "run_restart": True}]
+        + [{"tick": i, "kind": "obs", "run": 2} for i in range(4)]
+    )
+    t = threading.Thread(target=_client_send_frames, args=(port, frames), daemon=True)
+    t.start()
+
+    last_kept = record_session(
+        port=port,
+        out_dir=tmp_path,
+        isaac_binary=None,
+        accept_timeout_s=5.0,
+        min_ticks=3,
+    )
+    t.join(timeout=3.0)
+
+    # Two runs should be kept: run_000 (5 ticks) and run_002 (4 ticks).
+    kept = sorted(tmp_path.glob("session_*_run_*.jsonl"))
+    assert len(kept) == 2, f"expected 2 kept runs, got {[p.name for p in kept]}"
+    assert kept[0].name.endswith("_run_000.jsonl")
+    assert kept[1].name.endswith("_run_002.jsonl")
+
+    # Verify contents: kept files contain the obs frames from their run.
+    lines_run0 = kept[0].read_text().strip().split("\n")
+    assert len(lines_run0) == 5
+    assert all(json.loads(l)["run"] == 0 for l in lines_run0)
+
+    lines_run2 = kept[1].read_text().strip().split("\n")
+    assert len(lines_run2) == 4
+    assert all(json.loads(l)["run"] == 2 for l in lines_run2)
+
+    # Return value is the last kept run.
+    assert last_kept == kept[-1]

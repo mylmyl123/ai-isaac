@@ -145,12 +145,25 @@ def record_session(
     out_dir: Path = Path("demos"),
     isaac_binary: str | None = None,
     accept_timeout_s: float = 300.0,
-    min_ticks: int = 150,   # ~10s @ 15 Hz; below this we prompt to discard
+    min_ticks: int = 150,   # ~10s @ 15 Hz; runs shorter than this are auto-discarded
 ) -> Path | None:
-    """Record one session. Returns the output JSONL path, or None on failure."""
+    """Record one session, split into per-run JSONL files.
+
+    Every time Isaac fires MC_POST_GAME_STARTED the mod sends a control
+    frame with ``hello=true`` (with ``run_restart=true`` for restarts).
+    The recorder uses those markers to segment the incoming stream into
+    one JSONL per run: ``session_<ts>_run_<NNN>.jsonl``.
+
+    Any run shorter than ``min_ticks`` frames is silently discarded on close
+    — avoids polluting the BC corpus with 3-second restart-scummed starts.
+
+    Returns the LAST kept run's path, or None if nothing was kept.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     session_id = time.strftime("%Y%m%d-%H%M%S")
-    out_path = out_dir / f"session_{session_id}.jsonl"
+    # Per-run files, not one blob for the whole session.
+    def _run_path(run_idx: int) -> Path:
+        return out_dir / f"session_{session_id}_run_{run_idx:03d}.jsonl"
 
     _install_stop_handlers()
     # Clear any stale STOP file left from a previous session.
@@ -196,86 +209,121 @@ def record_session(
         return None
     client.settimeout(1.0)  # short poll so Ctrl+C is responsive on Windows PowerShell
     log.info("connected: %s", addr)
-    log.info("writing to: %s", out_path)
+    log.info("writing per-run JSONLs into: %s", out_dir)
+    log.info("  filename: session_%s_run_NNN.jsonl (one file per Isaac run)", session_id)
+    log.info("  runs shorter than %d ticks (%.1fs @ 15 Hz) are auto-discarded",
+             min_ticks, min_ticks / 15.0)
     log.info("Play Isaac normally. Ctrl+C in THIS window to stop.")
     log.info("  fallback: `New-Item %s` from another shell also stops.", stop_file)
 
-    tick_count = 0
+    # Per-run state. Exactly one JSONL open at a time — the current run.
+    # Each 'hello' control frame from the mod (initial handshake or
+    # MC_POST_GAME_STARTED after R-restart) closes the current run and
+    # opens the next. Runs under min_ticks are unlinked on close.
+    run_idx = 0
+    run_path = _run_path(run_idx)
+    run_file = open(run_path, "w")
+    run_ticks = 0
+    run_start_t = time.time()
+
+    total_ticks = 0
+    kept_runs: list[Path] = []
+    discarded_count = 0
     t_start = time.time()
+
+    def _close_current_run(reason: str) -> None:
+        nonlocal discarded_count, run_file, run_path
+        try:
+            run_file.close()
+        except Exception:
+            pass
+        run_dt = time.time() - run_start_t
+        if run_ticks < min_ticks:
+            try:
+                run_path.unlink()
+                discarded_count += 1
+                log.info("run %03d: %d ticks (%.1fs) [%s] — discarded (< %d ticks)",
+                         run_idx, run_ticks, run_dt, reason, min_ticks)
+            except OSError as e:
+                log.error("failed to delete %s: %s", run_path, e)
+        else:
+            kept_runs.append(run_path)
+            log.info("run %03d: %d ticks (%.1fs) [%s] → kept", run_idx, run_ticks, run_dt, reason)
+
+    def _open_new_run() -> None:
+        nonlocal run_idx, run_path, run_file, run_ticks, run_start_t
+        run_idx += 1
+        run_path = _run_path(run_idx)
+        run_file = open(run_path, "w")
+        run_ticks = 0
+        run_start_t = time.time()
+        print()  # newline so tick counter doesn't overwrite the log line
+        log.info("run %03d started → %s", run_idx, run_path.name)
+
     try:
-        with open(out_path, "w") as f:
-            while True:
-                if _check_stop(out_dir):
-                    break
-                # 1s socket timeout — gives Ctrl+C a chance. NEVER treat a
-                # timeout as disconnect: Isaac's death sequence, game-over
-                # screen, pause menu, and main-menu-return all produce
-                # multi-second gaps where the mod sends no obs but is very
-                # much alive. Only 'eof' (Isaac's socket actually closed)
-                # or a user stop signal ends the loop.
-                frame, status = _recv_frame(client)
-                if status == "eof":
-                    log.warning("socket closed by Isaac after %d ticks (real disconnect)", tick_count)
-                    break
-                if status == "timeout":
-                    continue
-                # status == 'ok': write the payload.
-                # Flush every tick so Ctrl+C mid-gameplay never loses data.
-                f.write(frame.decode("utf-8", errors="replace"))
-                f.write("\n")
-                f.flush()
-                tick_count += 1
-                if tick_count % 100 == 0:
-                    dt = max(1e-6, time.time() - t_start)
-                    hz = tick_count / dt
-                    print(f"\rrecorded {tick_count} ticks ({hz:.1f} Hz, {dt:.0f}s elapsed)", end="", flush=True)
+        while True:
+            if _check_stop(out_dir):
+                break
+            # 1s socket timeout — gives Ctrl+C a chance. Never treat timeouts
+            # as disconnect: Isaac's death sequence / game-over screen /
+            # pause / menu all produce multi-second gaps. Only 'eof'
+            # (Isaac's socket actually closed) ends the loop.
+            frame, status = _recv_frame(client)
+            if status == "eof":
+                log.warning("socket closed by Isaac after %d total ticks (real disconnect)", total_ticks)
+                break
+            if status == "timeout":
+                continue
+            # status == 'ok'. Peek at the frame to detect 'hello' control
+            # frames. Cheap substring check is enough — obs frames never
+            # contain "hello":true within their first 200 bytes.
+            payload = frame.decode("utf-8", errors="replace")
+            head = payload[:200]
+            if '"hello"' in head and 'true' in head:
+                # Restart marker (or initial handshake). Close current run,
+                # open the next. If run_ticks==0 we're at the very first
+                # frame (the initial handshake) — don't churn a file, just
+                # leave the pristine run_000 open.
+                if run_ticks > 0:
+                    _close_current_run(reason="run_restart")
+                    _open_new_run()
+                continue
+            # Regular obs frame. Write to current run.
+            run_file.write(payload)
+            run_file.write("\n")
+            run_file.flush()
+            run_ticks += 1
+            total_ticks += 1
+            if total_ticks % 100 == 0:
+                dt = max(1e-6, time.time() - t_start)
+                hz = total_ticks / dt
+                print(f"\rrun {run_idx:03d}: {run_ticks} ticks | session: {total_ticks} ticks ({hz:.1f} Hz, {dt:.0f}s)",
+                      end="", flush=True)
     except KeyboardInterrupt:
         print()
-        log.info("Ctrl+C received \u2014 stopping recording")
+        log.info("Ctrl+C received — stopping recording")
     finally:
+        _close_current_run(reason="session_end")
         try:
             client.close()
         except Exception:
             pass
         server.close()
-        # DO NOT terminate Isaac on session end. The Ctrl+C / STOP path is
-        # user-initiated and they might want to keep playing (rerun record.ps1
-        # to start a fresh session against the same Isaac window). If Isaac's
-        # socket EOF'd naturally, Isaac has already exited anyway, so
-        # proc.terminate() would be a no-op. Killing here was the bug that
-        # made 'die -> game exits' happen: the recorder's own 60s idle
-        # timeout was interpreted as 'session over', then proc.terminate()
-        # closed Isaac's window.
+        # Don't terminate Isaac — user may want to keep playing.
         if proc is not None and proc.poll() is None:
             log.info("session ended; Isaac (pid=%d) left running — close it manually if desired", proc.pid)
 
     dt = max(1e-6, time.time() - t_start)
-    log.info("session complete: %d ticks in %.1fs (%.1f Hz avg) \u2192 %s",
-             tick_count, dt, tick_count / dt, out_path)
-    if tick_count < 100:
-        log.warning("very few ticks recorded \u2014 check that RECORD_MODE actually took effect")
-
-    # Auto-discard trivially short sessions. These are almost always
-    # 'launched then immediately restarted / quit' — they clutter the BC
-    # corpus with zero signal. Ask the user before deleting so they can
-    # override (Enter=discard, 'n'=keep).
-    if tick_count < min_ticks:
-        try:
-            resp = input(
-                f"\nsession is only {tick_count} ticks ({dt:.0f}s) — discard? [Y/n]: "
-            ).strip().lower()
-        except EOFError:
-            resp = "y"  # non-interactive shells: default discard
-        if resp in ("", "y", "yes"):
-            try:
-                out_path.unlink()
-                log.info("discarded: %s", out_path)
-            except OSError as e:
-                log.error("failed to delete %s: %s", out_path, e)
-            return None
-        log.info("kept: %s", out_path)
-
-    return out_path
+    log.info("session complete: %d total ticks in %.1fs (%.1f Hz avg)",
+             total_ticks, dt, total_ticks / dt)
+    log.info("  kept %d run(s), discarded %d short run(s)", len(kept_runs), discarded_count)
+    for p in kept_runs:
+        log.info("  kept: %s", p)
+    if not kept_runs:
+        log.warning("no runs were long enough to keep. Play at least one full run — min is %d ticks (~%.0fs).",
+                    min_ticks, min_ticks / 15.0)
+        return None
+    return kept_runs[-1]
 
 
 def main() -> None:
@@ -289,8 +337,8 @@ def main() -> None:
     ap.add_argument("--accept-timeout-s", type=float, default=300.0,
                     help="Seconds to wait for Isaac to connect. Default: 300.")
     ap.add_argument("--min-ticks", type=int, default=150,
-                    help="Sessions shorter than this ask to discard on exit. "
-                         "Default: 150 (~10s @ 15 Hz). Pass 0 to keep all sessions.")
+                    help="Auto-discard per-run JSONLs shorter than this. "
+                         "Default: 150 (~10s @ 15 Hz). Pass 0 to keep every run.")
     args = ap.parse_args()
     isaac = args.isaac if args.isaac else None
     record_session(

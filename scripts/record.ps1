@@ -2,17 +2,21 @@
 #
 # Launches Isaac with RECORD_MODE flag set. You play the game normally with
 # keyboard/gamepad; every 15 Hz tick (obs + your input state) gets written to
-# demos/session_<timestamp>.jsonl. Later fed into BC training to bootstrap the
-# RL actor with human demonstrations.
+# demos/session_<timestamp>_run_NNN.jsonl. ONE JSONL PER ISAAC RUN — pressing
+# R to restart automatically closes the current file and opens the next one.
+# Runs shorter than 150 ticks (~10s) are auto-discarded so restart-scumming
+# doesn't clutter the BC corpus. Fed into BC training to bootstrap the RL
+# actor with human demonstrations.
 #
 # Usage:
 #   .\scripts\record.ps1                       # auto-detect Isaac from Steam
 #   .\scripts\record.ps1 -Isaac "C:\path\to\isaac-ng.exe"
 #   .\scripts\record.ps1 -OutDir demos\my-runs
 #   .\scripts\record.ps1 -Port 9600            # if 9500 is in use
+#   .\scripts\record.ps1 -MinTicks 300         # stricter cutoff (~20s)
 #
 # Press Ctrl+C in THIS PowerShell window to stop recording. Isaac's window
-# stays open; close it separately.
+# stays open; close it separately if you want.
 #
 # Isaac binary auto-detected from standard Steam install locations.
 
@@ -20,7 +24,8 @@ param(
     [string]$Isaac = "",
     [string]$OutDir = "demos",
     [int]$Port = 9500,
-    [int]$AcceptTimeoutS = 300
+    [int]$AcceptTimeoutS = 300,
+    [int]$MinTicks = 150
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,4 +86,5 @@ python -m isaac_rl.record `
     --isaac $Isaac `
     --port $Port `
     --out $OutDir `
-    --accept-timeout-s $AcceptTimeoutS
+    --accept-timeout-s $AcceptTimeoutS `
+    --min-ticks $MinTicks
