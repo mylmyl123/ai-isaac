@@ -116,23 +116,35 @@ def record_session(
             proc.terminate()
         server.close()
         return None
-    client.settimeout(30.0)
+    client.settimeout(1.0)  # short poll so Ctrl+C is responsive on Windows PowerShell
     log.info("connected: %s", addr)
     log.info("writing to: %s", out_path)
     log.info("Play Isaac normally. Ctrl+C in THIS window to stop.")
 
     tick_count = 0
+    idle_polls = 0
     t_start = time.time()
     try:
         with open(out_path, "w") as f:
             while True:
+                # 1s socket timeout — _recv_frame returns None on timeout OR
+                # EOF (we can't tell which). Count consecutive Nones; treat a
+                # long streak as real disconnect, short streaks as Isaac just
+                # being paused / on a menu / user AFK. Each None also gives
+                # the Python interpreter a chance to process Ctrl+C.
                 frame = _recv_frame(client)
                 if frame is None:
-                    log.warning("connection lost / EOF after %d ticks", tick_count)
-                    break
-                # Raw JSON payload \u2014 write one per line.
+                    idle_polls += 1
+                    if idle_polls > 60:  # 60s no data — give up
+                        log.warning("no data for 60s after %d ticks, disconnecting", tick_count)
+                        break
+                    continue
+                idle_polls = 0
+                # Raw JSON payload — write one per line, flush every tick so
+                # Ctrl+C in the middle of gameplay never loses data.
                 f.write(frame.decode("utf-8", errors="replace"))
                 f.write("\n")
+                f.flush()
                 tick_count += 1
                 if tick_count % 100 == 0:
                     dt = max(1e-6, time.time() - t_start)
