@@ -34,12 +34,66 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Global stop flag. Set by SIGINT/SIGBREAK/SIGTERM handlers OR by the presence
+# of a demos/STOP file. The recording loop polls this on every timeout tick
+# so we can stop from any of: Ctrl+C in PowerShell, Ctrl+Break, `taskkill`,
+# or `New-Item demos\STOP`.
+_stop_flag = threading.Event()
+
+
+def _install_stop_handlers() -> None:
+    """Register OS signal handlers that set _stop_flag.
+
+    On Windows, PowerShell's Ctrl+C forwarding to a running python subprocess
+    is notoriously unreliable when the child is blocked in a native call
+    (like ``socket.recv``). Registering an explicit ``signal.signal`` handler
+    for SIGINT + SIGBREAK works around this: the handler runs in Python's
+    signal thread and sets the flag; the main loop checks the flag on every
+    1-second socket-timeout tick and exits cleanly within ~1s.
+    """
+    def _handler(signum, _frame):
+        # Best-effort log, but don't rely on it (stdout may be redirected).
+        log.info("stop signal %d received; finalizing session", signum)
+        _stop_flag.set()
+
+    # SIGINT = Ctrl+C. Universal.
+    signal.signal(signal.SIGINT, _handler)
+    # SIGBREAK = Ctrl+Break on Windows only. Fallback if Ctrl+C is swallowed
+    # by some terminal / IDE combo (e.g. VS Code's integrated terminal).
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _handler)
+    # SIGTERM = graceful `taskkill /pid <pid>` and similar. Handle so we
+    # still flush the JSONL properly instead of hard-killing mid-write.
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, _handler)
+        except (OSError, ValueError):
+            pass  # not raisable on some Windows configs
+
+
+def _stop_file_path(out_dir: Path) -> Path:
+    return out_dir / "STOP"
+
+
+def _check_stop(out_dir: Path) -> bool:
+    """Return True if we should stop (signal received OR STOP file exists)."""
+    if _stop_flag.is_set():
+        return True
+    if _stop_file_path(out_dir).exists():
+        log.info("STOP file found at %s; ending session", _stop_file_path(out_dir))
+        _stop_flag.set()
+        return True
+    return False
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
@@ -80,6 +134,12 @@ def record_session(
     session_id = time.strftime("%Y%m%d-%H%M%S")
     out_path = out_dir / f"session_{session_id}.jsonl"
 
+    _install_stop_handlers()
+    # Clear any stale STOP file left from a previous session.
+    stop_file = _stop_file_path(out_dir)
+    if stop_file.exists():
+        stop_file.unlink()
+    _stop_flag.clear()
     proc: subprocess.Popen | None = None
     if isaac_binary:
         env = os.environ.copy()
@@ -120,6 +180,7 @@ def record_session(
     log.info("connected: %s", addr)
     log.info("writing to: %s", out_path)
     log.info("Play Isaac normally. Ctrl+C in THIS window to stop.")
+    log.info("  fallback: `New-Item %s` from another shell also stops.", stop_file)
 
     tick_count = 0
     idle_polls = 0
@@ -127,6 +188,8 @@ def record_session(
     try:
         with open(out_path, "w") as f:
             while True:
+                if _check_stop(out_dir):
+                    break
                 # 1s socket timeout — _recv_frame returns None on timeout OR
                 # EOF (we can't tell which). Count consecutive Nones; treat a
                 # long streak as real disconnect, short streaks as Isaac just
