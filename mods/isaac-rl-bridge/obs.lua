@@ -7,6 +7,26 @@ local Tables = require("tables")
 
 local Obs = {}
 
+-- Vanilla Repentance vs REPENTOGON: some Isaac API methods (Player:GetActiveMaxCharge,
+-- Player:GetCard(1..3), Player:GetPill(1..3), Player:GetPlayerFormCounter, etc.)
+-- are REPENTOGON-only. Calling them on vanilla with `player:Method()` throws
+-- 'attempt to call a nil value'. safe_get wraps a member function so a missing
+-- method degrades to a caller-specified default instead of crashing Obs.build.
+--
+-- Usage: safe_get(default, fn, self, arg1, arg2, ...)
+--   e.g. safe_get(0, player.GetActiveMaxCharge, player, 0) is roughly
+--        pcall(function() return player:GetActiveMaxCharge(0) end)
+--
+-- Note we pass `player.Method` (dot, not colon) + `player` as first arg so
+-- pcall calls it correctly. If `player.Method` is nil, pcall catches the
+-- 'attempt to call nil' immediately with no error propagating up.
+local function safe_get(default, fn, ...)
+    if type(fn) ~= "function" then return default end
+    local ok, res = pcall(fn, ...)
+    if ok and res ~= nil then return res end
+    return default
+end
+
 -- Room interior is 480x270 world-units per Repentance conventions.
 -- We normalize positions to be roughly [0, 1] against the room bounding box for policy stability.
 local function room_bounds(room)
@@ -298,6 +318,15 @@ function Obs.build(tick, reward_events, run_state)
             -- (schema v2) silently ignores them. The BC training loader
             -- and, later, an expanded encoder will consume them.
             --
+            -- Vanilla Repentance vs REPENTOGON: many of the getters below
+            -- (GetActiveMaxCharge, GetCard(1..3), GetPill(1..3),
+            -- GetPlayerFormCounter) are REPENTOGON-only extensions and
+            -- crash with 'attempt to call a nil value' on vanilla builds.
+            -- Every new field is now wrapped via safe_get() so a missing
+            -- method degrades to 0 instead of killing the mod. For
+            -- active_max_charge specifically we fall back to Isaac's
+            -- ItemConfig database, which IS vanilla-safe.
+            --
             -- Character identity. Repentance has 34 characters (Isaac=0,
             -- Magdalene=1, Cain=2, Judas=3, ???=4, Eve=5, Samson=6, Azazel=7,
             -- Lazarus=8, Eden=9, The Lost=10, Lazarus Risen=11, Black Judas=12,
@@ -306,48 +335,56 @@ function Obs.build(tick, reward_events, run_state)
             -- Every character has different base HP, damage, active item,
             -- passives. Without this the BC actor averages over characters
             -- and Lilith (0 base damage) collapses to Isaac (3.5 damage).
-            player_type = player:GetPlayerType() or 0,
+            player_type = safe_get(0, player.GetPlayerType, player),
             -- Active item: primary slot (space bar). GetActiveItem returns 0
             -- when no active is held. GetActiveCharge and GetActiveMaxCharge
             -- expose the charge bar so BC can learn 'save the D6 for the
             -- shop pedestal' vs 'use it now on the cursed pedestal'.
-            active_item_id = player:GetActiveItem(0) or 0,
-            active_charge = player:GetActiveCharge(0) or 0,
-            active_max_charge = player:GetActiveMaxCharge(0) or 0,
+            active_item_id = safe_get(0, player.GetActiveItem, player, 0),
+            active_charge = safe_get(0, player.GetActiveCharge, player, 0),
+            -- GetActiveMaxCharge is REPENTOGON-only. Fall back to ItemConfig
+            -- (vanilla-safe) using the active_item_id we just read.
+            active_max_charge = (function()
+                local v = safe_get(nil, player.GetActiveMaxCharge, player, 0)
+                if v ~= nil then return v end
+                -- Fallback: read MaxCharges from Isaac.GetItemConfig().
+                local id = safe_get(0, player.GetActiveItem, player, 0)
+                if id and id > 0 then
+                    local cfg = safe_get(nil, function()
+                        return Isaac.GetItemConfig():GetCollectible(id)
+                    end)
+                    if cfg and cfg.MaxCharges then return cfg.MaxCharges end
+                end
+                return 0
+            end)(),
             -- Secondary active slot (Schoolbag = 2 active items).
-            active_item_id_2 = player:GetActiveItem(1) or 0,
-            active_charge_2 = player:GetActiveCharge(1) or 0,
+            active_item_id_2 = safe_get(0, player.GetActiveItem, player, 1),
+            active_charge_2 = safe_get(0, player.GetActiveCharge, player, 1),
             -- Trinket slot (2 in Repentance if you have Mom's Purse).
-            trinket_id_1 = player:GetTrinket(0) or 0,
-            trinket_id_2 = player:GetTrinket(1) or 0,
-            -- Card / pill slot. Card is 0 if none held; pill is 0 if none.
-            -- Repentance supports up to 4 card/pill slots (GetCard(0..3)).
-            card_id_1 = player:GetCard(0) or 0,
-            card_id_2 = player:GetCard(1) or 0,
-            card_id_3 = player:GetCard(2) or 0,
-            card_id_4 = player:GetCard(3) or 0,
-            pill_id_1 = player:GetPill(0) or 0,
-            pill_id_2 = player:GetPill(1) or 0,
-            pill_id_3 = player:GetPill(2) or 0,
-            pill_id_4 = player:GetPill(3) or 0,
+            trinket_id_1 = safe_get(0, player.GetTrinket, player, 0),
+            trinket_id_2 = safe_get(0, player.GetTrinket, player, 1),
+            -- Card / pill slot. Vanilla Repentance only exposes slot 0;
+            -- REPENTOGON adds slots 1..3. safe_get returns 0 for missing.
+            card_id_1 = safe_get(0, player.GetCard, player, 0),
+            card_id_2 = safe_get(0, player.GetCard, player, 1),
+            card_id_3 = safe_get(0, player.GetCard, player, 2),
+            card_id_4 = safe_get(0, player.GetCard, player, 3),
+            pill_id_1 = safe_get(0, player.GetPill, player, 0),
+            pill_id_2 = safe_get(0, player.GetPill, player, 1),
+            pill_id_3 = safe_get(0, player.GetPill, player, 2),
+            pill_id_4 = safe_get(0, player.GetPill, player, 3),
             -- Transformation progress. Repentance has 15 forms indexed 0..14
             -- (Guppy=0, Beelzebub=1, Fun Guy=2, Seraphim=3, Bob=4, Spun=5,
             -- Yes Mother=6, Conjoined=7, Leviathan=8, Oh Crap=9, Bookworm=10,
             -- Adult=11, Spider Baby=12, Stompy=13, Super Bum=14). Each
-            -- returns 0-N counter of transformation items collected. At 3+
-            -- the transformation triggers (e.g. Guppy = flight + fly-
-            -- spawning tears, Leviathan = flight + Brimstone + demon form).
-            -- pcall wrap in case a Repentance build doesn't expose the API.
+            -- returns 0-N counter of transformation items collected.
+            -- GetPlayerFormCounter is REPENTOGON-only; all-zero on vanilla.
             transformations = (function()
-                local ok, res = pcall(function()
-                    local t = {}
-                    for i = 0, 14 do
-                        t[#t + 1] = player:GetPlayerFormCounter(i) or 0
-                    end
-                    return t
-                end)
-                if ok then return res end
-                return {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+                local t = {}
+                for i = 0, 14 do
+                    t[#t + 1] = safe_get(0, player.GetPlayerFormCounter, player, i)
+                end
+                return t
             end)(),
         },
         passives = build_passives(player),
