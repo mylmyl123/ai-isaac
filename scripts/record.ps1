@@ -69,6 +69,14 @@ Write-Host "* Every 2 frames (~15 Hz) your obs + input state is recorded." -Fore
 Write-Host "* Ctrl+C in THIS window to stop. Isaac window stays open." -ForegroundColor Green
 Write-Host ""
 
+# Set env vars at PowerShell scope too, not just via subprocess.Popen's env=
+# argument. Belt-and-suspenders — if Python's subprocess.Popen env-passing
+# fails to propagate on Windows for whatever reason (some AV, some launcher
+# indirection), Isaac still sees these via the inherited process env.
+# Verified in mod via boot-time DebugString of os.getenv results.
+$env:ISAAC_RL_RECORD = "1"
+$env:ISAAC_RL_PORT = "$Port"
+
 python -m isaac_rl.record `
     --isaac $Isaac `
     --port $Port `

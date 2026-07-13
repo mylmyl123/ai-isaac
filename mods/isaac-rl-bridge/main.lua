@@ -63,6 +63,13 @@ end
 -- The Python side (isaac_rl.record) accepts the stream and writes one JSONL
 -- line per tick to demos/session_<ts>.jsonl for later BC training.
 local RECORD_MODE = os.getenv("ISAAC_RL_RECORD") == "1"
+-- Diagnostic: always log the raw env-var value so we can distinguish
+-- 'RECORD_MODE=1 set but disabled' from 'env-var never reached the process'.
+-- Fires unconditionally at mod load time.
+Isaac.DebugString("[isaac-rl-bridge] boot: ISAAC_RL_RECORD="
+    .. tostring(os.getenv("ISAAC_RL_RECORD"))
+    .. " ISAAC_RL_PORT=" .. tostring(os.getenv("ISAAC_RL_PORT"))
+    .. " record_mode_active=" .. tostring(RECORD_MODE))
 if RECORD_MODE then
     Isaac.DebugString("[isaac-rl-bridge] RECORD_MODE=1 — human plays; obs+action stream written to Python")
 end
