@@ -86,8 +86,17 @@ def record_session(
         env["ISAAC_RL_PORT"] = str(port)
         env["ISAAC_RL_RECORD"] = "1"
         cmd = [isaac_binary, "--luadebug"]
-        log.info("launching Isaac in RECORD mode: %s (port=%d)", " ".join(cmd), port)
-        proc = subprocess.Popen(cmd, env=env)
+        # CRITICAL: Isaac loads resources/scripts/enums.lua, resources/packed/*.a,
+        # and all game assets via paths relative to its own CWD. When we
+        # subprocess.Popen(cmd) without cwd=, the child inherits our repo dir,
+        # Isaac can't find resources/, and dies before the mod even loads with
+        # "ERR: cannot open resources/scripts/enums.lua". Steam's -applaunch
+        # sets CWD internally which is why the training launcher works; here
+        # we launch the binary directly so we have to set it ourselves.
+        isaac_dir = os.path.dirname(isaac_binary) or "."
+        log.info("launching Isaac in RECORD mode: %s (port=%d, cwd=%s)",
+                 " ".join(cmd), port, isaac_dir)
+        proc = subprocess.Popen(cmd, env=env, cwd=isaac_dir)
     else:
         log.info("no --isaac path passed; waiting for external Isaac on port %d", port)
         log.info("(launch Isaac yourself with ISAAC_RL_RECORD=1 and ISAAC_RL_PORT=%d set)", port)
