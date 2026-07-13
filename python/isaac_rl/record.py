@@ -96,31 +96,48 @@ def _check_stop(out_dir: Path) -> bool:
     return False
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
-    """Read exactly ``n`` bytes. Returns None on EOF/timeout."""
+def _recv_exact(sock: socket.socket, n: int) -> tuple[bytes | None, str]:
+    """Read exactly ``n`` bytes.
+
+    Returns ``(bytes, 'ok')`` on success, ``(None, 'timeout')`` if the socket
+    timed out with zero bytes read, or ``(None, 'eof')`` if the peer closed
+    the connection or a socket error occurred. Callers should treat 'timeout'
+    as 'keep waiting' (Isaac paused, on game-over screen, etc.) and only
+    give up on 'eof' — conflating the two would mean disconnecting every
+    time the player dies for a few seconds while the mod's reset_cooldown
+    suppresses obs frames, which is exactly the bug we're fixing.
+    """
     buf = b""
     while len(buf) < n:
         try:
             chunk = sock.recv(n - len(buf))
-        except (socket.timeout, ConnectionError):
-            return None
+        except socket.timeout:
+            return None, "timeout"
+        except (ConnectionError, OSError):
+            return None, "eof"
         if not chunk:
-            return None
+            return None, "eof"
         buf += chunk
-    return buf
+    return buf, "ok"
 
 
-def _recv_frame(sock: socket.socket) -> bytes | None:
-    """Read one length-prefixed frame. Returns raw payload bytes or None."""
-    header = _recv_exact(sock, 4)
-    if not header:
-        return None
+def _recv_frame(sock: socket.socket) -> tuple[bytes | None, str]:
+    """Read one length-prefixed frame. Returns (payload, status).
+
+    Status is one of 'ok' (payload valid), 'timeout' (no data ready but
+    connection alive), or 'eof' (real disconnect). Payload is None unless
+    status is 'ok'.
+    """
+    header, status = _recv_exact(sock, 4)
+    if status != "ok":
+        return None, status
     length = int.from_bytes(header, "big")
     # Sanity clamp: reject frames > 4 MB (any real obs is ~5-30 KB).
     if length <= 0 or length > 4 * 1024 * 1024:
         log.error("frame length out of range: %d bytes", length)
-        return None
-    return _recv_exact(sock, length)
+        return None, "eof"
+    payload, status = _recv_exact(sock, length)
+    return payload, status
 
 
 def record_session(
@@ -184,28 +201,26 @@ def record_session(
     log.info("  fallback: `New-Item %s` from another shell also stops.", stop_file)
 
     tick_count = 0
-    idle_polls = 0
     t_start = time.time()
     try:
         with open(out_path, "w") as f:
             while True:
                 if _check_stop(out_dir):
                     break
-                # 1s socket timeout — _recv_frame returns None on timeout OR
-                # EOF (we can't tell which). Count consecutive Nones; treat a
-                # long streak as real disconnect, short streaks as Isaac just
-                # being paused / on a menu / user AFK. Each None also gives
-                # the Python interpreter a chance to process Ctrl+C.
-                frame = _recv_frame(client)
-                if frame is None:
-                    idle_polls += 1
-                    if idle_polls > 60:  # 60s no data — give up
-                        log.warning("no data for 60s after %d ticks, disconnecting", tick_count)
-                        break
+                # 1s socket timeout — gives Ctrl+C a chance. NEVER treat a
+                # timeout as disconnect: Isaac's death sequence, game-over
+                # screen, pause menu, and main-menu-return all produce
+                # multi-second gaps where the mod sends no obs but is very
+                # much alive. Only 'eof' (Isaac's socket actually closed)
+                # or a user stop signal ends the loop.
+                frame, status = _recv_frame(client)
+                if status == "eof":
+                    log.warning("socket closed by Isaac after %d ticks (real disconnect)", tick_count)
+                    break
+                if status == "timeout":
                     continue
-                idle_polls = 0
-                # Raw JSON payload — write one per line, flush every tick so
-                # Ctrl+C in the middle of gameplay never loses data.
+                # status == 'ok': write the payload.
+                # Flush every tick so Ctrl+C mid-gameplay never loses data.
                 f.write(frame.decode("utf-8", errors="replace"))
                 f.write("\n")
                 f.flush()
@@ -223,12 +238,16 @@ def record_session(
         except Exception:
             pass
         server.close()
-        if proc:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        # DO NOT terminate Isaac on session end. The Ctrl+C / STOP path is
+        # user-initiated and they might want to keep playing (rerun record.ps1
+        # to start a fresh session against the same Isaac window). If Isaac's
+        # socket EOF'd naturally, Isaac has already exited anyway, so
+        # proc.terminate() would be a no-op. Killing here was the bug that
+        # made 'die -> game exits' happen: the recorder's own 60s idle
+        # timeout was interpreted as 'session over', then proc.terminate()
+        # closed Isaac's window.
+        if proc is not None and proc.poll() is None:
+            log.info("session ended; Isaac (pid=%d) left running — close it manually if desired", proc.pid)
 
     dt = max(1e-6, time.time() - t_start)
     log.info("session complete: %d ticks in %.1fs (%.1f Hz avg) \u2192 %s",
