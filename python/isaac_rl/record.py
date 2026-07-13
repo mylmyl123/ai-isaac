@@ -128,6 +128,7 @@ def record_session(
     out_dir: Path = Path("demos"),
     isaac_binary: str | None = None,
     accept_timeout_s: float = 300.0,
+    min_ticks: int = 150,   # ~10s @ 15 Hz; below this we prompt to discard
 ) -> Path | None:
     """Record one session. Returns the output JSONL path, or None on failure."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -234,6 +235,27 @@ def record_session(
              tick_count, dt, tick_count / dt, out_path)
     if tick_count < 100:
         log.warning("very few ticks recorded \u2014 check that RECORD_MODE actually took effect")
+
+    # Auto-discard trivially short sessions. These are almost always
+    # 'launched then immediately restarted / quit' — they clutter the BC
+    # corpus with zero signal. Ask the user before deleting so they can
+    # override (Enter=discard, 'n'=keep).
+    if tick_count < min_ticks:
+        try:
+            resp = input(
+                f"\nsession is only {tick_count} ticks ({dt:.0f}s) — discard? [Y/n]: "
+            ).strip().lower()
+        except EOFError:
+            resp = "y"  # non-interactive shells: default discard
+        if resp in ("", "y", "yes"):
+            try:
+                out_path.unlink()
+                log.info("discarded: %s", out_path)
+            except OSError as e:
+                log.error("failed to delete %s: %s", out_path, e)
+            return None
+        log.info("kept: %s", out_path)
+
     return out_path
 
 
@@ -247,6 +269,9 @@ def main() -> None:
                     help="Path to isaac-ng.exe. Empty = don't launch, wait for external Isaac.")
     ap.add_argument("--accept-timeout-s", type=float, default=300.0,
                     help="Seconds to wait for Isaac to connect. Default: 300.")
+    ap.add_argument("--min-ticks", type=int, default=150,
+                    help="Sessions shorter than this ask to discard on exit. "
+                         "Default: 150 (~10s @ 15 Hz). Pass 0 to keep all sessions.")
     args = ap.parse_args()
     isaac = args.isaac if args.isaac else None
     record_session(
@@ -254,6 +279,7 @@ def main() -> None:
         out_dir=args.out,
         isaac_binary=isaac,
         accept_timeout_s=args.accept_timeout_s,
+        min_ticks=args.min_ticks,
     )
 
 

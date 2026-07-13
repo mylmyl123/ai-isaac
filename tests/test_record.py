@@ -86,6 +86,7 @@ def test_record_session_writes_jsonl(tmp_path: Path) -> None:
         out_dir=tmp_path,
         isaac_binary=None,       # don't try to launch Isaac
         accept_timeout_s=5.0,
+        min_ticks=0,             # don't prompt for discard in tests
     )
     t.join(timeout=3.0)
 

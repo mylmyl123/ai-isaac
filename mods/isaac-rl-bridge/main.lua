@@ -725,6 +725,19 @@ handle_player_death = function(source)
         end
     end
     Isaac.DebugString("[isaac-rl-bridge] issuing 'restart' from " .. source)
+    -- RECORD_MODE: DO NOT auto-restart the run. The human is playing and
+    -- Isaac's own game-over screen will show; they pick continue/restart/menu
+    -- themselves. Firing Isaac.ExecuteCommand('restart') here on top of
+    -- Isaac's built-in death flow has been observed to fully close the
+    -- process on some Repentance builds (see death_announced comment near
+    -- top of file), which kills the recording session mid-play. In record
+    -- mode we just emit the death event to Python (already done above) and
+    -- let the human handle the restart via Isaac's UI or the R key.
+    if RECORD_MODE then
+        Isaac.DebugString("[isaac-rl-bridge] RECORD_MODE=1 — skipping ExecuteCommand('restart'); human handles restart manually")
+        reset_cooldown = 60
+        return
+    end
     Isaac.ExecuteCommand("restart")
     reset_cooldown = 60
 end
@@ -738,6 +751,14 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
 end)
 
 mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
+    -- RECORD_MODE: the whole render-driven auto-start / auto-restart machinery
+    -- is training-mode-only. In record mode the human picks their character
+    -- and mode from the main menu, and handles death themselves via Isaac's
+    -- built-in game-over screen or R key. Any Isaac.ExecuteCommand('restart')
+    -- fired here would either (a) skip the user's character choice, or (b)
+    -- close the Isaac process (see comments above). Short-circuit immediately.
+    if RECORD_MODE then return end
+
     -- Menu auto-start branch (only runs before any MC_POST_UPDATE ever fired).
     if not auto_start_fired then
         if Game():GetFrameCount() > 0 then
