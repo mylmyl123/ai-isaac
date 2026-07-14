@@ -1,0 +1,51 @@
+# Isaac RL PPO curriculum config.
+#
+# Single YAML for the whole curriculum. Set `stage` to A/B/C/D/E and pass
+# through to the Isaac mod (via ISAAC_RL_STAGE env var).
+#
+# Curriculum stages:
+#   A  sealed room, 1 attack fly, respawn on kill                        (~1 hr)
+#   B  sealed room, 3 attack flies, respawn on room-clear                (~2 hr)
+#   C  normal starting room, unsealed doors, 1 fly (mod wipes rest)      (~4 hr)
+#   D  normal Basement 1 room, vanilla enemies                           (~8 hr)
+#   E  full Basement 1 run, no restrictions                              (~16 hr)
+#
+# Runs progressively at 5 seeds each. Each stage warm-starts from the
+# previous stage's checkpoint (via --resume runs/.../latest.pt).
+#
+# Compute budget assumes ~15 sps per env on a 3060 Ti with 2 envs.
+
+# ---- Curriculum -----------------------------------------------------------
+stage: A                          # A|B|C|D|E — read by the mod via ISAAC_RL_STAGE
+run_name: cleanrl_ppo_stageA
+
+# ---- Env fleet ------------------------------------------------------------
+n_envs: 2
+base_port: 9500
+reset_stage: 1                    # Basement 1 (mod's --set-stage)
+max_episode_steps: 1800           # 2 min at 15Hz; stops runaway episodes
+total_env_steps: 200_000          # Setup A learns much faster if it learns at all
+
+# ---- PPO hyperparameters --------------------------------------------------
+rollout_length: 128
+n_epochs: 4
+n_minibatches: 4
+lr: 3.0e-4
+gamma: 0.99
+gae_lambda: 0.95
+clip_coef: 0.2
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
+anneal_lr: true
+
+# ---- Network --------------------------------------------------------------
+hidden_dim: 256
+n_hidden_layers: 2
+
+# ---- Runtime --------------------------------------------------------------
+device: cuda
+seed: 42
+checkpoint_dir: runs
+checkpoint_every: 100_000
+log_every_updates: 1
