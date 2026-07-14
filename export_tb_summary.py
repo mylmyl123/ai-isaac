@@ -99,51 +99,260 @@ def summarize(df, max_points_per_scalar: int = 200) -> dict:
         }
 
     # Health check: automatic diagnostics.
+    #
+    # Post 2026-07-13 reset: cleanrl_ppo.py writes scalars under 'charts/' and
+    # 'loss/' prefixes (CleanRL convention). Accept both the new prefixed names
+    # and the legacy bare names so old JSON exports still work if you diff.
+    def _pick(*keys):
+        for k in keys:
+            if k in ps:
+                return ps[k]
+        return None
+
     checks = out["health_check"]
     ps = out["per_scalar"]
-    if "loss/entropy" in ps:
-        e = ps["loss/entropy"]
+
+    e = _pick("loss/entropy")
+    if e:
         checks["entropy"] = {
             "last": e["last"],
             "min": e["min"],
             "status": "healthy" if e["last"] > 0.8 else ("collapsed" if e["last"] < 0.3 else "warning"),
-            "note": "target >0.8 for good exploration. <0.3 = policy is deterministic (bad).",
-        }
-    if "reward/new_room" in ps:
-        r = ps["reward/new_room"]
-        checks["progression"] = {
-            "avg_new_rooms_per_ep": r["mean"] if r["count"] > 0 else 0.0,
-            "note": "average per-episode new-room reward. Should trend upward as bot learns door-crossing.",
-        }
-    if "ep_len_mean" in ps:
-        e = ps["ep_len_mean"]
-        checks["episode_length"] = {
-            "last": e["last"],
-            "trend": "increasing" if e["last"] > e["first"] * 1.5 else ("decreasing" if e["last"] < e["first"] * 0.7 else "stable"),
-            "note": ">1500 with no progression = camping or stuck. Decreasing over time is usually good (faster clears).",
-        }
-    if "ep_r_mean" in ps:
-        r = ps["ep_r_mean"]
-        checks["reward"] = {
-            "first": r["first"],
-            "last": r["last"],
-            "trend": "improving" if r["last"] > r["first"] + 0.5 else ("degrading" if r["last"] < r["first"] - 0.5 else "stagnant"),
-        }
-    if "loss/kickstart" in ps:
-        k = ps["loss/kickstart"]
-        checks["kickstarting"] = {
-            "current": k["last"],
-            "note": "should be non-trivial (0.1-1.0) early, decay to ~0 after 500 updates.",
-        }
-    if "loss/value" in ps:
-        v = ps["loss/value"]
-        checks["value_function"] = {
-            "last": v["last"],
-            "trend": "converging" if v["last"] < v["first"] else "diverging",
-            "note": "should decrease over time (or oscillate around a low value). With B1 distributional value, typical values are 2-5.",
+            "note": "target >0.8 for good exploration. <0.3 = policy is deterministic (bad). Max for MultiDiscrete([9,5,2,2,2]) is ~3.8.",
         }
 
+    kills = _pick("charts/kills_mean", "behavior/kills")
+    if kills:
+        checks["kills_per_episode"] = {
+            "first": kills["first"],
+            "last": kills["last"],
+            "max": kills["max"],
+            "trend": "improving" if kills["last"] > kills["first"] + 0.5 else ("degrading" if kills["last"] < kills["first"] - 0.5 else "flat"),
+            "note": "Stage A: random baseline is ~1-2 kills/ep. Learning shows this climbing to 4-6+. Flat at 1-2 through 100k steps = pipeline broken.",
+        }
+
+    ep_len = _pick("charts/ep_len_mean", "ep_len_mean")
+    if ep_len:
+        checks["episode_length"] = {
+            "last": ep_len["last"],
+            "trend": "increasing" if ep_len["last"] > ep_len["first"] * 1.5 else ("decreasing" if ep_len["last"] < ep_len["first"] * 0.7 else "stable"),
+            "note": "Stage A: shorter = agent dying faster. Increasing = agent surviving longer. Stage E: >1500 with no progression = camping.",
+        }
+
+    ep_r = _pick("charts/ep_r_mean", "ep_r_mean")
+    if ep_r:
+        checks["reward"] = {
+            "first": ep_r["first"],
+            "last": ep_r["last"],
+            "max": ep_r["max"],
+            "trend": "improving" if ep_r["last"] > ep_r["first"] + 0.5 else ("degrading" if ep_r["last"] < ep_r["first"] - 0.5 else "stagnant"),
+            "note": "3-term reward: r_kill=+1, r_death=-1, r_step=-0.001. So ep_r >0 = net-positive (killing faster than dying).",
+        }
+
+    v = _pick("loss/value")
+    if v:
+        checks["value_function"] = {
+            "first": v["first"],
+            "last": v["last"],
+            "trend": "converging" if v["last"] < v["first"] else "diverging",
+            "note": "should decrease over time. Diverging value = LR too high or GAE-lambda misconfigured.",
+        }
+
+    kl = _pick("loss/approx_kl")
+    if kl:
+        checks["approx_kl"] = {
+            "last": kl["last"],
+            "max": kl["max"],
+            "note": "target <0.02 per update. >0.05 = policy updates are too aggressive (LR too high or clip_coef too permissive).",
+        }
+
+    clip = _pick("loss/clipfrac")
+    if clip:
+        checks["clip_frac"] = {
+            "last": clip["last"],
+            "note": "fraction of samples PPO-clipped. Healthy: 0.1-0.3. Near 0 = updates too small. Near 1 = ratio wildly off, clip is doing everything.",
+        }
+
+    sps = _pick("charts/sps")
+    if sps:
+        checks["throughput"] = {
+            "last": sps["last"],
+            "mean": sps["mean"],
+            "note": "steps/sec across all envs. 2 envs @ 15 sps each = expect ~30 total.",
+        }
+
+    # ---- Per-factor entropy: which action head is collapsing? ------------
+    factor_names = ["move", "shoot", "use_item", "drop_bomb", "use_pillcard"]
+    factor_max_entropy = {"move": 2.197, "shoot": 1.609, "use_item": 0.693, "drop_bomb": 0.693, "use_pillcard": 0.693}
+    factor_status = {}
+    for name in factor_names:
+        f = _pick(f"entropy_per_factor/{name}")
+        if f:
+            max_ent = factor_max_entropy.get(name, 1.0)
+            frac = f["last"] / max_ent
+            if frac > 0.9:
+                st = "uniform"
+            elif frac > 0.5:
+                st = "exploring"
+            elif frac > 0.1:
+                st = "sharpening"
+            else:
+                st = "collapsed"
+            factor_status[name] = {"last": f["last"], "max": max_ent, "frac_of_max": frac, "status": st}
+    if factor_status:
+        checks["entropy_per_factor"] = {
+            **factor_status,
+            "note": "per action-head entropy. Collapsed on the wrong head = wasted learning. E.g. shoot=collapsed = policy stopped exploring shot directions.",
+        }
+
+    # ---- Action histogram: is any factor stuck on one action? -----------
+    action_top = {}
+    for name in factor_names:
+        f = _pick(f"action_top_frac/{name}")
+        if f:
+            action_top[name] = {"last": f["last"], "note": "1.0 = always picks same action. Near 0.2 = uniform for 5-way, 0.11 for 9-way."}
+    if action_top:
+        checks["action_top_frac"] = action_top
+
+    # ---- One-line verdict + specific hyperparameter recommendations ------
+    verdict, recs = _diagnose(ps, checks)
+    checks["VERDICT"] = verdict
+    if recs:
+        checks["RECOMMENDATIONS"] = recs
+
     return out
+
+
+def _diagnose(ps: dict, checks: dict) -> tuple[str, list[str]]:
+    """Produce a plain-English one-line verdict + concrete hyperparameter changes.
+
+    Called at the end of summarize(). Reads only from the already-computed
+    per_scalar dict, so no TB dependency. Returns (verdict, recommendations).
+    Recommendations are actionable: 'lower LR to 1e-4', not 'try tuning LR'.
+    """
+    def last(tag):
+        d = ps.get(tag)
+        return d["last"] if d else None
+
+    def first(tag):
+        d = ps.get(tag)
+        return d["first"] if d else None
+
+    def maxv(tag):
+        d = ps.get(tag)
+        return d["max"] if d else None
+
+    kills_last = last("charts/kills_mean")
+    kills_first = first("charts/kills_mean")
+    kills_max = maxv("charts/kills_mean")
+    ent_last = last("loss/entropy")
+    kl_last = last("loss/approx_kl")
+    clip_last = last("loss/clipfrac")
+    v_last = last("loss/value")
+    v_first = first("loss/value")
+    sps_last = last("charts/sps")
+    total_steps = ps.get("charts/kills_mean", {}).get("count", 0) * 100  # rough
+
+    recs = []
+    verdict = "UNKNOWN (not enough data)"
+
+    if kills_last is None:
+        verdict = "NO DATA: kills scalar missing. Check that env.py info dict includes 'raw' with 'events'."
+        return verdict, recs
+
+    # -------- Primary verdict: did learning happen? --------
+    if kills_last is not None and kills_first is not None:
+        delta = kills_last - kills_first
+        if delta > 1.5:
+            verdict = f"LEARNING: kills/ep went {kills_first:.1f} -> {kills_last:.1f} (max {kills_max:.1f}). Policy is improving. Move to next curriculum stage when kills plateaus."
+        elif delta > 0.3:
+            verdict = f"WEAK LEARNING: kills/ep went {kills_first:.1f} -> {kills_last:.1f}. Slow but non-zero. Consider longer run OR nudge hyperparameters below."
+        elif kills_last > 2.5:
+            verdict = f"AT-CEILING: kills/ep stable at {kills_last:.1f} — likely already good on this stage. Move to next stage."
+        else:
+            verdict = f"NOT LEARNING: kills/ep flat at {kills_last:.1f} (started {kills_first:.1f}). Random-baseline territory. Diagnose per recommendations below."
+
+    # -------- Specific hyperparameter recommendations --------
+    # Entropy diagnostics.
+    if ent_last is not None:
+        # For MultiDiscrete([9,5,2,2,2]) uniform entropy is ~5.29.
+        # 90% of max = 4.76. 30% = 1.59.
+        if ent_last > 4.5:
+            recs.append(
+                f"entropy={ent_last:.2f} (~uniform). Policy hasn't specialized. "
+                "If kills flat: try raising LR to 1e-3 or lowering ent_coef to 0.001 to encourage sharpening."
+            )
+        elif ent_last < 1.0:
+            recs.append(
+                f"entropy={ent_last:.2f} (collapsed). Policy is near-deterministic. "
+                "Raise ent_coef to 0.05 to force exploration."
+            )
+
+    # KL divergence diagnostics.
+    if kl_last is not None:
+        if kl_last > 0.05:
+            recs.append(
+                f"approx_kl={kl_last:.3f} (target <0.02). PPO updates are too aggressive. "
+                "Lower LR to 1e-4 OR increase n_minibatches to 8 to average over more samples."
+            )
+        elif kl_last < 0.001:
+            recs.append(
+                f"approx_kl={kl_last:.4f} (very small). Updates aren't moving the policy. "
+                "Raise LR to 5e-4 OR lower clip_coef to 0.1 to allow larger ratio changes before clipping."
+            )
+
+    # Clip fraction diagnostics.
+    if clip_last is not None:
+        if clip_last > 0.4:
+            recs.append(
+                f"clipfrac={clip_last:.2f} (high). PPO is clipping most of the batch — updates are too aggressive. "
+                "Lower LR to 1e-4."
+            )
+
+    # Value function divergence.
+    if v_last is not None and v_first is not None:
+        if v_last > v_first * 2.0 and v_last > 5.0:
+            recs.append(
+                f"value_loss diverging ({v_first:.2f} -> {v_last:.2f}). Critic can't fit the returns. "
+                "Increase vf_coef to 1.0 OR normalize rewards (add reward_scale to config)."
+            )
+
+    # Throughput.
+    if sps_last is not None and sps_last < 15:
+        recs.append(
+            f"sps={sps_last:.1f} (low). Isaac may be backgrounded or CPU-limited. "
+            "Ensure Isaac window is visible + reduce n_envs to 1 if you're pinning CPU."
+        )
+
+    # Action-space collapse.
+    for name in ["move", "shoot"]:
+        top = last(f"action_top_frac/{name}")
+        if top is not None and top > 0.7:
+            recs.append(
+                f"action '{name}' collapsed (top_frac={top:.2f}). Policy always picks the same {name} action. "
+                "Raise ent_coef to 0.05 to break out of this local minimum."
+            )
+
+    # Per-factor entropy — did just shoot collapse but move is fine?
+    for name in ["move", "shoot"]:
+        fs = checks.get("entropy_per_factor", {}).get(name)
+        if fs and fs.get("status") == "collapsed":
+            recs.append(
+                f"'{name}' entropy collapsed to {fs['last']:.2f}. Only this action head is stuck. "
+                "Consider a factor-specific ent_coef (need code change) OR verify the reward incentivizes varying this dimension."
+            )
+
+    if not recs and "NOT LEARNING" in verdict:
+        recs.append(
+            "metrics look nominal but no learning. Bug is likely upstream: "
+            "(1) check reward shaper actually emits r_kill on kill events "
+            "(look at 'reward_breakdown' in raw obs); "
+            "(2) check env.py's info['raw']['events'] contains {'kind':'kill'} "
+            "when the fly dies; "
+            "(3) check mod's log.txt for STAGE setup errors."
+        )
+
+    return verdict, recs
 
 
 def main():
@@ -175,10 +384,24 @@ def main():
     print(f"  scalars: {summary['metadata']['n_scalars']}")
     print("\nAutomatic health checks:")
     for check, data in summary["health_check"].items():
+        if check in ("VERDICT", "RECOMMENDATIONS"):
+            continue
         status = data.get("status") or data.get("trend") or "-"
         print(f"  [{check}] {status}")
         if "note" in data:
             print(f"    {data['note']}")
+
+    # Verdict + recommendations printed last so they don't scroll off screen.
+    v = summary["health_check"].get("VERDICT")
+    if v:
+        print("\n" + "=" * 70)
+        print("VERDICT:", v)
+        print("=" * 70)
+    recs = summary["health_check"].get("RECOMMENDATIONS", [])
+    if recs:
+        print("\nRECOMMENDATIONS (concrete config changes):")
+        for i, r in enumerate(recs, 1):
+            print(f"  {i}. {r}")
 
     print("\nShare this file (or paste the contents) to get analysis of your training run.")
 

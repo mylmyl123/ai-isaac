@@ -82,42 +82,68 @@ local RECORD_MODE = os.getenv("ISAAC_RL_RECORD") == "1"
 -- premature. If it CAN converge on this, ratchet complexity by disabling
 -- the flag and moving to Stage 1.
 local STAGE0_MODE = os.getenv("ISAAC_RL_STAGE0") == "1"
+-- 2026-07-13: curriculum stage letter (A/B/C/D/E). Sent by train.py via
+-- ISAAC_RL_STAGE env var. Determines room-manipulation behavior:
+--   A  sealed room, 1 attack fly, respawn on kill
+--   B  sealed room, 3 attack flies, respawn on room-clear
+--   C  normal starting room (unsealed), 1 fly (mod wipes rest)
+--   D  normal Basement 1 room, vanilla enemies (mod does nothing to enemies)
+--   E  full Basement 1 run, no restrictions (mod is fully passive)
+-- Empty / unset defaults to E (fully passive) so old workflows keep working.
+local STAGE = (os.getenv("ISAAC_RL_STAGE") or ""):upper()
+if STAGE == "" then STAGE = "E" end
+-- STAGE0_MODE (legacy env var) implies stage A.
+if STAGE0_MODE and STAGE == "E" then STAGE = "A" end
+local STAGE_SEAL_DOORS   = (STAGE == "A" or STAGE == "B")
+local STAGE_WIPE_ENEMIES = (STAGE == "A" or STAGE == "B" or STAGE == "C")
+local STAGE_SPAWN_FLIES  = (STAGE == "A" or STAGE == "B" or STAGE == "C")
+local STAGE_FLY_COUNT    = (STAGE == "B") and 3 or 1
+Isaac.DebugString("[isaac-rl-bridge] curriculum stage=" .. STAGE
+    .. " seal_doors=" .. tostring(STAGE_SEAL_DOORS)
+    .. " wipe_enemies=" .. tostring(STAGE_WIPE_ENEMIES)
+    .. " spawn_flies=" .. tostring(STAGE_SPAWN_FLIES)
+    .. " fly_count=" .. tostring(STAGE_FLY_COUNT))
 if STAGE0_MODE then
-    Isaac.DebugString("[isaac-rl-bridge] STAGE0_MODE=1 — single-fly curriculum enabled")
+    Isaac.DebugString("[isaac-rl-bridge] (legacy STAGE0_MODE=1 mapped to stage=A)")
 end
 -- Ticks to wait before running stage0_setup after MC_POST_NEW_ROOM fires.
 -- 0 = idle (no setup pending); >0 = countdown, run setup when it hits 1.
 local stage0_setup_pending = 0
 
--- Stage-0 room rewrite: wipe all NPCs, spawn one Attack Fly. Wrapped in a
--- pcall so a broken entity list can't crash the mod — if it fails, the
--- current room stays whatever Isaac spawned and the agent will just have
--- a normal-difficulty room this episode. Non-fatal.
+-- Stage curriculum room rewrite: wipe NPCs + spawn flies + seal doors as
+-- appropriate for the current STAGE. All wrapped in pcall so a broken
+-- entity list can't crash the mod — non-fatal.
 local function stage0_setup_room()
-    if not STAGE0_MODE then return end
+    -- STAGE=E: fully passive, do nothing.
+    if not (STAGE_WIPE_ENEMIES or STAGE_SEAL_DOORS or STAGE_SPAWN_FLIES) then return end
     local ok, err = pcall(function()
         local room = Game():GetRoom()
         if not room then return end
         local player = Isaac.GetPlayer(0)
         if not player then return end
 
-        -- 1. Remove existing NPCs. Filter to Entity:ToNPC() so we can't
-        --    accidentally Remove() a projectile, tear, effect, or the player.
         local removed = 0
-        for _, ent in ipairs(Isaac.GetRoomEntities()) do
-            if ent:ToNPC() ~= nil then
-                ent:Remove()
-                removed = removed + 1
+        if STAGE_WIPE_ENEMIES then
+            for _, ent in ipairs(Isaac.GetRoomEntities()) do
+                if ent:ToNPC() ~= nil then
+                    ent:Remove()
+                    removed = removed + 1
+                end
             end
         end
 
-        stage0_spawn_fly(player)
-        stage0_seal_doors(room)
-        Isaac.DebugString("[isaac-rl-bridge] STAGE0: cleared " .. tostring(removed)
-            .. " NPCs, spawned initial fly, sealed doors")
+        if STAGE_SPAWN_FLIES then
+            for _ = 1, STAGE_FLY_COUNT do stage0_spawn_fly(player) end
+        end
+        if STAGE_SEAL_DOORS then
+            stage0_seal_doors(room)
+        end
+        Isaac.DebugString("[isaac-rl-bridge] STAGE=" .. STAGE .. ": cleared " .. tostring(removed)
+            .. " NPCs, spawned " .. tostring(STAGE_SPAWN_FLIES and STAGE_FLY_COUNT or 0)
+            .. " flies, seal_doors=" .. tostring(STAGE_SEAL_DOORS))
     end)
     if not ok then
-        Isaac.DebugString("[isaac-rl-bridge] STAGE0 setup failed: " .. tostring(err))
+        Isaac.DebugString("[isaac-rl-bridge] STAGE setup failed: " .. tostring(err))
     end
 end
 
@@ -135,7 +161,7 @@ end
 -- All wrapped in pcall since the exact set of methods available on the
 -- Door userdata varies by Repentance patch level.
 function stage0_seal_doors(room)
-    if not STAGE0_MODE then return end
+    if not STAGE_SEAL_DOORS then return end
     if not room then
         room = Game():GetRoom()
         if not room then return end
@@ -157,7 +183,7 @@ end
 -- 200-tick episode becomes 3-5 kills = 3-5 r_kill events = 3-5 training
 -- signal spikes per rollout instead of just one.
 function stage0_spawn_fly(player)
-    if not STAGE0_MODE then return end
+    if not STAGE_SPAWN_FLIES then return end
     if not player then
         player = Isaac.GetPlayer(0)
         if not player then return end
@@ -616,7 +642,7 @@ mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
     -- (spawning the default enemies + pickups) has finished. Doing it
     -- inline in this callback races Isaac's engine and can leave stray
     -- half-initialized entities.
-    if STAGE0_MODE then
+    if STAGE_SPAWN_FLIES then
         stage0_setup_pending = 6   -- number of MC_POST_UPDATE ticks to wait
     end
     run_state.pending_events[#run_state.pending_events + 1] = {
@@ -691,7 +717,7 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     -- next to the player. This turns Stage 0 from a one-shot 'kill 1 fly'
     -- test into a proper training curriculum: each episode contains many
     -- kills instead of one, giving the WM / actor a dense reward signal.
-    if STAGE0_MODE and (tick % STAGE0_RESPAWN_POLL_TICKS) == 0 and reset_cooldown == 0 and not death_announced then
+    if STAGE_SPAWN_FLIES and (tick % STAGE0_RESPAWN_POLL_TICKS) == 0 and reset_cooldown == 0 and not death_announced then
         pcall(function()
             local room = Game():GetRoom()
             local npc_count = 0
