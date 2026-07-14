@@ -115,7 +115,9 @@ class RewardShaper:
         terminated = False
         for ev in events:
             kind = ev.get("kind")
-            if kind == "kill":
+            # 2026-07-14: Mod emits kills as {kind: 'damage_to_npc', killed: true}
+            # NOT as {kind: 'kill'}. Recognize both for forward-compat.
+            if kind == "kill" or (kind == "damage_to_npc" and ev.get("killed")):
                 bd["kill"] = bd.get("kill", 0.0) + self.cfg.r_kill
             elif kind == "death" and not self.state.dead:
                 bd["death"] = bd.get("death", 0.0) + self.cfg.r_death

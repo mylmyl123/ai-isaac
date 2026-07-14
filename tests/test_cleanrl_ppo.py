@@ -23,6 +23,7 @@ def test_reward_config_has_three_terms():
 
 def test_reward_shaper_kill_and_step():
     s = RewardShaper()
+    # Legacy schema: {kind: 'kill'}
     total, terminated, bd = s(
         {"events": [{"kind": "kill"}], "player": {"hp_red": 3}},
         action=None,
@@ -31,6 +32,27 @@ def test_reward_shaper_kill_and_step():
     assert terminated is False
     assert bd["kill"] == 1.0
     assert bd["step"] == pytest.approx(-0.001)
+
+
+def test_reward_shaper_kill_via_damage_to_npc():
+    """Regression: mod actually emits {kind: damage_to_npc, killed: true}, not
+    {kind: kill}. Schema mismatch caused zero kills through 5000 steps of
+    Stage A prior to fix."""
+    s = RewardShaper()
+    total, _, bd = s(
+        {"events": [{"kind": "damage_to_npc", "killed": True, "dmg": 3, "npc_type": 18}],
+         "player": {"hp_red": 3}},
+        action=None,
+    )
+    assert bd.get("kill") == 1.0, "damage_to_npc + killed=True must count as a kill"
+    # Non-lethal damage_to_npc should NOT count as a kill.
+    s2 = RewardShaper()
+    _, _, bd2 = s2(
+        {"events": [{"kind": "damage_to_npc", "killed": False, "dmg": 1}],
+         "player": {"hp_red": 3}},
+        action=None,
+    )
+    assert "kill" not in bd2, "damage_to_npc without killed=True is not a kill"
 
 
 def test_reward_shaper_death_via_event():

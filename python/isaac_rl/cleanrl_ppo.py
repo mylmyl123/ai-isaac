@@ -329,7 +329,9 @@ def train(cfg: PPOConfig, env) -> None:
             ep_lens += 1
             for i, info in enumerate(infos):
                 for ev in (info.get("raw") or {}).get("events", []) or []:
-                    if ev.get("kind") == "kill":
+                    k = ev.get("kind")
+                    # Mod emits kills as damage_to_npc + killed=True. See reward.py.
+                    if k == "kill" or (k == "damage_to_npc" and ev.get("killed")):
                         ep_kills[i] += 1
 
             for i in range(cfg.n_envs):
