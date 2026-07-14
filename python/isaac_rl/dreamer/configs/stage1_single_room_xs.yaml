@@ -194,43 +194,80 @@ replay_capacity: 500_000        # 500K * ~7KB per obs ~= 3.5 GB RAM
 # rewards for multi-step behaviors (bomb-then-secret, shop-purchase,
 # active-item-ready-and-used). All defaults live in RewardConfig; the
 # only override we set here is the fixes to what the audit called out.
+# ---- reward (2026-07-13: SLIM 9-term set for cont-bug debug validation) ----
+#
+# Prior version: 30+ non-zero terms + end-of-episode aggregate bonuses +
+# PBRS + chain rewards + first-entry bonuses per room type. Combined effect
+# per 2026-07-09 audit was ~-2.83/ep of policy-independent drag with kill/
+# room_clear/damage rewards firing on <20% of episodes — unreadable signal
+# even before the cont_pred=1 world-model bug was found.
+#
+# NEW SET (2026-07-13):
+#   Terminal:  r_death, r_beat_mom, r_floor_cleared
+#   Events:    r_kill, r_room_clear, r_damage_dealt_scale, r_damage_taken_red
+#              r_damage_taken_other, r_new_room
+#   Per-tick:  r_step (small negative to bound episode length)
+#
+# Everything else is EXPLICITLY zeroed here so RewardConfig defaults (some
+# non-zero) don't silently leak back in. If you want to add a term, add it
+# here with reasoning, don't just remove the zero — the failure mode we're
+# defending against is 'someone re-enables 15 terms and nobody notices'.
 reward:
-  r_step: 0.0
-  # 2026-07-09 v2: chain rewards removed (r_chain_*, chain_*_window_ticks).
-  # Replaced by end-of-episode aggregate outcome bonuses + RND intrinsic
-  # curiosity. See docs/audit-2026-07-09.md and reward.py header comments.
-  # r_use_bomb: uses RewardConfig default of 0.02 (was 0.5) — small token
-  # so bombs aren't spammed; real signal comes from downstream outcomes.
-  # r_spend_coin: uses RewardConfig default of 0.0 — removed to avoid
-  # slot-machine addiction; coin-to-collectible flow already rewarded.
-  r_room_clear: 5.0
-  r_new_room: 5.0
-  r_backtrack: -0.3
-  r_room_clear_speed_bonus: 1.0
-  r_room_clear_no_damage: 1.5
-  r_door_distance_shaping: 0.3
-  # 2026-07-09: was 0.0 (disabled). Re-enabled at 0.05 so the agent has
-  # an active per-tick gradient toward doors after clearing. Combined
-  # with clear_idle_extra grace period, this gives the agent an actual
-  # "leave the room" signal instead of just "don't idle".
-  r_seek_door_when_clear: 0.05
-  r_aim_at_enemy: 0.03
-  r_shoot_when_enemy_visible: 0.0
+  # ---- kept, non-zero -----
+  r_death: -3.0
+  r_beat_mom: 50.0
+  r_floor_cleared: 5.0
   r_kill: 2.0
+  r_room_clear: 5.0
   r_damage_dealt_scale: 0.5
-  max_damage_reward_per_room: 20.0
+  r_damage_taken_red: -1.0
+  r_damage_taken_other: -0.5
+  r_new_room: 5.0
+  r_step: -0.003
+  # ---- explicitly zeroed (was: various defaults from RewardConfig) -----
+  r_backtrack: 0.0
+  r_room_clear_speed_bonus: 0.0
+  r_room_clear_no_damage: 0.0
+  r_door_distance_shaping: 0.0
+  r_seek_door_when_clear: 0.0
+  r_aim_at_enemy: 0.0
+  r_shoot_when_enemy_visible: 0.0
   r_at_kite_dist_tick: 0.0
-  kite_dist_min: 100.0
-  kite_dist_max: 300.0
   r_full_hp_tick: 0.0
   r_idle_penalty: 0.0
-  idle_speed_threshold: 0.5
-  r_idle_death: -5.0
-  idle_death_ticks: 300
-  idle_death_require_no_enemies: true
+  r_idle_death: 0.0
   r_stationary_penalty: 0.0
-  stationary_radius: 40.0
-  stationary_window: 45
-  r_pbrs_scale: 0.3
-  pbrs_gamma: 0.997
-  pbrs_ideal_dist: 200.0
+  r_clear_room_idle_extra: 0.0
+  r_pbrs_scale: 0.0
+  # first-entry / room-type bonuses — all off
+  r_boss_room_first_entry: 0.0
+  r_shop_first_entry: 0.0
+  r_treasure_first_entry: 0.0
+  r_secret_first_entry: 0.0
+  r_super_secret_first_entry: 0.0
+  r_curse_first_entry: 0.0
+  r_arcade_first_entry: 0.0
+  r_challenge_first_entry: 0.0
+  r_sacrifice_first_entry: 0.0
+  r_devil_first_entry: 0.0
+  r_angel_first_entry: 0.0
+  r_chest_first_entry: 0.0
+  r_dice_first_entry: 0.0
+  # pickup rewards — off (only intrinsic obs delta matters; agent will learn
+  # if the state change is useful for kill / room_clear).
+  r_pickup_heart: 0.0
+  r_pickup_coin: 0.0
+  r_pickup_key: 0.0
+  r_pickup_bomb: 0.0
+  r_pickup_collectible: 0.0
+  r_use_bomb: 0.0
+  r_use_key: 0.0
+  r_spend_coin: 0.0
+  r_use_item: 0.0
+  r_boss_kill: 0.0
+  # end-of-episode aggregate bonuses — off (they hid policy-quality signal)
+  r_diversity_end_bonus: 0.0
+  r_depth_end_bonus: 0.0
+  r_survival_end_bonus: 0.0
+  r_efficiency_end_bonus: 0.0
+

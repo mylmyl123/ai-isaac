@@ -49,10 +49,18 @@ def main() -> int:
                     help="Direct path to the Isaac binary; skips Steam.")
     ap.add_argument("--extra-arg", action="append", default=[],
                     help="Extra argument to append (repeatable).")
+    ap.add_argument("--stage0", action="store_true",
+                    help="Enable the Stage-0 curriculum in the mod "
+                         "(sets ISAAC_RL_STAGE0=1). Every new room becomes "
+                         "'one fly, no other enemies' — use with the "
+                         "stage0_one_fly_xs.yaml training config.")
     args = ap.parse_args()
 
     env = os.environ.copy()
     env["ISAAC_RL_PORT"] = str(args.port)
+    if args.stage0:
+        env["ISAAC_RL_STAGE0"] = "1"
+        print("  ISAAC_RL_STAGE0=1 (Stage-0 curriculum: one fly per room)")
 
     if args.binary:
         cmd = [args.binary, "--luadebug", *args.extra_arg]

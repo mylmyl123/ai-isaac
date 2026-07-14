@@ -97,6 +97,22 @@ class HeuristicPolicy:
                                         {"target_door": self._target_door_slot, "enemy_dist": round(edist, 1)})
             return action
 
+        # ---- Rule 1.5 (2026-07-13): pickup/pedestal visible -> walk to it ----
+        # If a collectible or consumable is in the room and no enemies are
+        # visible, walking to it is strictly better than heading for a door.
+        # This gives BC data on the 'grab items' behavior that pure door-
+        # seeking heuristic v3 never demonstrated. Nearest pickup wins;
+        # collectibles preferred over hearts/coins (higher long-run value).
+        pickup = self._nearest_pickup(raw_obs, px, py)
+        if pickup is not None:
+            pdx, pdy, _pdist = pickup
+            move = self._angle_to_move(math.atan2(pdy, pdx))
+            action = np.array([move, 0], dtype=np.int64)
+            if self._recorder:
+                self._recorder.log_tick(0, raw_obs, action, "pickup",
+                                        {"target_door": self._target_door_slot})
+            return action
+
         # ---- Rule 2 + 3: no enemy -> move toward locked door target ----
         if self._target_door_slot is None:
             self._target_door_slot = self._pick_door(raw_obs)
@@ -166,6 +182,36 @@ class HeuristicPolicy:
             elif vec_x < -thresh: return 6
             else: return 5
         return int(self.cfg.door_slot_to_move[slot])
+
+    def _nearest_pickup(self, raw_obs: dict[str, Any], px: float, py: float) -> tuple[float, float, float] | None:
+        """Return (dx, dy, dist) to the nearest pickup in the room, or None.
+
+        Uses the raw obs's `pickups` field (see mods/isaac-rl-bridge/obs.lua)
+        which contains up to MAX_PICKUPS entries with world-space x/y. We
+        return raw dx/dy (world units) so the caller can feed atan2 directly.
+
+        Prefers collectibles (variant 100) over consumables when both exist
+        — collectibles are permanent stat boosts; hearts/coins are marginal.
+        """
+        pickups = raw_obs.get("pickups") or {}
+        feats = pickups.get("feats") or []
+        mask = pickups.get("mask") or []
+        best = None
+        best_pri = 0
+        for i, f in enumerate(feats):
+            if i >= len(mask) or not mask[i] or not f or len(f) < 4:
+                continue
+            # obs.lua feats[i] schema: [variant, subtype, dx_norm, dy_norm, ...]
+            variant = int(f[0])
+            dx = float(f[2]) * 480.0
+            dy = float(f[3]) * 270.0
+            d = math.hypot(dx, dy)
+            # Priority 2 for collectibles (variant 100), 1 for anything else.
+            pri = 2 if variant == 100 else 1
+            if best is None or pri > best_pri or (pri == best_pri and d < best[2]):
+                best = (dx, dy, d)
+                best_pri = pri
+        return best
 
     def _nearest_enemy(self, raw_obs: dict[str, Any]) -> tuple[float, float, float] | None:
         enemies = raw_obs.get("enemies") or {}

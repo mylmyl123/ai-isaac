@@ -373,20 +373,57 @@ def train(cfg: DreamerConfig) -> None:
     # ==================================================================
     # PREFILL: random policy fills replay so we can start WM training.
     # ==================================================================
+    # 2026-07-13: rewritten to vendor-canonical replay convention. Prior code
+    # stored (obs=pre-step, action=outgoing_action, is_terminal=next_step_terminates),
+    # which is off-by-one from what NM512/dreamerv3-torch expects. The RSSM's
+    # observe(embed, action, is_first) treats action[t] as the INCOMING action
+    # that produced obs[t]; the cont head treats is_terminal[t]=1 as "obs[t] IS
+    # the terminal state". Under the old convention the WM was fed misaligned
+    # (obs, action) pairs and asked to predict cont from a healthy pre-death
+    # obs — the exact bug that pinned cont_pred_mean≈1.0 and made value
+    # targets diverge to ~4×10^4.
+    #
+    # New scheme: at start, store the initial reset obs with (action=0,
+    # reward=0, is_first=True, is_terminal=False). Each subsequent step,
+    # store (next_obs, action_that_produced_it, reward, is_first=False,
+    # is_terminal=terms[i]). When an episode ends, store the terminal obs
+    # from info["terminal_obs"] with the fatal action, then store the auto-
+    # reset obs with (action=0, reward=0, is_first=True).
+    _zero_onehot = np.zeros(ONEHOT_DIM, dtype=np.float32)
+
+    def _store(replay_obj, obs_raw, action_oh, reward, is_first, is_terminal, is_last):
+        replay_obj.add(
+            flatten_dict_obs(obs_raw),
+            action_oh,
+            float(reward),
+            is_first=bool(is_first),
+            is_terminal=bool(is_terminal),
+            is_last=bool(is_last),
+        )
+
+    # Store the initial reset obs as the first replay entry for each env.
+    for i in range(cfg.n_envs):
+        _store(replay, obs_list[i], _zero_onehot, 0.0, True, False, False)
+
     log.info("prefill: %d env-steps with random policy", cfg.prefill_steps)
     prefill_done = 0
     while prefill_done < cfg.prefill_steps and not shutdown["flag"]:
         env_action, onehot = _sample_random_action(cfg.n_envs, rng)
         next_obs_list, rewards_np, terms, truncs, infos = env.step(env_action)
         for i in range(cfg.n_envs):
-            replay.add(
-                flatten_dict_obs(obs_list[i]),
-                onehot[i],
-                float(rewards_np[i]),
-                is_first=bool(is_first_flags[i]),
-                is_terminal=bool(terms[i]),
-                is_last=bool(terms[i] or truncs[i]),
-            )
+            info_i = infos[i] if i < len(infos) else {}
+            done_i = bool(terms[i] or truncs[i])
+            if done_i:
+                term_obs = info_i.get("terminal_obs") or next_obs_list[i]
+                _store(replay, term_obs, onehot[i], float(rewards_np[i]),
+                       is_first=False, is_terminal=bool(terms[i]), is_last=True)
+                # SyncVecEnv already auto-reset; next_obs_list[i] is the reset
+                # obs of the new episode. Store it with is_first=True.
+                _store(replay, next_obs_list[i], _zero_onehot, 0.0,
+                       is_first=True, is_terminal=False, is_last=False)
+            else:
+                _store(replay, next_obs_list[i], onehot[i], float(rewards_np[i]),
+                       is_first=False, is_terminal=False, is_last=False)
         prefill_done += cfg.n_envs
         global_step += cfg.n_envs
         # Track ep rewards during prefill so the first TB entries aren't blank.
@@ -450,20 +487,25 @@ def train(cfg: DreamerConfig) -> None:
         with prof("env_step"):
             next_obs_list, rewards_np, terms, truncs, infos = env.step(env_action)
 
-        # Push transitions to replay. is_first is *current* obs's is_first,
-        # meaning "the RSSM should reset at this step". The current obs was
-        # observed BEFORE the action; if this env just reset, is_first_flags
-        # reflects that.
+        # Push transitions to replay. 2026-07-13: vendor-canonical convention.
+        # obs[t] = obs observed AT time t (after action_{t-1}). action[t] = the
+        # action that produced obs[t] (incoming). is_terminal[t] = 1 iff obs[t]
+        # is the terminal state. When an episode ends this iteration, store TWO
+        # entries: (terminal_obs, action_taken_this_step, is_terminal=1) and
+        # (auto_reset_obs, zero_action, is_first=1).
         with prof("replay_add"):
             for i in range(cfg.n_envs):
-                replay.add(
-                    flatten_dict_obs(obs_list[i]),
-                    action_onehot[i],
-                    float(rewards_np[i]),
-                    is_first=bool(is_first_flags[i]),
-                    is_terminal=bool(terms[i]),
-                    is_last=bool(terms[i] or truncs[i]),
-                )
+                info_i = infos[i] if i < len(infos) else {}
+                done_i = bool(terms[i] or truncs[i])
+                if done_i:
+                    term_obs = info_i.get("terminal_obs") or next_obs_list[i]
+                    _store(replay, term_obs, action_onehot[i], float(rewards_np[i]),
+                           is_first=False, is_terminal=bool(terms[i]), is_last=True)
+                    _store(replay, next_obs_list[i], _zero_onehot, 0.0,
+                           is_first=True, is_terminal=False, is_last=False)
+                else:
+                    _store(replay, next_obs_list[i], action_onehot[i], float(rewards_np[i]),
+                           is_first=False, is_terminal=False, is_last=False)
         global_step += cfg.n_envs
         ep_rewards += rewards_np
         ep_lens += 1

@@ -1,0 +1,164 @@
+# DreamerV3-XS Stage 0: single-fly, single-room isolation task.
+#
+# Purpose: prove the training pipeline can converge on ONE thing before
+# spending compute on the full game. If this doesn't hit >90% kill-rate
+# within 200k env-steps (~1 day at 2 envs / 3 sps), the RL/WM code is
+# broken and reward-tuning is premature.
+#
+# Requires the Lua mod to be launched with ISAAC_RL_STAGE0=1 set in the
+# environment (tools/launch_isaac.py --stage0 or the run wrapper).
+#
+# Diff vs stage1_single_room_xs.yaml:
+#   - shorter episodes (kill or die fast)
+#   - reward set trimmed to 4 non-zero terms (kill, damage_dealt, death, step)
+#   - no floor / mom / new_room bonuses (Stage 0 doesn't have floors)
+#   - shorter total_env_steps (200k \u2014 pass/fail budget)
+
+run_name: dreamer_stage0_one_fly_xs
+
+# ---- env ----
+n_envs: 2
+base_port: 9500
+reset_stage: 1
+max_episode_steps: 300           # was 1800 - a fly should die in <60 ticks
+total_env_steps: 200_000         # pass/fail budget
+
+launch_isaac: false
+isaac_binary: null
+accept_timeout_s: 300.0
+
+# ---- runtime ----
+device: cuda
+seed: 42
+checkpoint_dir: runs
+checkpoint_every: 50_000
+log_every: 25
+
+compile_rssm: false
+
+# ---- encoder / decoder (XS) ----
+encoder_embed_dim: 512
+encoder_trunk_dim: 384
+decoder_hidden: 256
+decoder_layers: 2
+
+# ---- RSSM (XS) ----
+rssm_stoch: 32
+rssm_discrete: 32
+rssm_deter: 256
+rssm_hidden: 256
+rssm_rec_depth: 1
+rssm_act: SiLU
+rssm_norm: true
+rssm_min_std: 0.1
+rssm_unimix_ratio: 0.01
+rssm_initial: learned
+
+# ---- world model training ----
+world_model_lr: 1.0e-4
+world_model_eps: 1.0e-8
+world_model_grad_clip: 1000.0
+weight_decay: 0.0
+batch_size: 8
+seq_len: 32
+kl_free_bits: 1.0
+kl_dyn_scale: 0.5
+kl_rep_scale: 0.1
+reward_loss_scale: 1.0
+cont_loss_scale: 1.0
+
+# ---- actor + critic ----
+actor_lr: 3.0e-5
+critic_lr: 3.0e-5
+actor_hidden: 256
+actor_layers: 2
+critic_hidden: 256
+critic_layers: 2
+actor_grad_clip: 100.0
+critic_grad_clip: 100.0
+actor_entropy: 3.0e-3
+# Stage 0 outcomes are 5-30 ticks away; 60 is plenty of horizon.
+imag_horizon: 60
+gamma: 0.997
+gae_lambda: 0.95
+unimix_ratio: 0.01
+
+# ---- reward + value heads ----
+value_atoms: 255
+value_v_min: -20.0                # Stage 0 has no r_beat_mom; +5-10 max return
+value_v_max: 20.0
+reward_head_layers: 2
+cont_head_layers: 2
+
+# ---- slow critic + reward EMA ----
+slow_target: true
+slow_target_update: 1
+slow_target_fraction: 0.02
+reward_ema: true
+
+# ---- RND intrinsic ----
+# Stage 0 is a dense-reward task; intrinsic bonus is not needed and would
+# just confuse the value head. Off.
+rnd_intrinsic_scale: 0.0
+
+# ---- training loop ----
+prefill_steps: 2500
+train_ratio: 4
+replay_capacity: 200_000
+
+# ---- reward (Stage 0: 4 non-zero terms) ----
+# The task is 'kill one fly'. Only kill / damage / death / step should have
+# any weight. Everything else zeroed so signal-to-noise is maximal.
+reward:
+  r_death: -3.0
+  r_kill: 2.0
+  r_damage_dealt_scale: 0.5
+  r_step: -0.003
+  # everything else off
+  r_beat_mom: 0.0
+  r_floor_cleared: 0.0
+  r_room_clear: 0.0
+  r_damage_taken_red: -1.0     # keep small negative so getting hit isn't free
+  r_damage_taken_other: 0.0
+  r_new_room: 0.0
+  r_backtrack: 0.0
+  r_room_clear_speed_bonus: 0.0
+  r_room_clear_no_damage: 0.0
+  r_door_distance_shaping: 0.0
+  r_seek_door_when_clear: 0.0
+  r_aim_at_enemy: 0.0
+  r_shoot_when_enemy_visible: 0.0
+  r_at_kite_dist_tick: 0.0
+  r_full_hp_tick: 0.0
+  r_idle_penalty: 0.0
+  r_idle_death: 0.0
+  r_stationary_penalty: 0.0
+  r_clear_room_idle_extra: 0.0
+  r_pbrs_scale: 0.0
+  r_boss_room_first_entry: 0.0
+  r_shop_first_entry: 0.0
+  r_treasure_first_entry: 0.0
+  r_secret_first_entry: 0.0
+  r_super_secret_first_entry: 0.0
+  r_curse_first_entry: 0.0
+  r_arcade_first_entry: 0.0
+  r_challenge_first_entry: 0.0
+  r_sacrifice_first_entry: 0.0
+  r_devil_first_entry: 0.0
+  r_angel_first_entry: 0.0
+  r_chest_first_entry: 0.0
+  r_dice_first_entry: 0.0
+  r_pickup_heart: 0.0
+  r_pickup_coin: 0.0
+  r_pickup_key: 0.0
+  r_pickup_bomb: 0.0
+  r_pickup_collectible: 0.0
+  r_use_bomb: 0.0
+  r_use_key: 0.0
+  r_spend_coin: 0.0
+  r_use_item: 0.0
+  r_boss_kill: 0.0
+  r_diversity_end_bonus: 0.0
+  r_depth_end_bonus: 0.0
+  r_survival_end_bonus: 0.0
+  r_efficiency_end_bonus: 0.0

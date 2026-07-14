@@ -110,6 +110,18 @@ class SocketIsaacEnv(gym.Env):
         # breakdown, which hid every non-terminal reward event (kill,
         # damage_dealt, new_room, room_clear, pickup_*, etc.) from TB.
         self._episode_breakdown: dict[str, float] = {}
+        # 2026-07-13: cached reset obs from the mod_restart path. When Isaac's
+        # mod cycles its socket on player death, we receive the new-episode
+        # reset frame as `reconnected_raw`. Previously we returned that
+        # directly as `obs` on a terminated=True step — which is a lie: it's
+        # a healthy reset frame, not the terminal (dying) obs. Now we stash it
+        # here, return a SYNTHETIC terminal obs on the terminated step, and
+        # the next reset() consumes this cached frame without triggering
+        # another restart on the mod.
+        self._pending_reset_obs: dict[str, Any] | None = None
+        # Track the last raw obs so we can build a plausible terminal obs
+        # (same room/position, HP zeroed) when the mod cuts the socket.
+        self._last_raw: dict[str, Any] | None = None
         # Frame stacking: rolling buffer of past player states for the
         # "player_history" obs field. Shape [HISTORY_FRAMES, HISTORY_FEATS]:
         # each row is [nx, ny, vx, vy] normalised. Newest frame at index -1.
@@ -228,6 +240,24 @@ class SocketIsaacEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         self.reward_shaper.reset()
 
+        # 2026-07-13: If the previous step was terminated via mod_restart,
+        # we already have the reset obs cached. Consume it and skip the
+        # normal reset flow (which would send another 'reset' command to a
+        # mod that just restarted, causing a double-restart / desync).
+        if self._pending_reset_obs is not None:
+            raw = self._pending_reset_obs
+            self._pending_reset_obs = None
+            self._steps = 0
+            self._episode_breakdown = {}
+            self._last_action[:] = 0
+            if self._z_dim > 0:
+                self._z = np.random.randn(self._z_dim).astype(np.float32)
+            self._update_player_history(raw, is_reset=True)
+            self._last_raw = raw
+            obs = self._build_obs(raw)
+            info: dict[str, Any] = {"seed": self._last_seed, "raw": raw}
+            return obs, info
+
         if self._client is None:
             self._accept()
             try:
@@ -268,9 +298,34 @@ class SocketIsaacEnv(gym.Env):
         # Reset frame-stacking buffer to the initial player state
         # (broadcasts across all 4 slots so no startup transient).
         self._update_player_history(raw, is_reset=True)
+        self._last_raw = raw
         obs = self._build_obs(raw)
         info: dict[str, Any] = {"seed": self._last_seed, "raw": raw}
         return obs, info
+
+    def _synth_terminal_obs(self) -> dict[str, Any]:
+        """Build a plausible terminal obs from the last-known raw obs.
+
+        Copies the previous obs (so room layout, enemies, etc. are consistent)
+        but zeros the player's HP and flags is_dead=True. This gives the WM's
+        cont-head and reward-head a real terminal training signal: it can
+        learn 'HP=0 → cont=0' rather than being fed a healthy reset frame
+        as the supposed terminal state (the pre-2026-07-13 bug that pinned
+        cont_pred_mean≈1.0 forever).
+        """
+        if self._last_raw is None:
+            return _crash_penalty_obs(self.port)
+        # Shallow-copy the last obs; deep-copy just the player dict since
+        # we're mutating fields on it.
+        raw = dict(self._last_raw)
+        player = dict(raw.get("player") or {})
+        player["is_dead"] = True
+        player["hp_red"] = 0
+        player["hp_soul"] = 0
+        player["hp_black"] = 0
+        raw["player"] = player
+        raw["events"] = [{"kind": "death"}]
+        return raw
 
     def step(self, action):
         assert self._client is not None, "reset() must be called before step()"
@@ -309,15 +364,21 @@ class SocketIsaacEnv(gym.Env):
             self._steps += 1
             if reconnected_raw is not None:
                 # Mod cycled its socket cleanly — in-process restart on death.
-                # 2026-07-09 v3: apply r_death here since the shaper's
-                # HP-based detection often misses the terminal obs (the 40h
-                # v2 run had shaper_terminated_frac collapse to <1% while
-                # mod_restart hit 98%). Mod restart is overwhelmingly caused
-                # by player death, so applying r_death on this path is a
-                # correct default that recovers the missed signal.
-                # Also fire end-of-episode aggregate outcome bonuses.
+                # 2026-07-13 FIX (cont_pred=1 bug): stash the reset obs for
+                # the next env.reset() call and return a SYNTHETIC TERMINAL
+                # OBS (last-known state with HP=0, is_dead=True) as the obs
+                # for this terminated step. Previously we returned the reset
+                # obs directly, meaning the WM was trained on `is_terminal=1`
+                # paired with a healthy reset frame — which is why
+                # cont_terminal_pred stayed at 0.96 (WM can't predict
+                # termination from a frame that looks alive).
                 log.info("port %d: mod cycled socket (expected on death) — terminating cleanly", self.port)
-                obs = self._build_obs(reconnected_raw)
+                self._pending_reset_obs = reconnected_raw
+                terminal_raw = self._synth_terminal_obs()
+                # Advance frame-stack with the terminal state so the last
+                # history entry is consistent with the terminal obs.
+                self._update_player_history(terminal_raw)
+                obs = self._build_obs(terminal_raw)
                 bd: dict[str, float] = {}
                 total_reward = 0.0
                 # Only apply r_death if the shaper hasn't already emitted it
@@ -337,7 +398,7 @@ class SocketIsaacEnv(gym.Env):
                 for k, v in bd.items():
                     self._episode_breakdown[k] = self._episode_breakdown.get(k, 0.0) + v
                 info: dict[str, Any] = {
-                    "raw": reconnected_raw,
+                    "raw": terminal_raw,
                     "steps": self._steps,
                     "reward_breakdown": bd,
                     "reward_breakdown_episode": dict(self._episode_breakdown),
@@ -375,6 +436,7 @@ class SocketIsaacEnv(gym.Env):
         self._last_action = a
         self._steps += 1
         self._update_player_history(raw)
+        self._last_raw = raw
         obs = self._build_obs(raw)
 
         reward, terminated, breakdown = self.reward_shaper(raw, action=a)

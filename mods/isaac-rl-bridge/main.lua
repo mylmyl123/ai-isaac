@@ -63,6 +63,67 @@ end
 -- The Python side (isaac_rl.record) accepts the stream and writes one JSONL
 -- line per tick to demos/session_<ts>.jsonl for later BC training.
 local RECORD_MODE = os.getenv("ISAAC_RL_RECORD") == "1"
+-- ISAAC_RL_STAGE0: when set to "1", enables the Stage-0 curriculum — the
+-- simplest possible learning task, isolated from the full game so the trainer
+-- can prove convergence on ONE thing.
+--
+-- Behavior: on every MC_POST_NEW_ROOM (fires on first entry + after every
+-- room transition), wait a few ticks for the room to stabilize, then:
+--   1. Remove ALL existing NPCs from the room.
+--   2. Spawn ONE Attack Fly (EntityType 13, variant 1) at a fixed offset
+--      inside the room.
+-- No door manipulation — the agent CAN leave, but the reward function
+-- for Stage 0 makes kill/room_clear the dominant positive signals so a
+-- learning agent should discover "kill the fly, room clears" fast.
+--
+-- Purpose: distinguish 'Dreamer implementation can't learn' from 'Isaac
+-- environment is too complex'. If the trainer can't converge on 'kill one
+-- fly in <30 ticks', the RL/WM code is broken and Isaac reward tuning is
+-- premature. If it CAN converge on this, ratchet complexity by disabling
+-- the flag and moving to Stage 1.
+local STAGE0_MODE = os.getenv("ISAAC_RL_STAGE0") == "1"
+if STAGE0_MODE then
+    Isaac.DebugString("[isaac-rl-bridge] STAGE0_MODE=1 — single-fly curriculum enabled")
+end
+-- Ticks to wait before running stage0_setup after MC_POST_NEW_ROOM fires.
+-- 0 = idle (no setup pending); >0 = countdown, run setup when it hits 1.
+local stage0_setup_pending = 0
+
+-- Stage-0 room rewrite: wipe all NPCs, spawn one Attack Fly. Wrapped in a
+-- pcall so a broken entity list can't crash the mod — if it fails, the
+-- current room stays whatever Isaac spawned and the agent will just have
+-- a normal-difficulty room this episode. Non-fatal.
+local function stage0_setup_room()
+    if not STAGE0_MODE then return end
+    local ok, err = pcall(function()
+        local room = Game():GetRoom()
+        if not room then return end
+        -- 1. Remove existing NPCs. We look for anything with EntityFlag ENEMY
+        --    OR EntityType.ENTITY_MONSTRO-and-family, then Remove(). We do NOT
+        --    touch the player, projectiles, effects, or pickups.
+        local ents = Isaac.GetRoomEntities()
+        local removed = 0
+        for _, e in ipairs(ents) do
+            if e:IsVulnerableEnemy() or e:IsActiveEnemy(false) then
+                e:Remove()
+                removed = removed + 1
+            end
+        end
+        -- 2. Spawn one Attack Fly (EntityType 13, variant 0 = normal Fly).
+        --    Attack Fly is the least dangerous enemy in the game: 1 HP, no
+        --    projectiles, slow. Perfect Stage-0 target.
+        local center = room:GetCenterPos()
+        -- Offset from center so the fly isn't ON the player.
+        local spawn_pos = Vector(center.X + 120, center.Y)
+        Isaac.Spawn(EntityType.ENTITY_FLY, 0, 0, spawn_pos, Vector(0, 0), nil)
+        Isaac.DebugString("[isaac-rl-bridge] STAGE0: cleared " .. tostring(removed)
+                          .. " enemies, spawned 1 fly at ("
+                          .. tostring(spawn_pos.X) .. ", " .. tostring(spawn_pos.Y) .. ")")
+    end)
+    if not ok then
+        Isaac.DebugString("[isaac-rl-bridge] STAGE0 setup failed: " .. tostring(err))
+    end
+end
 -- Diagnostic: always log the raw env-var value so we can distinguish
 -- 'RECORD_MODE=1 set but disabled' from 'env-var never reached the process'.
 -- Fires unconditionally at mod load time.
@@ -472,6 +533,15 @@ mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
         run_state.visited_rooms[sgi] = true
         run_state.visited_rooms_count = run_state.visited_rooms_count + 1
     end
+    -- 2026-07-13: STAGE0 curriculum. Rewrite the room contents so every
+    -- new room is 'one fly, no other threats'. Schedule the rewrite for
+    -- a few ticks after the room callback so Isaac's own room-init pass
+    -- (spawning the default enemies + pickups) has finished. Doing it
+    -- inline in this callback races Isaac's engine and can leave stray
+    -- half-initialized entities.
+    if STAGE0_MODE then
+        stage0_setup_pending = 6   -- number of MC_POST_UPDATE ticks to wait
+    end
     run_state.pending_events[#run_state.pending_events + 1] = {
         kind = "new_room",
         safe_grid_index = sgi,
@@ -525,6 +595,18 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     tick = tick + 1
     run_state.frames_since_room = run_state.frames_since_room + 1
     run_state.frames_since_hit = run_state.frames_since_hit + 1
+
+    -- Stage-0 room rewrite: countdown started in MC_POST_NEW_ROOM. Fires
+    -- ONCE per new-room event when the counter hits 1. Runs before the
+    -- reset_cooldown check because we DO want it to fire during the
+    -- post-transition cooldown window — that's exactly when the room is
+    -- stable enough to modify.
+    if stage0_setup_pending > 0 then
+        stage0_setup_pending = stage0_setup_pending - 1
+        if stage0_setup_pending == 0 then
+            stage0_setup_room()
+        end
+    end
 
     if reset_cooldown > 0 then
         reset_cooldown = reset_cooldown - 1
