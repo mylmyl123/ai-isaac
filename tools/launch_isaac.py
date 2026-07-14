@@ -64,16 +64,25 @@ def main() -> int:
 
     if args.binary:
         cmd = [args.binary, "--luadebug", *args.extra_arg]
+        # Isaac reads its resources with paths relative to CWD (resources/
+        # scripts/enums.lua, packed/*.a, etc). If we launch from the caller's
+        # shell cwd, Isaac will fail with 'cannot open resources/scripts/
+        # enums.lua: No such file or directory' and exit within a second.
+        # Set cwd to the binary's parent so Isaac's asset lookup works.
+        launch_cwd = str(Path(args.binary).resolve().parent)
     else:
         steam = _find_steam()
         if not steam:
             print("error: could not locate Steam. Pass --binary <path-to-isaac> instead.", file=sys.stderr)
             return 2
         cmd = [steam, "-applaunch", str(STEAM_APP_ID), "--luadebug", *args.extra_arg]
+        launch_cwd = None   # Steam sets cwd correctly on its own
 
     print("launching:", " ".join(cmd))
     print(f"  ISAAC_RL_PORT={args.port}")
-    proc = subprocess.Popen(cmd, env=env)
+    if launch_cwd:
+        print(f"  cwd={launch_cwd}")
+    proc = subprocess.Popen(cmd, env=env, cwd=launch_cwd)
     return proc.wait()
 
 
