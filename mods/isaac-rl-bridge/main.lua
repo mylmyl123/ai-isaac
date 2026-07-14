@@ -112,11 +112,41 @@ local function stage0_setup_room()
         end
 
         stage0_spawn_fly(player)
+        stage0_seal_doors(room)
         Isaac.DebugString("[isaac-rl-bridge] STAGE0: cleared " .. tostring(removed)
-            .. " NPCs, spawned initial fly")
+            .. " NPCs, spawned initial fly, sealed doors")
     end)
     if not ok then
         Isaac.DebugString("[isaac-rl-bridge] STAGE0 setup failed: " .. tostring(err))
+    end
+end
+
+-- Bar / lock every door in the current room so the agent can't wander into
+-- an adjacent room mid-episode. That's important because a new room:
+--   1. Has a different layout (obstacles, dimensions), confusing the WM's
+--      spatial encoding for the same task.
+--   2. May be a shop / treasure / curse room with different semantics.
+--   3. Adds a ~30-tick room-transition dead zone where nothing happens —
+--      pure noise added to training.
+--
+-- We call door:Bar() which puts iron bars over the door (physically
+-- untraversable). Also door:Close(true) + door:SetLocked(true) as defensive
+-- fallbacks in case some door variant doesn't respond to Bar() cleanly.
+-- All wrapped in pcall since the exact set of methods available on the
+-- Door userdata varies by Repentance patch level.
+function stage0_seal_doors(room)
+    if not STAGE0_MODE then return end
+    if not room then
+        room = Game():GetRoom()
+        if not room then return end
+    end
+    for slot = 0, 7 do
+        local door = room:GetDoor(slot)
+        if door then
+            pcall(function() door:Close(true) end)
+            pcall(function() door:SetLocked(true) end)
+            pcall(function() door:Bar() end)
+        end
     end
 end
 
@@ -642,6 +672,7 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     -- kills instead of one, giving the WM / actor a dense reward signal.
     if STAGE0_MODE and (tick % STAGE0_RESPAWN_POLL_TICKS) == 0 and reset_cooldown == 0 and not death_announced then
         pcall(function()
+            local room = Game():GetRoom()
             local npc_count = 0
             for _, ent in ipairs(Isaac.GetRoomEntities()) do
                 if ent:ToNPC() ~= nil then
@@ -651,6 +682,10 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
             if npc_count == 0 then
                 stage0_spawn_fly(nil)
             end
+            -- Re-seal doors every poll cycle. Bombs, explosions, and even
+            -- some enemy deaths can unbar/reopen doors; a single missed
+            -- reseal lets the agent walk out. Cheap to always redo.
+            stage0_seal_doors(room)
         end)
     end
 
