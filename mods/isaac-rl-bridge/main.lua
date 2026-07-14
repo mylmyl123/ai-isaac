@@ -98,27 +98,42 @@ local function stage0_setup_room()
     local ok, err = pcall(function()
         local room = Game():GetRoom()
         if not room then return end
-        -- 1. Remove existing NPCs. We look for anything with EntityFlag ENEMY
-        --    OR EntityType.ENTITY_MONSTRO-and-family, then Remove(). We do NOT
-        --    touch the player, projectiles, effects, or pickups.
-        local ents = Isaac.GetRoomEntities()
+        local player = Isaac.GetPlayer(0)
+        if not player then return end
+
+        -- 1. Remove existing NPCs. Filter to Entity:ToNPC() so we can't
+        --    accidentally Remove() a projectile, tear, effect, or the player.
         local removed = 0
-        for _, e in ipairs(ents) do
-            if e:IsVulnerableEnemy() or e:IsActiveEnemy(false) then
-                e:Remove()
+        for _, ent in ipairs(Isaac.GetRoomEntities()) do
+            if ent:ToNPC() ~= nil then
+                ent:Remove()
                 removed = removed + 1
             end
         end
-        -- 2. Spawn one Attack Fly (EntityType 13, variant 0 = normal Fly).
-        --    Attack Fly is the least dangerous enemy in the game: 1 HP, no
-        --    projectiles, slow. Perfect Stage-0 target.
-        local center = room:GetCenterPos()
-        -- Offset from center so the fly isn't ON the player.
-        local spawn_pos = Vector(center.X + 120, center.Y)
-        Isaac.Spawn(EntityType.ENTITY_FLY, 0, 0, spawn_pos, Vector(0, 0), nil)
+
+        -- 2. Spawn Attack Fly (EntityType.ENTITY_ATTACKFLY = 18) NEAR the
+        --    player so interaction is inevitable. Prior version used
+        --    ENTITY_FLY = 13 which is Boom Fly (explodes on death) and
+        --    spawned at a fixed offset that could land in a wall.
+        --
+        --    Attack Fly = 1 HP, no projectiles, homes on player, dies fast.
+        --    Perfect Stage-0 target.
+        local desired = player.Position + Vector(80, 0)
+        local spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
+        local fly = Isaac.Spawn(EntityType.ENTITY_ATTACKFLY, 0, 0, spawn_pos, Vector(0, 0), nil)
+        local hp = "?"
+        if fly then
+            hp = tostring(fly.HitPoints)
+            -- Some entity types default to friendly-to-player when Spawner
+            -- is nil; explicitly clear that flag so shots register as kills.
+            fly:ClearEntityFlags(EntityFlag.FLAG_FRIENDLY)
+            fly:ClearEntityFlags(EntityFlag.FLAG_CHARM)
+        end
         Isaac.DebugString("[isaac-rl-bridge] STAGE0: cleared " .. tostring(removed)
-                          .. " enemies, spawned 1 fly at ("
-                          .. tostring(spawn_pos.X) .. ", " .. tostring(spawn_pos.Y) .. ")")
+            .. " NPCs, spawned Attack Fly at (" .. tostring(math.floor(spawn_pos.X))
+            .. ", " .. tostring(math.floor(spawn_pos.Y)) .. ") hp=" .. hp
+            .. " player=(" .. tostring(math.floor(player.Position.X))
+            .. ", " .. tostring(math.floor(player.Position.Y)) .. ")")
     end)
     if not ok then
         Isaac.DebugString("[isaac-rl-bridge] STAGE0 setup failed: " .. tostring(err))
