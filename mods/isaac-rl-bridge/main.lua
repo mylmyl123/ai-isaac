@@ -176,29 +176,72 @@ function stage0_seal_doors(room)
     end
 end
 
--- Spawn a single Attack Fly close to the player. Extracted so it can be
--- called both on room entry AND every time the room goes 'clear' (i.e.
--- the previous fly just died). That continuous respawn is what makes
--- Stage 0 an actual training task instead of a one-shot test: each
--- 200-tick episode becomes 3-5 kills = 3-5 r_kill events = 3-5 training
--- signal spikes per rollout instead of just one.
+-- Spawn a single Attack Fly at a random position in the room. Randomization
+-- prevents the corner-camping exploit: previous code spawned the fly at a
+-- fixed +80px offset from the player, so a policy could learn 'sit in
+-- corner, shoot toward the +X direction' and kill every fly without moving.
+-- Now the fly spawns at a random point in the room, guaranteed to be:
+--   * >= 200 pixels from the player (fly can't insta-hit them)
+--   * <= 500 pixels from the player (fly is reachable within an episode)
+--   * >= 40 pixels from any wall (so it can move)
+--
+-- Failure fallback: if 8 random candidates all miss the distance band,
+-- use a random-angle 300px offset from the player. Guaranteed to succeed
+-- even in tiny rooms.
 function stage0_spawn_fly(player)
     if not STAGE_SPAWN_FLIES then return end
     if not player then
         player = Isaac.GetPlayer(0)
         if not player then return end
     end
-    -- Attack Fly (EntityType.ENTITY_ATTACKFLY = 18) NEAR the player.
-    local desired = player.Position + Vector(80, 0)
-    local spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
+    local room = Game():GetRoom()
+    if not room then return end
+
+    local spawn_pos = nil
+    local ok, err = pcall(function()
+        local tl = room:GetTopLeftPos()
+        local br = room:GetBottomRightPos()
+        local margin = 40
+        local x_min, x_max = tl.X + margin, br.X - margin
+        local y_min, y_max = tl.Y + margin, br.Y - margin
+        for attempt = 1, 8 do
+            local rx = x_min + math.random() * (x_max - x_min)
+            local ry = y_min + math.random() * (y_max - y_min)
+            local candidate = Vector(rx, ry)
+            local d = (candidate - player.Position):Length()
+            if d >= 200 and d <= 500 then
+                -- Snap to a valid nav position (avoid rocks / pits).
+                local free = Isaac.GetFreeNearPosition(candidate, 40)
+                if free then
+                    spawn_pos = free
+                    return
+                end
+            end
+        end
+    end)
+    if not ok then
+        Isaac.DebugString("[isaac-rl-bridge] random spawn failed: " .. tostring(err))
+    end
+
+    -- Fallback: random angle around player at ~300px. Handles tiny rooms
+    -- where the min-distance band is unsatisfiable.
+    if not spawn_pos then
+        local angle = math.random() * 2 * math.pi
+        local desired = player.Position + Vector(math.cos(angle) * 300, math.sin(angle) * 300)
+        spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
+    end
+
+    -- Attack Fly (EntityType.ENTITY_ATTACKFLY = 18).
     local fly = Isaac.Spawn(EntityType.ENTITY_ATTACKFLY, 0, 0, spawn_pos, Vector(0, 0), nil)
     if fly then
         fly:ClearEntityFlags(EntityFlag.FLAG_FRIENDLY)
         fly:ClearEntityFlags(EntityFlag.FLAG_CHARM)
-        Isaac.DebugString("[isaac-rl-bridge] STAGE0: respawned Attack Fly at ("
+        local d = (spawn_pos - player.Position):Length()
+        Isaac.DebugString("[isaac-rl-bridge] STAGE0: spawned Attack Fly at ("
             .. tostring(math.floor(spawn_pos.X)) .. ", " .. tostring(math.floor(spawn_pos.Y))
             .. ") player=(" .. tostring(math.floor(player.Position.X))
-            .. ", " .. tostring(math.floor(player.Position.Y)) .. ")")
+            .. ", " .. tostring(math.floor(player.Position.Y)) .. ") dist="
+            .. tostring(math.floor(d)))
     end
 end
 
