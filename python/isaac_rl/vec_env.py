@@ -116,19 +116,18 @@ class SyncVecEnv:
             env.close()
 
 
-def _launch_isaac_process(port: int, isaac_binary: str, stage0: bool = False) -> subprocess.Popen:
+def _launch_isaac_process(port: int, isaac_binary: str) -> subprocess.Popen:
     env = os.environ.copy()
     env["ISAAC_RL_PORT"] = str(port)
-    if stage0:
-        env["ISAAC_RL_STAGE0"] = "1"
     cmd = [isaac_binary, "--luadebug"]
-    # Isaac reads resources with paths relative to CWD (resources/scripts/
-    # enums.lua, packed/*.a, ...). Launching from the caller's shell cwd
-    # makes Isaac fail with 'cannot open resources/scripts/enums.lua' and
-    # exit within a second. Set cwd to Path(binary).parent so asset lookup
-    # works. Same fix as tools/launch_isaac.py.
+    # Isaac reads resources relative to CWD (resources/scripts/enums.lua,
+    # packed/*.a, ...). Launching from the caller's shell cwd makes Isaac
+    # exit within a second. NOTE: the top-level train.py has its own,
+    # more capable, IsaacFleet launcher; this path is only hit when a
+    # caller invokes build_vec_env(launch_isaac=True) directly (e.g. the
+    # tools/collect_heuristic_demos.py demo-collection utility).
     launch_cwd = str(os.path.dirname(os.path.abspath(isaac_binary))) if isaac_binary else None
-    log.info("launching isaac: %s (port=%d, cwd=%s, stage0=%s)", " ".join(cmd), port, launch_cwd, stage0)
+    log.info("launching isaac: %s (port=%d, cwd=%s)", " ".join(cmd), port, launch_cwd)
     return subprocess.Popen(cmd, env=env, cwd=launch_cwd)
 
 
@@ -141,7 +140,6 @@ def build_vec_env(
     launch_isaac: bool = True,
     reward_config: RewardConfig | None = None,
     accept_timeout_s: float = 300.0,
-    stage0: bool = False,
 ) -> SyncVecEnv:
     """Bind N ports, optionally spawn N Isaac processes, wait for them to connect."""
     envs: list[SocketIsaacEnv] = []
@@ -164,7 +162,7 @@ def build_vec_env(
                 "Set ppo.isaac_binary in your config or pass launch_isaac=false and start Isaac manually."
             )
         for i in range(n_envs):
-            _launch_isaac_process(base_port + i, isaac_binary, stage0=stage0)
+            _launch_isaac_process(base_port + i, isaac_binary)
             # Small stagger so the first frames don't fight for CPU during load.
             time.sleep(1.0)
 

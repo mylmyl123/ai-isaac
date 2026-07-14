@@ -98,12 +98,14 @@ class IsaacFleet:
         n_envs: int,
         extra_args: list[str] | None = None,
         auto_start_stage: int | None = 1,
+        stage0: bool = False,
     ):
         self.binary = binary
         self.base_port = base_port
         self.n_envs = n_envs
         self.extra_args = extra_args or []
         self.auto_start_stage = auto_start_stage
+        self.stage0 = stage0
         self.procs: list[subprocess.Popen] = []
 
     def _install_dir(self) -> Path:
@@ -164,6 +166,8 @@ class IsaacFleet:
         port = self.base_port + i
         env = os.environ.copy()
         env["ISAAC_RL_PORT"] = str(port)
+        if self.stage0:
+            env["ISAAC_RL_STAGE0"] = "1"
 
         cmd = [self.binary, "--luadebug"]
         if self.auto_start_stage is not None:
@@ -331,6 +335,10 @@ def main() -> int:
     ap.add_argument("--auto-start-stage", type=int, default=1,
                     help="Stage passed to --set-stage on first launch (default: 1 = boot straight into Basement 1). "
                          "Set to 0 to skip the flag entirely (slower boot, uses the mod's menu-auto-start).")
+    ap.add_argument("--stage0", action="store_true",
+                    help="Enable the STAGE0 curriculum in the Lua mod (single Attack Fly per room, all other "
+                         "NPCs removed). Sets ISAAC_RL_STAGE0=1 on each spawned Isaac. Pair with the "
+                         "stage0_one_fly_xs.yaml Dreamer config.")
     ap.add_argument("--tensorboard", action="store_true", help="Also start TensorBoard in the background at :6006")
     ap.add_argument("--resume", type=str, default=None, metavar="CKPT.pt",
                     help="Resume training from a checkpoint. Point at a .pt file (e.g. runs/<run>/<timestamp>/latest.pt "
@@ -455,6 +463,7 @@ def main() -> int:
             base_port=cfg.base_port,
             n_envs=cfg.n_envs,
             auto_start_stage=None if args.no_auto_start else args.auto_start_stage,
+            stage0=args.stage0,
         )
         # Wire the fleet's respawn method into each env's crash hook BEFORE we
         # call train() (which builds the SocketIsaacEnvs). When any Isaac dies

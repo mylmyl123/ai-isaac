@@ -212,7 +212,6 @@ def train(cfg: DreamerConfig) -> None:
         launch_isaac=cfg.launch_isaac,
         accept_timeout_s=cfg.accept_timeout_s,
         reward_config=reward_cfg,
-        stage0=cfg.stage0,
     )
     log.info("vec env ready with %d workers", cfg.n_envs)
 
@@ -678,17 +677,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default=None)
-    ap.add_argument("--override", nargs="*", default=[],
-                    help="key=value pairs that override any cfg field.")
-    # Convenience shortcuts — equivalent to --override key=val for common cases.
-    ap.add_argument("--isaac-binary", type=str, default=None,
-                    help="Shortcut for --override isaac_binary=<path>.")
-    ap.add_argument("--launch-isaac", action="store_true",
-                    help="Shortcut for --override launch_isaac=true. Trainer spawns Isaac itself.")
-    ap.add_argument("--stage0", action="store_true",
-                    help="Shortcut for --override stage0=true. Sets ISAAC_RL_STAGE0=1 in spawned Isaacs.")
-    ap.add_argument("--n-envs", type=int, default=None,
-                    help="Shortcut for --override n_envs=<N>.")
+    ap.add_argument("--override", nargs="*", default=[])
     args = ap.parse_args()
     cfg = cfg_from_yaml(args.config)
     for kv in args.override:
@@ -702,15 +691,6 @@ def main():
                 if v.lower() in ("true", "false"):
                     v = v.lower() == "true"
         setattr(cfg, k, v)
-    # CLI shortcuts win over YAML.
-    if args.isaac_binary is not None:
-        cfg.isaac_binary = args.isaac_binary
-    if args.launch_isaac:
-        cfg.launch_isaac = True
-    if args.stage0:
-        cfg.stage0 = True
-    if args.n_envs is not None:
-        cfg.n_envs = args.n_envs
     log.info("config: %s", cfg)
     train(cfg)
 

@@ -23,9 +23,6 @@ class DreamerConfig:
     isaac_binary: str | None = None
     launch_isaac: bool = False   # top-level train.py owns the fleet
     accept_timeout_s: float = 300.0
-    # 2026-07-13: when True, sets ISAAC_RL_STAGE0=1 on each spawned Isaac
-    # process. Turns on the single-fly-per-room curriculum in the Lua mod.
-    stage0: bool = False
 
     # ---- Runtime ------------------------------------------------------
     device: str = "cuda"
