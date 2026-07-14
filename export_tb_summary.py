@@ -251,7 +251,21 @@ def _diagnose(ps: dict, checks: dict) -> tuple[str, list[str]]:
     v_last = last("loss/value")
     v_first = first("loss/value")
     sps_last = last("charts/sps")
-    total_steps = ps.get("charts/kills_mean", {}).get("count", 0) * 100  # rough
+
+    # Rough estimate of total env steps from the last logged data point of a
+    # scalar. Used to suppress early-run false-positive recommendations:
+    # entropy is 'high' at 5k steps because the policy hasn't had time to
+    # specialize, not because there's a bug.
+    def _steps_seen():
+        for tag in ("charts/sps", "charts/kills_mean", "loss/entropy"):
+            d = ps.get(tag)
+            if d and d.get("timeseries"):
+                s = d["timeseries"].get("steps")
+                if s:
+                    return int(s[-1])
+        return 0
+    steps_seen = _steps_seen()
+    early_run = steps_seen < 20_000
 
     recs = []
     verdict = "UNKNOWN (not enough data)"
@@ -273,6 +287,26 @@ def _diagnose(ps: dict, checks: dict) -> tuple[str, list[str]]:
             verdict = f"NOT LEARNING: kills/ep flat at {kills_last:.1f} (started {kills_first:.1f}). Random-baseline territory. Diagnose per recommendations below."
 
     # -------- Specific hyperparameter recommendations --------
+    # Skip most recs on early-run data — they'd be false positives.
+    # (Entropy near-uniform at 5k steps is normal, not a bug.)
+    if early_run:
+        recs.append(
+            f"early-run data ({steps_seen} steps). Hyperparameter recommendations"
+            f" suppressed until 20k+ steps. Current signal is enough to know if the"
+            f" pipeline is learning (see verdict), not enough to tune it."
+        )
+        # But DO flag catastrophic failures even in early runs.
+        if v_last is not None and v_first is not None and v_last > v_first * 5.0 and v_last > 10.0:
+            recs.append(
+                f"CRITICAL: value_loss exploding ({v_first:.2f} -> {v_last:.2f}) even"
+                f" this early. Bug likely in reward normalization. Halve LR immediately."
+            )
+        if sps_last is not None and sps_last < 5:
+            recs.append(
+                f"CRITICAL: sps={sps_last:.1f}. Isaac may not be running at all."
+            )
+        return verdict, recs
+
     # Entropy diagnostics.
     if ent_last is not None:
         # For MultiDiscrete([9,5,2,2,2]) uniform entropy is ~5.29.
