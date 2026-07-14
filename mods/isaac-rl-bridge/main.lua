@@ -209,6 +209,14 @@ local pending_seed = nil
 -- the death animation — that combination is exactly what causes the
 -- Lua5.3.3r.dll 0xc0000005 crash that closes the Isaac window.
 local death_announced = false
+-- 2026-07-13: Counter of MC_POST_UPDATE ticks since the last MC_POST_GAME_STARTED
+-- fired. Used to suppress the double-restart bug: after handle_player_death fires
+-- restart #1, MC_POST_GAME_STARTED clears death_announced. Python's delayed
+-- {"reset": True} then arrives at the fresh socket and, seeing death_announced=false,
+-- the exchange() handler would fire restart #2. We check this counter instead —
+-- if it's small (recent game start), we know Python's reset is a stale duplicate
+-- and we skip it. Cleared to 0 in MC_POST_GAME_STARTED; incremented every tick.
+local frames_since_game_started = 999999
 -- Track player HP across ticks so we can fire the death handler the
 -- moment HP crosses to zero (before player:IsDead() flips). Reset in
 -- MC_POST_GAME_STARTED. See handle_player_death for the rationale.
@@ -480,6 +488,17 @@ local function exchange()
             reset_cooldown = 60
             return
         end
+        -- 2026-07-13: also suppress if a new run JUST started — that means the
+        -- mod already restarted itself from a death handler and Python's reset
+        -- is the stale duplicate arriving after MC_POST_GAME_STARTED cleared
+        -- death_announced. 90 ticks = 1.5s at 60Hz, comfortably covers Python's
+        -- SyncVecEnv round-trip latency between step-terminated and reset-send.
+        if frames_since_game_started < 90 then
+            Isaac.DebugString("[isaac-rl-bridge] reset command received but game just started "
+                .. tostring(frames_since_game_started) .. " ticks ago, skipping duplicate")
+            reset_cooldown = 60
+            return
+        end
         clear_cached_action()   -- release any held inputs before restart
         -- Use bare `restart` (equivalent to pressing R in-game), NOT `restart 0`.
         -- Difference: `restart` restarts the CURRENT run in place — the process
@@ -520,6 +539,7 @@ end
 
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, is_continued)
     tick = 0
+    frames_since_game_started = 0
     reset_run_state()
     reset_cooldown = 30
     death_announced = false
@@ -650,6 +670,7 @@ end)
 
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     tick = tick + 1
+    frames_since_game_started = frames_since_game_started + 1
     run_state.frames_since_room = run_state.frames_since_room + 1
     run_state.frames_since_hit = run_state.frames_since_hit + 1
 
