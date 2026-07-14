@@ -99,48 +99,86 @@ def summarize(df, max_points_per_scalar: int = 200) -> dict:
         }
 
     # Health check: automatic diagnostics.
+    #
+    # Post 2026-07-13 reset: cleanrl_ppo.py writes scalars under 'charts/' and
+    # 'loss/' prefixes (CleanRL convention). Accept both the new prefixed names
+    # and the legacy bare names so old JSON exports still work if you diff.
+    def _pick(*keys):
+        for k in keys:
+            if k in ps:
+                return ps[k]
+        return None
+
     checks = out["health_check"]
     ps = out["per_scalar"]
-    if "loss/entropy" in ps:
-        e = ps["loss/entropy"]
+
+    e = _pick("loss/entropy")
+    if e:
         checks["entropy"] = {
             "last": e["last"],
             "min": e["min"],
             "status": "healthy" if e["last"] > 0.8 else ("collapsed" if e["last"] < 0.3 else "warning"),
-            "note": "target >0.8 for good exploration. <0.3 = policy is deterministic (bad).",
+            "note": "target >0.8 for good exploration. <0.3 = policy is deterministic (bad). Max for MultiDiscrete([9,5,2,2,2]) is ~3.8.",
         }
-    if "reward/new_room" in ps:
-        r = ps["reward/new_room"]
-        checks["progression"] = {
-            "avg_new_rooms_per_ep": r["mean"] if r["count"] > 0 else 0.0,
-            "note": "average per-episode new-room reward. Should trend upward as bot learns door-crossing.",
+
+    kills = _pick("charts/kills_mean", "behavior/kills")
+    if kills:
+        checks["kills_per_episode"] = {
+            "first": kills["first"],
+            "last": kills["last"],
+            "max": kills["max"],
+            "trend": "improving" if kills["last"] > kills["first"] + 0.5 else ("degrading" if kills["last"] < kills["first"] - 0.5 else "flat"),
+            "note": "Stage A: random baseline is ~1-2 kills/ep. Learning shows this climbing to 4-6+. Flat at 1-2 through 100k steps = pipeline broken.",
         }
-    if "ep_len_mean" in ps:
-        e = ps["ep_len_mean"]
+
+    ep_len = _pick("charts/ep_len_mean", "ep_len_mean")
+    if ep_len:
         checks["episode_length"] = {
-            "last": e["last"],
-            "trend": "increasing" if e["last"] > e["first"] * 1.5 else ("decreasing" if e["last"] < e["first"] * 0.7 else "stable"),
-            "note": ">1500 with no progression = camping or stuck. Decreasing over time is usually good (faster clears).",
+            "last": ep_len["last"],
+            "trend": "increasing" if ep_len["last"] > ep_len["first"] * 1.5 else ("decreasing" if ep_len["last"] < ep_len["first"] * 0.7 else "stable"),
+            "note": "Stage A: shorter = agent dying faster. Increasing = agent surviving longer. Stage E: >1500 with no progression = camping.",
         }
-    if "ep_r_mean" in ps:
-        r = ps["ep_r_mean"]
+
+    ep_r = _pick("charts/ep_r_mean", "ep_r_mean")
+    if ep_r:
         checks["reward"] = {
-            "first": r["first"],
-            "last": r["last"],
-            "trend": "improving" if r["last"] > r["first"] + 0.5 else ("degrading" if r["last"] < r["first"] - 0.5 else "stagnant"),
+            "first": ep_r["first"],
+            "last": ep_r["last"],
+            "max": ep_r["max"],
+            "trend": "improving" if ep_r["last"] > ep_r["first"] + 0.5 else ("degrading" if ep_r["last"] < ep_r["first"] - 0.5 else "stagnant"),
+            "note": "3-term reward: r_kill=+1, r_death=-1, r_step=-0.001. So ep_r >0 = net-positive (killing faster than dying).",
         }
-    if "loss/kickstart" in ps:
-        k = ps["loss/kickstart"]
-        checks["kickstarting"] = {
-            "current": k["last"],
-            "note": "should be non-trivial (0.1-1.0) early, decay to ~0 after 500 updates.",
-        }
-    if "loss/value" in ps:
-        v = ps["loss/value"]
+
+    v = _pick("loss/value")
+    if v:
         checks["value_function"] = {
+            "first": v["first"],
             "last": v["last"],
             "trend": "converging" if v["last"] < v["first"] else "diverging",
-            "note": "should decrease over time (or oscillate around a low value). With B1 distributional value, typical values are 2-5.",
+            "note": "should decrease over time. Diverging value = LR too high or GAE-lambda misconfigured.",
+        }
+
+    kl = _pick("loss/approx_kl")
+    if kl:
+        checks["approx_kl"] = {
+            "last": kl["last"],
+            "max": kl["max"],
+            "note": "target <0.02 per update. >0.05 = policy updates are too aggressive (LR too high or clip_coef too permissive).",
+        }
+
+    clip = _pick("loss/clipfrac")
+    if clip:
+        checks["clip_frac"] = {
+            "last": clip["last"],
+            "note": "fraction of samples PPO-clipped. Healthy: 0.1-0.3. Near 0 = updates too small. Near 1 = ratio wildly off, clip is doing everything.",
+        }
+
+    sps = _pick("charts/sps")
+    if sps:
+        checks["throughput"] = {
+            "last": sps["last"],
+            "mean": sps["mean"],
+            "note": "steps/sec across all envs. 2 envs @ 15 sps each = expect ~30 total.",
         }
 
     return out

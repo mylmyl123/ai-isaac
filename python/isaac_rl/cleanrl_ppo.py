@@ -37,6 +37,7 @@ file, the env, the mod, or the reward. Nothing else. Bisect by:
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass, field
@@ -241,6 +242,27 @@ def train(cfg: PPOConfig, env) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(run_dir))
     log.info("run dir: %s", run_dir)
+
+    # Save the full config next to the checkpoint. This is what push_data.ps1
+    # will find and what makes the run reproducible. Also write the config as
+    # a TB 'text' summary so it's visible in the TB UI.
+    try:
+        import yaml as _yaml
+        cfg_dict = dataclasses.asdict(cfg)
+        (run_dir / "config.yaml").write_text(_yaml.safe_dump(cfg_dict, sort_keys=False), encoding="utf-8")
+        writer.add_text("config", "```yaml\n" + _yaml.safe_dump(cfg_dict, sort_keys=False) + "\n```", 0)
+    except Exception as e:
+        log.warning("could not persist config.yaml: %s", e)
+
+    # Log the git commit hash so we always know exactly which code ran.
+    try:
+        import subprocess as _sp
+        sha = _sp.check_output(["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL).decode().strip()
+        (run_dir / "git_sha.txt").write_text(sha + "\n", encoding="utf-8")
+        writer.add_text("git_sha", sha, 0)
+        log.info("git sha: %s", sha)
+    except Exception:
+        pass
 
     # ---- Initial reset ----
     obs_list, _ = env.reset()

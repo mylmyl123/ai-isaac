@@ -21,7 +21,7 @@
 
 param(
     [string]$RunDir = "",
-    [string]$RunGlob = "dreamer_stage*",
+    [string]$RunGlob = "*",     # matches cleanrl_ppo_*, dreamer_*, ppo_*, anything under runs/
     [switch]$NoCheckpoint,
     [string]$Message = ""
 )
@@ -69,10 +69,18 @@ Write-Host ""
 Write-Host "==== Isaac RL — push run data ====" -ForegroundColor Cyan
 Write-Host "run dir: $RunDir"
 
-# Determine stage tag from the parent dir name (e.g. dreamer_stage1_single_room -> stage1).
+# Determine stage tag from the parent dir name. Handles all naming schemes:
+#   cleanrl_ppo_stageA  -> stageA
+#   dreamer_stage1_single_room -> stage1
+#   ppo_stage2 -> stage2
+#   whatever_else -> whatever_else (fallback)
 $stageDir = Split-Path -Parent $RunDir
 $stageName = Split-Path -Leaf $stageDir
-$stageTag = ($stageName -replace '^dreamer_', '' -replace '_.*$', '')
+if ($stageName -match 'stage[A-Za-z0-9]+') {
+    $stageTag = $Matches[0]
+} else {
+    $stageTag = $stageName -replace '^(cleanrl_ppo|dreamer|ppo)_', ''
+}
 
 # ---- 1. Export TB summary --------------------------------------------------
 $tbEvents = Get-ChildItem -Path $RunDir -Filter "events.out.tfevents.*" -ErrorAction SilentlyContinue
@@ -81,7 +89,7 @@ if (-not $tbEvents) {
 } else {
     # Read a step count from the tb summary to name the file. Fall back to timestamp.
     $ts = Split-Path -Leaf $RunDir
-    $tbJsonRel = "tb_dreamer_${stageTag}_${ts}.json"
+    $tbJsonRel = "tb_${stageTag}_${ts}.json"
     Write-Host "exporting TB scalars -> $tbJsonRel" -ForegroundColor Green
     python export_tb_summary.py $RunDir --out $tbJsonRel
     # `git add` prints an ignore-hint to stderr for some paths; under
@@ -119,6 +127,21 @@ if (-not $NoCheckpoint) {
     }
 } else {
     Write-Host "skipping checkpoint (-NoCheckpoint)"
+}
+
+# ---- 2b. Copy the config + git SHA that produced this run ------------------
+# Post 2026-07-13 nuclear reset: cleanrl_ppo.py saves config.yaml and
+# git_sha.txt in the run dir. Copying these makes each pushed JSON fully
+# reproducible — anyone can see the exact hyperparameters + commit hash.
+foreach ($aux in @("config.yaml", "git_sha.txt")) {
+    $auxSrc = Join-Path $RunDir $aux
+    if (Test-Path $auxSrc) {
+        $auxDstRel = "runs_meta\${stageTag}_${ts}_${aux}"
+        New-Item -ItemType Directory -Path (Join-Path $RepoRoot "runs_meta") -Force | Out-Null
+        Copy-Item $auxSrc (Join-Path $RepoRoot $auxDstRel) -Force
+        cmd /c "git add `"$auxDstRel`" 2>&1" | Out-Null
+        Write-Host "copied run metadata -> $auxDstRel" -ForegroundColor Green
+    }
 }
 
 # ---- 3. Commit + push -----------------------------------------------------
