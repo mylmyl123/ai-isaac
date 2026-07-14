@@ -1,0 +1,196 @@
+﻿[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/instant-restart_2501774931/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/isaac-rl-bridge/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/restart_until_special_room_2917382429/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/stageapi15_1348031964/content/
+[INFO] - Lua Debug: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[INFO] - Lua Debug: External Item Descriptions v5.21_307e29e loaded.
+[INFO] - Lua Debug: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[INFO] - Running Lua Script: C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth/mods/isaac-rl-bridge/main.lua
+[INFO] - Lua Debug: [isaac-rl-bridge] curriculum stage=A seal_doors=true wipe_enemies=true spawn_flies=true fly_count=1
+[INFO] - Lua Debug: [isaac-rl-bridge] boot: ISAAC_RL_RECORD=nil ISAAC_RL_PORT=9501 record_mode_active=false
+[INFO] - Lua Debug: [isaac-rl-bridge] mod loaded (port 9501, frame skip 2)
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Registering the core addon...
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Core addon registered.
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Registering the essentials addon...
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Essentials addon registered.
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Setting up ApplicationLifecycleManager...
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Adding a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Successfully added a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Adding a callback. | {"callbackType":17}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Successfully added a callback. | {"callbackType":17}
+[INFO] - Lua Debug: (INFO) [Stats+@API] Requesting a full reload due to an addon register.
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Adding a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Successfully added a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Requesting an initial mod state reload.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (DEBUG) [Stats+@ConfigService] Reloading the ConfigService...
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Initial mod state reload finished.
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/instant-restart_2501774931/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/isaac-rl-bridge/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/restart_until_special_room_2917382429/content/
+[INFO] - LOADED MOD c:\program files (x86)\steam\steamapps\common\the binding of isaac rebirth/mods/stageapi15_1348031964/content/
+[INFO] - Lua Debug: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[INFO] - Lua Debug: External Item Descriptions v5.21_307e29e loaded.
+[INFO] - Lua Debug: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[INFO] - Running Lua Script: C:\Program Files (x86)\Steam\steamapps\common\The Binding of Isaac Rebirth/mods/isaac-rl-bridge/main.lua
+[INFO] - Lua Debug: [isaac-rl-bridge] curriculum stage=A seal_doors=true wipe_enemies=true spawn_flies=true fly_count=1
+[INFO] - Lua Debug: [isaac-rl-bridge] boot: ISAAC_RL_RECORD=nil ISAAC_RL_PORT=9501 record_mode_active=false
+[INFO] - Lua Debug: [isaac-rl-bridge] mod loaded (port 9501, frame skip 2)
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Registering the core addon...
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Core addon registered.
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Registering the essentials addon...
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Essentials addon registered.
+[INFO] - Lua Debug: (DEBUG) [Stats+@main] Setting up ApplicationLifecycleManager...
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Adding a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Successfully added a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Adding a callback. | {"callbackType":17}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Successfully added a callback. | {"callbackType":17}
+[INFO] - Lua Debug: (INFO) [Stats+@API] Requesting a full reload due to an addon register.
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Adding a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (DEBUG) [Stats+@ModCallbackService] Successfully added a callback. | {"callbackType":1}
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Requesting an initial mod state reload.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (DEBUG) [Stats+@ConfigService] Reloading the ConfigService...
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Initial mod state reload finished.
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 288288485
+[INFO] - [RoomConfig] load stage 1: Basement (mode 0)
+[INFO] - [ModManager] load stage 1: Basement (mode 0)
+[INFO] - [ModManager] load stage 1: Basement (mode 0)
+[INFO] - [ModManager] load stage 1: Basement (mode 0)
+[INFO] - [ModManager] load stage 1: Basement (mode 0)
+[INFO] - [RoomConfig] load stage 0: Special Rooms (mode 0)
+[INFO] - [ModManager] load stage 0: Special Rooms (mode 0)
+[INFO] - [ModManager] load stage 0: Special Rooms (mode 0)
+[INFO] - [ModManager] load stage 0: Special Rooms (mode 0)
+[INFO] - [ModManager] load stage 0: Special Rooms (mode 0)
+[INFO] - [RoomConfig] load stage 13: ??? (mode 0)
+[INFO] - [ModManager] load stage 13: ??? (mode 0)
+[INFO] - [ModManager] load stage 13: ??? (mode 0)
+[INFO] - [ModManager] load stage 13: ??? (mode 0)
+[INFO] - [ModManager] load stage 13: ??? (mode 0)
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9501
+[INFO] - Lua Debug: (INFO) [Stats+@PlayerService] Requesting a full reload due to the change of active players.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: (INFO) [Stats+@API] Requesting a full reload due to an addon register.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Adding collectible 1 (The Sad Onion) to play[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 400) player=(376, 368) dist=219
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (240, 240) player=(367, 370) dist=182
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 280) player=(457, 401) dist=358
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 1014773199
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 240) player=(320, 380) dist=212
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=A: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 240) player=(435, 403) dist=320
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 320) player=(549, 350) dist=430
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 360) player=(499, 228) dist=363
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (280, 280) player=(521, 355) dist=253
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 4148849493
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 360) player=(320, 380) dist=200
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=A: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (560, 400) player=(414, 392) dist=145
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (280, 280) player=(405, 409) dist=180
+[INFO] - [warn] n[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (320, 280) player=(113,[INFO] - [warn][INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (480, 280) player=(231, 409) dist=280
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (560, 320) player=(332, 407) dist=243
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (200, 280) player=(342, 398) dist=185
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Unregistering the mod loadout due to the game exit.
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 538915548
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9501
+[INFO] - Lua Debug: (INFO) [Stats+@PlayerService] Requesting a full reload due to the change of active players.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (200, 360) player=(525, 409) dist=328
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (200, 360) player=(458, 401) dist=261
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (520, 360) player=(317, 409) dist=208
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (520, 360) player=(303, 395) dist=219
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 4059530335
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 360) player=(320, 380) dist=200
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=A: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (520, 240) player=(296, 379) dist=263
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (240, 320) player=(444, 382) dist=213
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 400) player=(558, 349) dist=440
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (400, 240) player=(569, 409) dist=239
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 400) player=(430, 395) dist=270
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (320, 240) player=(436, 396) dist=195
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 3678957915
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 320) player=(320, 380) dist=208
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=A: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 280) player=(318, 355) dist=212
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (480, 320) player=(305, 409) dist=196
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 400) player=(457, 405) dist=297
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (360, 240) player=(488, 403) dist=207
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 242975909
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (480, 240) player=(320, 380) dist=212
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=A: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (200, 240) player=(324, 384) dist=191
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (440, 400) player=(202, 341) dist=244
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (80, 240) player=(267, 362) dist=224
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (520, 360) player=(230, 406) dist=292
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (520, 280) player=(306, 409) dist=249
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (240, 280) player=(352, 395) dist=161
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (400, 240) player=(254, 409) dist=223
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 400) player=(339, 322) dist=233
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 280) player=(379, 360) dist=233
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (480, 240) player=(302, 381) dist=227
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (280, 240) player=(396, 384) dist=185
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (280, 280) player=(417, 409) dist=189
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (520, 280) player=(390, 383) dist=165
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (200, 360) player=(427, 407) dist=232
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Unregistering the mod loadout due to the game exit.
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 3398255517
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9501
+[INFO] - Lua Debug: (INFO) [Stats+@PlayerService] Requesting a full reload due to the change of active players.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (160, 400) player=(320, 380) dist=161
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=A: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (480, 240) player=(289, 365) dist=227
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (80, 240) player=(301, 364) dist=253
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (440, 400) player=(235, 384) dist=205
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE0: spawned Attack Fly at (120, 200) player=(303, 322) dist=220
