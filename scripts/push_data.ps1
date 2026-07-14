@@ -129,11 +129,12 @@ if (-not $NoCheckpoint) {
     Write-Host "skipping checkpoint (-NoCheckpoint)"
 }
 
-# ---- 2b. Copy the config + git SHA that produced this run ------------------
-# Post 2026-07-13 nuclear reset: cleanrl_ppo.py saves config.yaml and
-# git_sha.txt in the run dir. Copying these makes each pushed JSON fully
-# reproducible — anyone can see the exact hyperparameters + commit hash.
-foreach ($aux in @("config.yaml", "git_sha.txt")) {
+# ---- 2b. Copy the config + git SHA + episodes CSV + mod log tail ----------
+# Post 2026-07-13 nuclear reset: cleanrl_ppo.py saves config.yaml, git_sha.txt,
+# and episodes.csv in the run dir. Also grab the last 500 lines of Isaac's
+# log.txt so I can see any mod-side errors, restart cycles, STAGE setup
+# failures, etc.
+foreach ($aux in @("config.yaml", "git_sha.txt", "episodes.csv")) {
     $auxSrc = Join-Path $RunDir $aux
     if (Test-Path $auxSrc) {
         $auxDstRel = "runs_meta\${stageTag}_${ts}_${aux}"
@@ -142,6 +143,28 @@ foreach ($aux in @("config.yaml", "git_sha.txt")) {
         cmd /c "git add `"$auxDstRel`" 2>&1" | Out-Null
         Write-Host "copied run metadata -> $auxDstRel" -ForegroundColor Green
     }
+}
+
+# Mod log tail: last 500 lines of Isaac's log.txt, filtered to isaac-rl-bridge
+# lines. Catches Lua errors, STAGE setup failures, restart cycles, socket
+# problems — all things TB scalars can't tell me.
+$isaacLog = "$env:USERPROFILE\Documents\My Games\Binding of Isaac Repentance\log.txt"
+if (Test-Path $isaacLog) {
+    $modLogRel = "runs_meta\${stageTag}_${ts}_isaac_log_tail.txt"
+    # Grab last 2000 lines, filter to our mod's messages + any Lua error lines.
+    $tail = Get-Content $isaacLog -Tail 2000 -ErrorAction SilentlyContinue
+    if ($tail) {
+        $filtered = $tail | Where-Object {
+            $_ -match "isaac-rl-bridge|Lua Error|Lua Debug|handle_player_death|STAGE|restart|Fatal"
+        }
+        # Keep last 500 filtered lines (older lines might be from a previous run).
+        if ($filtered.Count -gt 500) { $filtered = $filtered[-500..-1] }
+        Set-Content -Path (Join-Path $RepoRoot $modLogRel) -Value $filtered -Encoding UTF8
+        cmd /c "git add `"$modLogRel`" 2>&1" | Out-Null
+        Write-Host "copied Isaac log tail ($($filtered.Count) lines) -> $modLogRel" -ForegroundColor Green
+    }
+} else {
+    Write-Warning "Isaac log.txt not found at $isaacLog"
 }
 
 # ---- 3. Commit + push -----------------------------------------------------

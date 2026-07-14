@@ -273,9 +273,20 @@ def train(cfg: PPOConfig, env) -> None:
     ep_rewards = np.zeros(cfg.n_envs, dtype=np.float32)
     ep_lens = np.zeros(cfg.n_envs, dtype=np.int64)
     ep_kills = np.zeros(cfg.n_envs, dtype=np.int64)
+    ep_deaths = np.zeros(cfg.n_envs, dtype=np.int64)
     completed_ep_rewards: list[float] = []
     completed_ep_lens: list[int] = []
     completed_ep_kills: list[int] = []
+
+    # Per-episode CSV log — opened once, appended every episode. This gives
+    # us variance across episodes, not just moving averages. Small ~500KB
+    # for a full 200k-step run.
+    episodes_csv = open(run_dir / "episodes.csv", "w", encoding="utf-8", buffering=1)
+    episodes_csv.write("step,env_idx,ep_r,ep_len,ep_kills,terminated,truncated\n")
+
+    # Running action histogram: counts per action-factor. Useful for spotting
+    # 'policy always picks action 0' failure modes.
+    action_hist = [np.zeros(int(n), dtype=np.int64) for n in ACTION_FACTORS]
 
     global_step = 0
     update = 0
@@ -302,6 +313,10 @@ def train(cfg: PPOConfig, env) -> None:
             rb.values[t] = values
 
             action_np = actions.cpu().numpy().astype(np.int64)
+            # Update per-factor action histogram.
+            for k in range(action_np.shape[1]):
+                counts = np.bincount(action_np[:, k], minlength=int(ACTION_FACTORS[k]))
+                action_hist[k] += counts
             next_obs_list, rewards, terms, truncs, infos = env.step(action_np)
             done_np = np.logical_or(terms, truncs).astype(np.float32)
 
@@ -322,6 +337,10 @@ def train(cfg: PPOConfig, env) -> None:
                     completed_ep_rewards.append(float(ep_rewards[i]))
                     completed_ep_lens.append(int(ep_lens[i]))
                     completed_ep_kills.append(int(ep_kills[i]))
+                    episodes_csv.write(
+                        f"{global_step},{i},{ep_rewards[i]:.4f},{ep_lens[i]},{ep_kills[i]},"
+                        f"{int(terms[i])},{int(truncs[i])}\n"
+                    )
                     ep_rewards[i] = 0.0
                     ep_lens[i] = 0
                     ep_kills[i] = 0
@@ -396,12 +415,35 @@ def train(cfg: PPOConfig, env) -> None:
             writer.add_scalar("charts/ep_r_mean", avg_r, global_step)
             writer.add_scalar("charts/ep_len_mean", avg_len, global_step)
             writer.add_scalar("charts/kills_mean", avg_kills, global_step)
+            writer.add_scalar("charts/ep_r_std", float(np.std(completed_ep_rewards[-20:])) if completed_ep_rewards else 0.0, global_step)
+            writer.add_scalar("charts/n_completed_episodes", len(completed_ep_rewards), global_step)
             writer.add_scalar("loss/policy", np.mean(pg_losses), global_step)
             writer.add_scalar("loss/value", np.mean(v_losses), global_step)
             writer.add_scalar("loss/entropy", np.mean(ent_losses), global_step)
             writer.add_scalar("loss/approx_kl", np.mean(approx_kls), global_step)
             writer.add_scalar("loss/clipfrac", np.mean(clipfracs), global_step)
             writer.add_scalar("charts/lr", optimizer.param_groups[0]["lr"], global_step)
+
+            # ---- Per-action-factor entropy: which head is collapsing? ----
+            # Recompute distribution entropy per factor from the last minibatch's
+            # obs so we get a fresh reading (not just the mean over updates).
+            with torch.no_grad():
+                dists, _ = net.forward(b_obs[:min(256, batch_size)])
+            factor_names = ["move", "shoot", "use_item", "drop_bomb", "use_pillcard"]
+            for k, d in enumerate(dists):
+                name = factor_names[k] if k < len(factor_names) else f"factor_{k}"
+                writer.add_scalar(f"entropy_per_factor/{name}", float(d.entropy().mean().item()), global_step)
+
+            # ---- Action histogram: is the policy stuck on one action? ----
+            for k, hist in enumerate(action_hist):
+                total = hist.sum()
+                if total > 0:
+                    # Most-used action fraction. 1.0 = policy always picks the
+                    # same action for this factor (collapsed). Near uniform =
+                    # ~1/n_choices (0.11 for 9-way move factor).
+                    top_frac = float(hist.max() / total)
+                    name = factor_names[k] if k < len(factor_names) else f"factor_{k}"
+                    writer.add_scalar(f"action_top_frac/{name}", top_frac, global_step)
 
         # -------- CHECKPOINT --------
         if global_step - (global_step % cfg.checkpoint_every) >= cfg.checkpoint_every:
@@ -415,4 +457,5 @@ def train(cfg: PPOConfig, env) -> None:
             torch.save(ckpt, latest)
 
     writer.close()
+    episodes_csv.close()
     log.info("training complete: %d steps", global_step)
