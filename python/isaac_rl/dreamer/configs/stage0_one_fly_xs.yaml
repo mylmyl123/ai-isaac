@@ -23,8 +23,9 @@ reset_stage: 1
 max_episode_steps: 300           # was 1800 - a fly should die in <60 ticks
 total_env_steps: 200_000         # pass/fail budget
 
-launch_isaac: false
-isaac_binary: null
+launch_isaac: true
+isaac_binary: null   # override on the CLI with --isaac-binary "C:\path\to\isaac-ng.exe"
+stage0: true
 accept_timeout_s: 300.0
 
 # ---- runtime ----
