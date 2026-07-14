@@ -111,34 +111,46 @@ local function stage0_setup_room()
             end
         end
 
-        -- 2. Spawn Attack Fly (EntityType.ENTITY_ATTACKFLY = 18) NEAR the
-        --    player so interaction is inevitable. Prior version used
-        --    ENTITY_FLY = 13 which is Boom Fly (explodes on death) and
-        --    spawned at a fixed offset that could land in a wall.
-        --
-        --    Attack Fly = 1 HP, no projectiles, homes on player, dies fast.
-        --    Perfect Stage-0 target.
-        local desired = player.Position + Vector(80, 0)
-        local spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
-        local fly = Isaac.Spawn(EntityType.ENTITY_ATTACKFLY, 0, 0, spawn_pos, Vector(0, 0), nil)
-        local hp = "?"
-        if fly then
-            hp = tostring(fly.HitPoints)
-            -- Some entity types default to friendly-to-player when Spawner
-            -- is nil; explicitly clear that flag so shots register as kills.
-            fly:ClearEntityFlags(EntityFlag.FLAG_FRIENDLY)
-            fly:ClearEntityFlags(EntityFlag.FLAG_CHARM)
-        end
+        stage0_spawn_fly(player)
         Isaac.DebugString("[isaac-rl-bridge] STAGE0: cleared " .. tostring(removed)
-            .. " NPCs, spawned Attack Fly at (" .. tostring(math.floor(spawn_pos.X))
-            .. ", " .. tostring(math.floor(spawn_pos.Y)) .. ") hp=" .. hp
-            .. " player=(" .. tostring(math.floor(player.Position.X))
-            .. ", " .. tostring(math.floor(player.Position.Y)) .. ")")
+            .. " NPCs, spawned initial fly")
     end)
     if not ok then
         Isaac.DebugString("[isaac-rl-bridge] STAGE0 setup failed: " .. tostring(err))
     end
 end
+
+-- Spawn a single Attack Fly close to the player. Extracted so it can be
+-- called both on room entry AND every time the room goes 'clear' (i.e.
+-- the previous fly just died). That continuous respawn is what makes
+-- Stage 0 an actual training task instead of a one-shot test: each
+-- 200-tick episode becomes 3-5 kills = 3-5 r_kill events = 3-5 training
+-- signal spikes per rollout instead of just one.
+function stage0_spawn_fly(player)
+    if not STAGE0_MODE then return end
+    if not player then
+        player = Isaac.GetPlayer(0)
+        if not player then return end
+    end
+    -- Attack Fly (EntityType.ENTITY_ATTACKFLY = 18) NEAR the player.
+    local desired = player.Position + Vector(80, 0)
+    local spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
+    local fly = Isaac.Spawn(EntityType.ENTITY_ATTACKFLY, 0, 0, spawn_pos, Vector(0, 0), nil)
+    if fly then
+        fly:ClearEntityFlags(EntityFlag.FLAG_FRIENDLY)
+        fly:ClearEntityFlags(EntityFlag.FLAG_CHARM)
+        Isaac.DebugString("[isaac-rl-bridge] STAGE0: respawned Attack Fly at ("
+            .. tostring(math.floor(spawn_pos.X)) .. ", " .. tostring(math.floor(spawn_pos.Y))
+            .. ") player=(" .. tostring(math.floor(player.Position.X))
+            .. ", " .. tostring(math.floor(player.Position.Y)) .. ")")
+    end
+end
+
+-- Poll for 'the fly is dead, spawn another' every N ticks. 15 = ~1s at
+-- the 15Hz exchange rate; short enough that the agent barely notices a
+-- gap between kills, long enough that we're not iterating room entities
+-- every single game frame.
+local STAGE0_RESPAWN_POLL_TICKS = 15
 -- Diagnostic: always log the raw env-var value so we can distinguish
 -- 'RECORD_MODE=1 set but disabled' from 'env-var never reached the process'.
 -- Fires unconditionally at mod load time.
@@ -621,6 +633,25 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
         if stage0_setup_pending == 0 then
             stage0_setup_room()
         end
+    end
+
+    -- Stage-0 continuous-respawn: every STAGE0_RESPAWN_POLL_TICKS game ticks,
+    -- check if the fly is gone. If the room has zero NPCs, spawn a new fly
+    -- next to the player. This turns Stage 0 from a one-shot 'kill 1 fly'
+    -- test into a proper training curriculum: each episode contains many
+    -- kills instead of one, giving the WM / actor a dense reward signal.
+    if STAGE0_MODE and (tick % STAGE0_RESPAWN_POLL_TICKS) == 0 and reset_cooldown == 0 and not death_announced then
+        pcall(function()
+            local npc_count = 0
+            for _, ent in ipairs(Isaac.GetRoomEntities()) do
+                if ent:ToNPC() ~= nil then
+                    npc_count = npc_count + 1
+                end
+            end
+            if npc_count == 0 then
+                stage0_spawn_fly(nil)
+            end
+        end)
     end
 
     if reset_cooldown > 0 then
