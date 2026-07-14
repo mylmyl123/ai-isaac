@@ -24,7 +24,13 @@ n_envs: 2
 base_port: 9500
 reset_stage: 1                    # Basement 1 (mod's --set-stage)
 max_episode_steps: 1800           # 2 min at 15Hz; stops runaway episodes
-total_env_steps: 200_000          # Setup A learns much faster if it learns at all
+
+# ---- Budget (right-sized per stage) ---------------------------------------
+# A: 1 fly in sealed room. Converges by ~30k. 100k is generous headroom.
+# D: normal room + vanilla enemies. Realistic single-room combat. ~300k.
+# E: full Basement 1 run with progression. Overnight. ~1M+.
+# Warm-start from previous stage's latest.pt (feature TBD).
+total_env_steps: 100_000
 
 # ---- PPO hyperparameters --------------------------------------------------
 rollout_length: 128
