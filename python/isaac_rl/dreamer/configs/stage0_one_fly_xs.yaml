@@ -20,8 +20,8 @@ run_name: dreamer_stage0_one_fly_xs
 n_envs: 2
 base_port: 9500
 reset_stage: 1
-max_episode_steps: 300           # was 1800 - a fly should die in <60 ticks
-total_env_steps: 200_000         # pass/fail budget
+max_episode_steps: 200           # random policy kills fly in ~50 ticks avg
+total_env_steps: 50_000          # ~10-30min at 2 envs, train_ratio=4 -> 12.5k WM updates
 
 launch_isaac: false             # top-level train.py owns the Isaac fleet
 isaac_binary: null
@@ -31,8 +31,8 @@ accept_timeout_s: 300.0
 device: cuda
 seed: 42
 checkpoint_dir: runs
-checkpoint_every: 50_000
-log_every: 25
+checkpoint_every: 25_000
+log_every: 10
 
 compile_rssm: false
 
@@ -102,9 +102,9 @@ reward_ema: true
 rnd_intrinsic_scale: 0.0
 
 # ---- training loop ----
-prefill_steps: 2500
+prefill_steps: 500              # was 2500; 1-fly task doesn't need 15min of random
 train_ratio: 4
-replay_capacity: 200_000
+replay_capacity: 100_000
 
 # ---- reward (Stage 0: 4 non-zero terms) ----
 # The task is 'kill one fly'. Only kill / damage / death / step should have
