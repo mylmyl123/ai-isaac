@@ -1,20 +1,23 @@
-# Progress — Agent 1 (Item Economy)
+# Progress
 
-- [x] Read reward.py, stage1_single_room_xs.yaml, reward.lua, obs.lua
-- [x] Research item quality tiers (Q0–Q4 from items_metadata.xml)
-- [x] Research item pools per room type (Treasure/Shop/Boss/Devil/Angel/Curse/Secret/etc.)
-- [x] Research transformations (15 forms, PlayerForm.NUM_PLAYER_FORMS)
-- [x] Research top-30 synergies (Brimstone+Tammy, Ipecac+Explosivo, Poly+Cricket's Body, etc.)
-- [x] Research trap items (Plan C, Suicide King, Wavy Cap, Cursed Eye, Missing Page, etc.)
-- [x] Research active items + Devil/Angel economy
-- [x] Wrote /Users/I048254/Downloads/isaac-ai/isaac-swarm/agent1-item-economy.md
+## Status
+Research subagent (recent papers) — Complete
 
-## Deliverable
-- `/Users/I048254/Downloads/isaac-ai/isaac-swarm/agent1-item-economy.md` — full audit
-  - 10 identified gaps in current reward
-  - Trap-item vulnerability table
-  - 15 ranked recommendations (R1–R15)
-  - Top-3 Priority-1 changes with code sketches:
-    1. Quality-weighted pickup reward via `Isaac.GetItemConfig():GetCollectible(id).Quality`
-    2. Transformation progress bonus via `player:GetPlayerFormCounter(i)`
-    3. Trap-item + active-item override table (Plan C, Suicide King protection)
+## Tasks
+- [x] Category 1: Roguelike/procedural RL (Craftax, MiniHack, Procgen)
+- [x] Category 2: Sample-efficient RL (DreamerV3, EfficientZeroV2, DIAMOND, PPO+Dreamer tricks)
+- [x] Category 3: Sparse-reward exploration (E3B, DRND, DuRND, ELLM, ExploRLLM, GCRL)
+- [x] Category 4: Auxiliary tasks (SPR unifying, self-prediction, successor features)
+- [x] Category 5: Reward shaping (PBIM, PBRS sample efficiency, stationary IM)
+- [x] Category 6: PPO improvements (PPG Reloaded, Transformer/LSTM PPO, POMDP theory)
+- [x] Category 7: Video game agents (D2AH-PPO ViZDoom, Open-P2P, diffusion policies, Isaac hobbyist repos)
+- [x] Category 8: BC + RL (VPT, C-GAIL, DPAIL)
+- [x] Top-5 recommendations
+
+## Files Changed
+- swarm-outputs/02-recent-papers.md (new, ~25 papers surveyed, top-5 ranked)
+
+## Notes
+- No peer-reviewed RL work on Binding of Isaac exists — hobbyist repos only.
+- Craftax (Matthews 2024) is the closest published analog; use their PPO+ICM+E3B baseline as reference.
+- Top recommendations optimized for engineering-hours-to-impact: DreamerV3 tricks → BC pretrain → LSTM+AchievementDistill → PPO+ICM+E3B → PBIM shaping.

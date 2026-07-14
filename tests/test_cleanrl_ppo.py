@@ -55,6 +55,44 @@ def test_reward_shaper_kill_via_damage_to_npc():
     assert "kill" not in bd2, "damage_to_npc without killed=True is not a kill"
 
 
+def test_action_masking_active_factors():
+    """Phase-1 fix: unused action factors on Stage 0/A/B should be masked out
+    of the loss so entropy bonus doesn't leak into useless heads.
+
+    Verifies:
+    - active_factors=2 (move + shoot only) samples all 5 factors but zeros
+      factors [2, 3, 4]
+    - Log prob and entropy are summed over only the 2 active factors
+    - active_factors=5 (default) uses all factors
+    """
+    import torch
+    from isaac_rl.cleanrl_ppo import ActorCritic
+    from isaac_rl.spaces import ACTION_FACTORS
+
+    torch.manual_seed(0)
+    obs_dim = 32
+    for k in (2, len(ACTION_FACTORS)):
+        net = ActorCritic(obs_dim, hidden_dim=64, n_layers=1, active_factors=k)
+        x = torch.randn(8, obs_dim)
+        actions, logp, ent, v = net.act(x)
+        assert actions.shape == (8, len(ACTION_FACTORS))
+        # Masked factors must all be 0.
+        if k < len(ACTION_FACTORS):
+            assert (actions[:, k:] == 0).all(), f"masked factors must be 0, got {actions[:, k:]}"
+        # Entropy scale: sum over k active factors of log(n_choices_i).
+        # For k=2: log(9)+log(5) ≈ 3.80. For k=5: log(9)+log(5)+log(2)*3 ≈ 5.88.
+        max_ent = sum([
+            float(torch.log(torch.tensor(float(ACTION_FACTORS[i]))))
+            for i in range(k)
+        ])
+        assert ent.mean().item() <= max_ent + 0.01, \
+            f"entropy {ent.mean().item()} exceeds max {max_ent} for k={k}"
+
+        # Round-trip through evaluate() with the same actions.
+        logp2, ent2, v2 = net.evaluate(x, actions)
+        assert torch.allclose(logp, logp2, atol=1e-5), "act() vs evaluate() logprob mismatch"
+
+
 def test_reward_shaper_death_via_event():
     s = RewardShaper()
     total, terminated, _ = s({"events": [{"kind": "death"}], "player": {}}, action=None)

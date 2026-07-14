@@ -113,6 +113,28 @@ local function build_projectiles(room, player, tl, br)
         n = n + 1
     end
 
+    -- Player's OWN tears (ENTITY_TEAR = 2). Post 2026-07-14 (Phase 1): this
+    -- was MISSING from obs, meaning the agent could not see whether its
+    -- fired tears would hit the target. Critical for an aim-and-shoot task.
+    -- We flag them via Variant field being reserved above 100 so downstream
+    -- can distinguish own tears from enemy projectiles.
+    for _, e in ipairs(Isaac.FindByType(EntityType.ENTITY_TEAR, -1, -1, false, false)) do
+        if n >= MAX_PROJ then break end
+        local nx, ny = normalize_pos(e.Position, tl, br)
+        out[n + 1] = {
+            nx, ny,
+            (e.Position.X - player_x) / 480.0,
+            (e.Position.Y - player_y) / 270.0,
+            e.Velocity.X / 10.0, e.Velocity.Y / 10.0,
+            (e.PositionOffset and e.PositionOffset.Y or 0) / 100.0,
+            0,                       -- is_laser
+            (e.Variant or 0) + 1000, -- +1000 marker: this is our own tear
+            (e.FrameCount or 0) / 30.0,
+        }
+        mask[n + 1] = 1
+        n = n + 1
+    end
+
     -- Lasers count as projectiles too.
     for _, e in ipairs(Isaac.FindByType(EntityType.ENTITY_LASER, -1, -1, false, false)) do
         if n >= MAX_PROJ then break end

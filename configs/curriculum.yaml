@@ -1,49 +1,47 @@
 # Isaac RL PPO curriculum config.
 #
-# Single YAML for the whole curriculum. Set `stage` to A/B/C/D/E and pass
-# through to the Isaac mod (via ISAAC_RL_STAGE env var).
+# Post 2026-07-14 Phase-1 rewrite. Prior Stage A run showed regression from
+# 10.8 → 5.3 kills/ep because:
+#   * LR annealing → 0 froze the policy in local optimum
+#   * ent_coef=0.01 gave entropy gradient 3-8× the reward gradient
+#   * Task design (sealed room + homing Attack Fly) is degenerate:
+#     corner-camping local optimum is stable, can't be escaped.
 #
-# Curriculum stages:
-#   A  sealed room, 1 attack fly, respawn on kill                        (~1 hr)
-#   B  sealed room, 3 attack flies, respawn on room-clear                (~2 hr)
-#   C  normal starting room, unsealed doors, 1 fly (mod wipes rest)      (~4 hr)
-#   D  normal Basement 1 room, vanilla enemies                           (~8 hr)
-#   E  full Basement 1 run, no restrictions                              (~16 hr)
+# This config fixes all three (see swarm-outputs/01-red-team-audit.md,
+# swarm-outputs/03-first-principles.md).
 #
-# Runs progressively at 5 seeds each. Each stage warm-starts from the
-# previous stage's checkpoint (via --resume runs/.../latest.pt).
-#
-# Compute budget assumes ~15 sps per env on a 3060 Ti with 2 envs.
+# Curriculum stages (used across the paper's experiments):
+#   0  1 Horf (stationary shooter). Provably ANTI-camp. Control task.        (~2 hr)
+#   A  1 Attack Fly (homing). Reproducer for corner-camping failure mode.    (~2 hr)
+#   B  3 Attack Flies. Multi-enemy target selection.                         (~3 hr)
+#   D  Normal Basement 1 room, vanilla enemies. Real single-room combat.    (~4 hr)
+#   E  Full Basement 1 run. Full generalization test.                        (~8+ hr)
 
 # ---- Curriculum -----------------------------------------------------------
-stage: A                          # A|B|C|D|E — read by the mod via ISAAC_RL_STAGE
-run_name: cleanrl_ppo_stageA
+stage: "0"                        # Phase-1 default: Horf (anti-camp control task)
+run_name: cleanrl_ppo_stage0
 
 # ---- Env fleet ------------------------------------------------------------
 n_envs: 2
 base_port: 9500
-reset_stage: 1                    # Basement 1 (mod's --set-stage)
-max_episode_steps: 1800           # 2 min at 15Hz; stops runaway episodes
+reset_stage: 1                    # Basement 1
+max_episode_steps: 1800
 
-# ---- Budget (right-sized per stage) ---------------------------------------
-# A: 1 fly in sealed room. Converges by ~30k. 100k is generous headroom.
-# D: normal room + vanilla enemies. Realistic single-room combat. ~300k.
-# E: full Basement 1 run with progression. Overnight. ~1M+.
-# Warm-start from previous stage's latest.pt (feature TBD).
-total_env_steps: 100_000
+total_env_steps: 200_000          # Phase-1: 200k to observe full trajectory
 
-# ---- PPO hyperparameters --------------------------------------------------
+# ---- PPO hyperparameters (Phase-1 tuned) ---------------------------------
 rollout_length: 128
 n_epochs: 4
 n_minibatches: 4
 lr: 3.0e-4
-gamma: 0.99
+gamma: 0.995                      # was 0.99 — effective horizon 200 (matches ep_len)
 gae_lambda: 0.95
 clip_coef: 0.2
-ent_coef: 0.01
+ent_coef: 0.003                   # was 0.01 — match entropy to reward gradient
 vf_coef: 0.5
 max_grad_norm: 0.5
-anneal_lr: true
+anneal_lr: false                  # was true — DO NOT freeze the policy at end
+lr_floor_frac: 0.1                # if anneal_lr=true, floor at 10% of base LR
 
 # ---- Network --------------------------------------------------------------
 hidden_dim: 256
@@ -53,5 +51,10 @@ n_hidden_layers: 2
 device: cuda
 seed: 42
 checkpoint_dir: runs
-checkpoint_every: 100_000
+checkpoint_every: 50_000          # more frequent so we can inspect intermediate policies
 log_every_updates: 1
+
+# ---- Action masking (Phase-1) ---------------------------------------------
+# Stages 0, A, B don't need item/bomb/pillcard actions. Masking them at
+# sample time removes entropy leakage from the 3 useless factors.
+mask_unused_action_factors: true

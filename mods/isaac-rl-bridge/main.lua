@@ -82,27 +82,40 @@ local RECORD_MODE = os.getenv("ISAAC_RL_RECORD") == "1"
 -- premature. If it CAN converge on this, ratchet complexity by disabling
 -- the flag and moving to Stage 1.
 local STAGE0_MODE = os.getenv("ISAAC_RL_STAGE0") == "1"
--- 2026-07-13: curriculum stage letter (A/B/C/D/E). Sent by train.py via
--- ISAAC_RL_STAGE env var. Determines room-manipulation behavior:
---   A  sealed room, 1 attack fly, respawn on kill
---   B  sealed room, 3 attack flies, respawn on room-clear
---   C  normal starting room (unsealed), 1 fly (mod wipes rest)
---   D  normal Basement 1 room, vanilla enemies (mod does nothing to enemies)
---   E  full Basement 1 run, no restrictions (mod is fully passive)
+-- 2026-07-14 (Phase 1): curriculum stage. Sent by train.py via ISAAC_RL_STAGE.
+--   "0" 1 Horf (stationary shooter). Control task — provably ANTI-camp.
+--        Horf shoots 3-way spread when player is in line of sight. Corner-
+--        camping is strictly dominated: Horf's tears reach corners.
+--   A  sealed room, 1 Attack Fly. Kept as FAILURE-MODE REPRODUCER (paper).
+--        Homing fly + sealed room = corner-camping local optimum.
+--   B  sealed room, 3 Attack Flies. Multi-enemy target selection.
+--   C  normal starting room (unsealed), 1 fly (mod wipes rest).
+--   D  normal Basement 1 room, vanilla enemies (mod does nothing).
+--   E  full Basement 1 run, no restrictions (mod is fully passive).
 -- Empty / unset defaults to E (fully passive) so old workflows keep working.
 local STAGE = (os.getenv("ISAAC_RL_STAGE") or ""):upper()
 if STAGE == "" then STAGE = "E" end
 -- STAGE0_MODE (legacy env var) implies stage A.
 if STAGE0_MODE and STAGE == "E" then STAGE = "A" end
-local STAGE_SEAL_DOORS   = (STAGE == "A" or STAGE == "B")
-local STAGE_WIPE_ENEMIES = (STAGE == "A" or STAGE == "B" or STAGE == "C")
-local STAGE_SPAWN_FLIES  = (STAGE == "A" or STAGE == "B" or STAGE == "C")
-local STAGE_FLY_COUNT    = (STAGE == "B") and 3 or 1
+
+-- Curriculum flags. Stages 0/A/B/C manipulate the room; D/E leave it alone.
+local STAGE_SEAL_DOORS      = (STAGE == "0" or STAGE == "A" or STAGE == "B")
+local STAGE_WIPE_ENEMIES    = (STAGE == "0" or STAGE == "A" or STAGE == "B" or STAGE == "C")
+local STAGE_SPAWN_ENEMIES   = (STAGE == "0" or STAGE == "A" or STAGE == "B" or STAGE == "C")
+-- Enemy type per stage. 26=HORF (stationary shooter), 18=ATTACKFLY (homing).
+local STAGE_ENEMY_TYPE      = (STAGE == "0") and 26 or 18
+local STAGE_ENEMY_VARIANT   = (STAGE == "0") and 0 or 0
+local STAGE_ENEMY_COUNT     = (STAGE == "B") and 3 or 1
+-- Legacy variable names kept for compat with existing code below.
+local STAGE_SPAWN_FLIES     = STAGE_SPAWN_ENEMIES
+local STAGE_FLY_COUNT       = STAGE_ENEMY_COUNT
+
 Isaac.DebugString("[isaac-rl-bridge] curriculum stage=" .. STAGE
+    .. " enemy_type=" .. tostring(STAGE_ENEMY_TYPE)
+    .. " enemy_count=" .. tostring(STAGE_ENEMY_COUNT)
     .. " seal_doors=" .. tostring(STAGE_SEAL_DOORS)
     .. " wipe_enemies=" .. tostring(STAGE_WIPE_ENEMIES)
-    .. " spawn_flies=" .. tostring(STAGE_SPAWN_FLIES)
-    .. " fly_count=" .. tostring(STAGE_FLY_COUNT))
+    .. " spawn_enemies=" .. tostring(STAGE_SPAWN_ENEMIES))
 if STAGE0_MODE then
     Isaac.DebugString("[isaac-rl-bridge] (legacy STAGE0_MODE=1 mapped to stage=A)")
 end
@@ -231,14 +244,15 @@ function stage0_spawn_fly(player)
         spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
     end
 
-    -- Attack Fly (EntityType.ENTITY_ATTACKFLY = 18).
-    local fly = Isaac.Spawn(EntityType.ENTITY_ATTACKFLY, 0, 0, spawn_pos, Vector(0, 0), nil)
+    -- Attack Fly (18) is homing. Horf (26) is stationary shooter. Both spawned
+    -- via Isaac.Spawn(entity_type, variant, subtype, pos, vel, spawner).
+    local fly = Isaac.Spawn(STAGE_ENEMY_TYPE, STAGE_ENEMY_VARIANT, 0, spawn_pos, Vector(0, 0), nil)
     if fly then
         fly:ClearEntityFlags(EntityFlag.FLAG_FRIENDLY)
         fly:ClearEntityFlags(EntityFlag.FLAG_CHARM)
         local d = (spawn_pos - player.Position):Length()
-        Isaac.DebugString("[isaac-rl-bridge] STAGE0: spawned Attack Fly at ("
-            .. tostring(math.floor(spawn_pos.X)) .. ", " .. tostring(math.floor(spawn_pos.Y))
+        Isaac.DebugString("[isaac-rl-bridge] STAGE=" .. STAGE .. ": spawned type=" .. tostring(STAGE_ENEMY_TYPE)
+            .. " at (" .. tostring(math.floor(spawn_pos.X)) .. ", " .. tostring(math.floor(spawn_pos.Y))
             .. ") player=(" .. tostring(math.floor(player.Position.X))
             .. ", " .. tostring(math.floor(player.Position.Y)) .. ") dist="
             .. tostring(math.floor(d)))

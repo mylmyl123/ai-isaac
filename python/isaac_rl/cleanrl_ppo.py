@@ -83,13 +83,20 @@ class PPOConfig:
     n_epochs: int = 4                 # passes over rollout per update
     n_minibatches: int = 4
     lr: float = 3.0e-4
-    gamma: float = 0.99
+    gamma: float = 0.995
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.003
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
-    anneal_lr: bool = True
+    anneal_lr: bool = False
+    lr_floor_frac: float = 0.1       # Never anneal below lr * lr_floor_frac.
+
+    # ---- Action masking (Phase-1 fix) ----
+    # Some stages don't use all 5 action factors. Masking forces the unused
+    # factors to a fixed value (0) at sample time so their entropy doesn't
+    # bleed into the loss. See swarm-outputs/01-red-team-audit.md.
+    mask_unused_action_factors: bool = True
 
     # ---- Network ----
     hidden_dim: int = 256
@@ -130,8 +137,15 @@ class ActorCritic(nn.Module):
 
     Action heads: one Linear layer per MultiDiscrete factor. Factor k has
     ACTION_FACTORS[k] logits. Sampling is independent across factors.
+
+    Optional action masking: `active_factors` (int) restricts the LOSS to
+    the first N factors. The remaining K-N factors are still sampled (so the
+    env gets a valid action vector) but forced to 0, and their log_prob /
+    entropy are excluded from the loss. Prevents the entropy bonus from
+    leaking into useless action heads (drop_bomb / use_pillcard on Stage 0).
     """
-    def __init__(self, obs_dim: int, hidden_dim: int, n_layers: int):
+    def __init__(self, obs_dim: int, hidden_dim: int, n_layers: int,
+                 active_factors: int | None = None):
         super().__init__()
         layers: list[nn.Module] = []
         d = obs_dim
@@ -144,6 +158,12 @@ class ActorCritic(nn.Module):
             [nn.Linear(hidden_dim, int(n_choices)) for n_choices in ACTION_FACTORS]
         )
         self.value_head = nn.Linear(hidden_dim, 1)
+
+        # How many action factors participate in the loss.
+        n_all = len(ACTION_FACTORS)
+        if active_factors is None or active_factors < 1 or active_factors > n_all:
+            active_factors = n_all
+        self.active_factors = int(active_factors)
         # Orthogonal init (standard for PPO stability).
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -161,18 +181,25 @@ class ActorCritic(nn.Module):
         return dists, v
 
     def act(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sample action + return logprob, entropy, value. All shape (B,) or (B, K)."""
+        """Sample action + return logprob, entropy, value. All shape (B,) or (B, K).
+        Masked factors are sampled but forced to 0 and NOT included in logprob/entropy."""
         dists, v = self.forward(x)
         actions = torch.stack([d.sample() for d in dists], dim=-1)   # (B, K)
-        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(dists)], dim=-1).sum(-1)
-        ent = torch.stack([d.entropy() for d in dists], dim=-1).sum(-1)
+        # Zero out masked factors so env gets a deterministic "idle" action there.
+        if self.active_factors < len(dists):
+            actions[:, self.active_factors:] = 0
+        active = dists[:self.active_factors]
+        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
+        ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
         return actions, logp, ent, v
 
     def evaluate(self, x: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Recompute logprob + entropy + value for GIVEN actions (PPO update)."""
+        """Recompute logprob + entropy + value for GIVEN actions (PPO update).
+        Only over ACTIVE factors (must match act())."""
         dists, v = self.forward(x)
-        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(dists)], dim=-1).sum(-1)
-        ent = torch.stack([d.entropy() for d in dists], dim=-1).sum(-1)
+        active = dists[:self.active_factors]
+        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
+        ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
         return logp, ent, v
 
 
@@ -230,7 +257,18 @@ def train(cfg: PPOConfig, env) -> None:
     np.random.seed(cfg.seed)
 
     obs_dim = _obs_dim(env)
-    net = ActorCritic(obs_dim, cfg.hidden_dim, cfg.n_hidden_layers).to(device)
+    # Determine how many action factors are active for this stage.
+    # Stages 0, A, B use only move + shoot. Stages C, D, E use all 5.
+    n_all = len(ACTION_FACTORS)
+    if cfg.mask_unused_action_factors and str(cfg.stage) in ("0", "A", "B"):
+        active_factors = 2
+    else:
+        active_factors = n_all
+    log.info("action factors: %d active out of %d (stage=%s mask=%s)",
+             active_factors, n_all, cfg.stage, cfg.mask_unused_action_factors)
+
+    net = ActorCritic(obs_dim, cfg.hidden_dim, cfg.n_hidden_layers,
+                      active_factors=active_factors).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
 
     n_factors = len(ACTION_FACTORS)
@@ -295,11 +333,16 @@ def train(cfg: PPOConfig, env) -> None:
     while global_step < cfg.total_env_steps:
         update += 1
 
-        # Anneal LR linearly to zero.
+        # LR anneal with a floor. Setting anneal_lr=False disables entirely.
+        # If enabled, LR is annealed linearly from `lr` to `lr * lr_floor_frac`
+        # instead of to zero. Prior Stage A run froze the policy at LR=4.8e-7,
+        # preventing recovery from any local optimum. Floor at 10% (default)
+        # keeps the policy learning throughout the whole budget.
         if cfg.anneal_lr:
             frac = 1.0 - (global_step / cfg.total_env_steps)
+            frac = max(frac, cfg.lr_floor_frac)
             for pg in optimizer.param_groups:
-                pg["lr"] = cfg.lr * max(frac, 0.0)
+                pg["lr"] = cfg.lr * frac
 
         # -------- ROLLOUT --------
         for t in range(cfg.rollout_length):

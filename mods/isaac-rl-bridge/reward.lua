@@ -17,6 +17,10 @@ R.stats = {
     total_damage_taken = 0,
     kills = 0,
 }
+-- Per-tick set of {InitSeed = true} for entities we've already counted as
+-- killed. Cleared every MC_POST_UPDATE. Prevents overkill double-counting
+-- when multiple tears hit the same enemy on the same tick.
+R._killed_this_tick = {}
 
 function R.push(evt)
     R.buffer[#R.buffer + 1] = evt
@@ -25,11 +29,15 @@ end
 function R.drain()
     local out = R.buffer
     R.buffer = {}
+    -- Clear the per-tick killed-seed set now that the caller (obs.lua) has
+    -- consumed events. Next tick starts with a fresh dedup set.
+    R._killed_this_tick = {}
     return out
 end
 
 function R.reset_run()
     R.buffer = {}
+    R._killed_this_tick = {}
     R.stats.total_damage_dealt = 0
     R.stats.total_damage_taken = 0
     R.stats.kills = 0
@@ -52,7 +60,19 @@ function R.attach(mod)
                 R.stats.total_damage_dealt = R.stats.total_damage_dealt + amount
                 local hp_after = math.max(0, entity.HitPoints - amount)
                 local killed = hp_after <= 0
-                if killed then R.stats.kills = R.stats.kills + 1 end
+                -- Overkill dedup: if this entity already counted as killed
+                -- on this tick, don't count again. Fixes bug where two tears
+                -- landing on the same tick would both register 'killed=true'
+                -- and inflate kills_mean by 1-2×.
+                local seed = tostring(entity.InitSeed or 0)
+                if killed then
+                    if R._killed_this_tick[seed] then
+                        killed = false  -- already counted this tick
+                    else
+                        R._killed_this_tick[seed] = true
+                        R.stats.kills = R.stats.kills + 1
+                    end
+                end
                 R.push({
                     kind = "damage_to_npc",
                     dmg = amount,
