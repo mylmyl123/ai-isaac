@@ -107,8 +107,15 @@ class PPOConfig:
     # Dense per-hit reward (2026-07-14). >0 rewards every tear that connects
     # with an enemy (not just kills), giving the shoot head a direction-
     # correlated gradient. Scaled by damage-fraction so r_kill stays dominant.
-    # 0.0 = off (baseline). ~0.3 recommended to break the random shoot head.
+    # 0.0 = off. SUPERSEDED by r_idle (caused park-and-spray); keep off.
     r_hit: float = 0.0
+    # Idle penalty (2026-07-15). Flat per-step penalty once >idle_grace ticks
+    # since the last kill (counter resets on each kill, frozen while no enemy is
+    # present). Makes surviving without killing bleed reward -> fixes the
+    # park-and-spray exploit. grace=12 tracks the mod's respawn cadence so
+    # loitering is penalized but a prompt killer is not. 0.0 = off.
+    r_idle: float = -0.005
+    idle_grace: int = 12
 
     # ---- Closer-spawn curriculum (Phase-2 cold-start fix) ----
     # Enemy spawn-distance band (px from player), passed to the mod via env

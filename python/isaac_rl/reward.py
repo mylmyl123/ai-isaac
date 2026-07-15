@@ -1,24 +1,28 @@
-"""Minimal 3-term reward for Isaac RL.
+"""Reward for Isaac RL.
 
-Post 2026-07-13 reset: the previous reward function had 51 terms accumulated
-over 6 months. Un-debuggable — every training failure had 51 plausible root
-causes, and every 'fix' was another shaping tweak that moved the bias.
+Post 2026-07-13 reset: the previous reward had 51 terms accumulated over 6
+months — un-debuggable. Rebuilt minimal, then iterated against observed
+training exploits (each documented below and gated behind a flag).
 
-Three non-zero terms only:
+Active terms (2026-07-15):
 
-    r_kill  = +1     per NPC that dies
-    r_death = -1     on player death
-    r_step  = -0.001 per game tick (mild time pressure)
+    r_kill  = +1      per NPC that dies
+    r_death = -1      on player death
+    r_step  = -0.001  per game tick (mild time pressure)
+    r_idle  = -0.005  per tick once >idle_grace ticks since the last kill
 
-Reward shaping obscures whether learning is happening. If the agent can
-learn 'kill things, don't die,' it will discover on its own that room
-exploration and item pickups are instrumental. Adding shaping again should
-require an ablation study proving it helps.
+The idle penalty ("time since last kill") is the fix for the park-and-spray
+exploit found in the 2026-07-15 overnight sweep: rewarding hits directly
+(r_hit) let the agent spray one fixed direction, graze a stationary enemy, and
+survive forever without killing. r_idle instead makes NOT killing hurt more the
+longer it goes on (flat penalty after a short grace window, frozen while no
+enemy is present), so aiming-and-killing strictly dominates loitering. r_hit
+and PBRS are kept but DISABLED by default (=0) so prior runs stay reproducible
+as ablations.
 
-INTERFACE: this shaper is a drop-in replacement for the previous
-RewardShaper — same `__call__`, `reset`, `finalize_episode`,
-`episode_behavior_metrics`, and `state.dead` attributes. env.py still
-works unchanged. All the removed reward terms are silently ignored.
+INTERFACE: drop-in for the previous RewardShaper — same `__call__`, `reset`,
+`finalize_episode`, `episode_behavior_metrics`, and `state.dead`. env.py
+unchanged. Unknown/removed reward terms are silently ignored.
 """
 from __future__ import annotations
 
@@ -43,19 +47,38 @@ class RewardConfig:
     r_kill: float = 1.0
     r_death: float = -1.0
     r_step: float = -0.001
+    # ---- Idle penalty (2026-07-15): "time since last kill" pressure ----
+    # A flat penalty applied every step once it has been more than `idle_grace`
+    # ticks since the last kill (counter resets to 0 on every kill) AND an enemy
+    # is actually present to shoot. This is the fix for the park-and-spray
+    # exploit: a policy that survives without killing bleeds reward the longer
+    # it goes between kills, so the only way to stop the bleeding is to kill.
+    # FLAT-after-grace (not a linear ramp) on purpose — a ramp is quadratic in
+    # the cumulative sum and makes "die immediately" beat "keep trying" (the
+    # suicide trap the original 51-term reward suffered).
+    #
+    # idle_grace=12: the mod respawns the next enemy ~15 game-ticks after the
+    # room empties (main.lua poll), so max kill cadence is ~1 per 15-25 ticks. A
+    # grace ABOVE that (the initial 30) let a lazy "kill every ~30 ticks, loiter
+    # between" policy pay ZERO penalty — the shallow-gradient trap that sank the
+    # prior rewards. 12 sits just under the respawn floor so loitering is
+    # penalized while a prompt killer at the environment's max cadence is not.
+    # The counter is FROZEN while no enemy is visible (see __call__) so the agent
+    # is never penalized for the forced empty-room respawn gap it can't act on.
+    # Verified at r_idle=-0.005, grace=12: a ~90-tick kill cycle nets +0.525,
+    # never-killing a full 1800-tick episode bleeds strongly negative, and
+    # killing beats both idling and suicide. r_idle=0.0 disables it.
+    r_idle: float = -0.005
+    idle_grace: int = 12
     # ---- Dense per-hit reward (Phase-2c cold-start fix) ----
-    # r_hit rewards every tear that CONNECTS with an enemy, not just the
-    # killing blow. On a stationary Horf a tear only lands if fired in the
-    # correct cardinal direction, so each hit is a labeled example of correct
-    # aim — this gives the shoot head a dense, direction-correlated gradient
-    # ~3x more often than kills and with a much shorter credit-assignment lag,
-    # fixing the "shoot head stays uniform-random" failure. Scaled by damage
-    # fraction (dmg / npc_max_hp) so the TOTAL hit reward over one enemy's life
-    # sums to ~r_hit regardless of how many tears it took — r_kill stays the
-    # dominant terminal payoff and hits cannot be farmed. 0.0 = off (baseline).
+    # DISABLED by default (r_hit=0.0). Rewarded every connecting tear, which the
+    # 2026-07-15 overnight sweep showed causes a "park and spray one fixed
+    # direction, graze the enemy, never kill" local optimum — superseded by the
+    # idle penalty above. Kept (off) only so prior runs remain reproducible for
+    # the paper's ablation. Do NOT enable alongside r_idle without an ablation.
     r_hit: float = 0.0
     # ---- PBRS (potential-based reward shaping) ----
-    pbrs_coef: float = 0.0            # 0.0 = off (pure 3-term baseline)
+    pbrs_coef: float = 0.0            # 0.0 = off (pure baseline)
     gamma: float = 0.995              # must match PPOConfig.gamma
 
 
@@ -69,6 +92,9 @@ class RewardState:
     """
     dead: bool = False
     last_phi: float | None = None
+    # Ticks since the last kill (or since episode start). Reset to 0 on every
+    # kill; drives the idle penalty once it exceeds idle_grace.
+    ticks_since_kill: int = 0
 
 
 class RewardShaper:
@@ -92,6 +118,29 @@ class RewardShaper:
         self._episode_total = {}
 
     # ---- PBRS potential ----------------------------------------------------
+
+    def _enemy_present(self, raw_obs: dict[str, Any] | None) -> bool:
+        """True if at least one live enemy is visible in the obs.
+
+        Used to FREEZE the idle counter during the forced empty-room respawn
+        gap (the mod respawns the next enemy a few ticks after the room clears),
+        so a prompt killer isn't idle-penalized for a wait it cannot act on.
+        Prefers the enemy mask; falls back to the feats list, then to a
+        conservative True (no obs info -> keep counting so we never silently
+        disable the penalty). Reads the raw JSON, matching _potential.
+        """
+        if not raw_obs:
+            return True
+        enemies = raw_obs.get("enemies")
+        if not isinstance(enemies, dict):
+            return True
+        mask = enemies.get("mask")
+        if isinstance(mask, list):
+            return any(bool(m) for m in mask)
+        feats = enemies.get("feats")
+        if isinstance(feats, list):
+            return any(bool(row) for row in feats)
+        return True
 
     def _potential(self, raw_obs: dict[str, Any] | None) -> float:
         """Phi(s) for potential-based shaping.
@@ -187,12 +236,14 @@ class RewardShaper:
 
         events = (raw_obs or {}).get("events") or []
         terminated = False
+        killed_this_step = False
         for ev in events:
             kind = ev.get("kind")
             # 2026-07-14: Mod emits kills as {kind: 'damage_to_npc', killed: true}
             # NOT as {kind: 'kill'}. Recognize both for forward-compat.
             if kind == "kill" or (kind == "damage_to_npc" and ev.get("killed")):
                 bd["kill"] = bd.get("kill", 0.0) + self.cfg.r_kill
+                killed_this_step = True
             elif kind == "damage_to_npc" and self.cfg.r_hit != 0.0:
                 # Dense per-hit reward on a NON-lethal connect. A landed tear on
                 # a (stationary) enemy means the shoot head aimed correctly.
@@ -216,6 +267,21 @@ class RewardShaper:
                 bd["death"] = bd.get("death", 0.0) + self.cfg.r_death
                 self.state.dead = True
                 terminated = True
+
+        # Idle penalty: "time since last kill" pressure (2026-07-15). Reset the
+        # counter on a kill (so the killing step itself is never penalized).
+        # Otherwise, only advance/penalize while an enemy is actually PRESENT to
+        # shoot — freezing the counter during the forced empty-room respawn gap
+        # so a prompt killer isn't punished for a wait the environment imposes
+        # (not its fault it can't kill a nonexistent target). Once the counter
+        # exceeds idle_grace, apply the flat r_idle penalty every step. Skipped
+        # on the terminal (death) step. No-op when r_idle == 0.0.
+        if killed_this_step:
+            self.state.ticks_since_kill = 0
+        elif not terminated and self._enemy_present(raw_obs):
+            self.state.ticks_since_kill += 1
+            if self.cfg.r_idle != 0.0 and self.state.ticks_since_kill > self.cfg.idle_grace:
+                bd["idle"] = bd.get("idle", 0.0) + self.cfg.r_idle
 
         # PBRS shaping term F = gamma*Phi(s') - Phi(s), added per non-terminal
         # step (Ng et al. 1999). No-op when pbrs_coef=0. On a terminal step we

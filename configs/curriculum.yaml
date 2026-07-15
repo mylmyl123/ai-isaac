@@ -78,14 +78,21 @@ mask_unused_action_factors: true
 # confirm it is firing. The sparse-vs-PBRS pair is the paper's ablation.
 pbrs_coef: 0.0
 
-# Dense per-hit reward (Phase-2c). Rewards every tear that CONNECTS with the
-# enemy, not just the killing blow — on a stationary Horf a landed tear means
-# correct aim, so this gives the shoot head a dense direction-correlated
-# gradient ~3x per kill (fixes the "shoot head stays random" failure seen at
-# 130k steps). Scaled by damage-fraction so total hit reward per enemy ~= r_hit
-# and r_kill stays dominant. 0.0 = off (baseline). Set ~0.3 to enable.
-# This is the recommended cold-start fix; watch reward/hit + entropy/shoot in TB.
+# Dense per-hit reward (Phase-2c). SUPERSEDED — rewarding every hit caused a
+# park-and-spray exploit (spray one direction, graze the enemy, never kill).
+# Kept off; use r_idle instead. 0.0 = off.
 r_hit: 0.0
+
+# Idle penalty (2026-07-15): "time since last kill" pressure. A flat penalty
+# every step once it's been more than idle_grace ticks since the last kill
+# (counter resets on each kill, and is FROZEN while no enemy is on screen so
+# the agent isn't punished for the respawn gap). Makes surviving-without-
+# killing bleed reward, so aiming-and-killing dominates loitering. grace=12
+# tracks the mod's ~15-tick respawn cadence (a larger window would let a lazy
+# "kill every 30 ticks" policy pay nothing). FLAT (not a ramp) to avoid the
+# "die immediately" trap. r_idle=0.0 disables.
+r_idle: -0.005
+idle_grace: 12
 
 # ---- Closer-spawn curriculum (Phase-2 cold-start fix) --------------------
 # Enemy spawn-distance band (px from player). null = mod default (200-500,
