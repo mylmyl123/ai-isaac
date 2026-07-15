@@ -51,7 +51,14 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from .spaces import ACTION_FACTORS, flatten_dict_obs
+from .spaces import (
+    ACTION_FACTORS,
+    EGO_CHANNELS,
+    EGO_GRID,
+    SCALAR_DIM,
+    flatten_dict_obs,
+    split_obs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +280,139 @@ class ActorCritic(nn.Module):
 
 
 # ==========================================================================
+# CNN ACTOR-CRITIC (2026-07-15 architecture rebuild)
+# ==========================================================================
+
+
+class CNNActorCritic(nn.Module):
+    """Egocentric-grid CNN + scalar-MLP fusion -> factored action heads + value.
+
+    Replaces the flat-MLP ActorCritic that was measurably BLIND to enemy
+    position (constant shoot direction regardless of bearing). Inputs are TWO
+    tensors from spaces.split_obs():
+      * grid   (B, 14, 21, 21) — egocentric spatial image, fed UNNORMALIZED
+        (already in [-1,1]; normalizing sparse presence planes destroys the
+        zero baseline the CNN relies on).
+      * scalar (B, 161)        — low-D vector, Welford-normalized here.
+
+    ReLU everywhere (escapes the Tanh saturation that caused the blindness),
+    orthogonal init gain=sqrt(2) on the ReLU path. Keeps the factored
+    MultiDiscrete heads + active_factors masking identical to the MLP version.
+
+    NON-RECURRENT (phase 1). forward(grid, scalar) is stateless so the offline
+    bearing probe (single frame) works. The GRU is added in phase 2 only after
+    this passes the probe.
+    """
+    def __init__(self, hidden_dim: int = 256, active_factors: int | None = None,
+                 normalize_obs: bool = True):
+        super().__init__()
+        # Welford normalizer over the SCALAR branch only (grid stays raw).
+        self.normalize_obs = bool(normalize_obs)
+        self.register_buffer("obs_mean", torch.zeros(SCALAR_DIM))
+        self.register_buffer("obs_var", torch.ones(SCALAR_DIM))
+        self.register_buffer("obs_count", torch.tensor(1e-4))
+
+        # CNN tower over the 14x21x21 grid.
+        self.cnn = nn.Sequential(
+            nn.Conv2d(EGO_CHANNELS, 32, kernel_size=3, stride=1, padding=1), nn.ReLU(),  # 21x21
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),            # 11x11
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),            # 6x6
+        )
+        cnn_flat = 64 * 6 * 6  # 2304
+        self.cnn_fc = nn.Sequential(nn.Linear(cnn_flat, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU())
+
+        # Scalar branch.
+        self.scalar_mlp = nn.Sequential(
+            nn.Linear(SCALAR_DIM, 128), nn.LayerNorm(128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+        )
+
+        # Fusion trunk.
+        self.fuse = nn.Sequential(
+            nn.Linear(hidden_dim + 128, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
+        )
+
+        # Separate post-trunk actor / critic heads.
+        self.actor_mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
+        self.critic_mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
+        self.action_heads = nn.ModuleList(
+            [nn.Linear(hidden_dim, int(n_choices)) for n_choices in ACTION_FACTORS]
+        )
+        self.value_head = nn.Linear(hidden_dim, 1)
+        # Optional aux head: predict unit-vec-to-nearest-enemy (label from
+        # spaces.nearest_enemy_bearing). Forces the CNN to encode bearing; used
+        # with a small MSE aux loss. Off unless the trainer wires it.
+        self.aux_bearing = nn.Linear(hidden_dim, 2)
+
+        n_all = len(ACTION_FACTORS)
+        if active_factors is None or active_factors < 1 or active_factors > n_all:
+            active_factors = n_all
+        self.active_factors = int(active_factors)
+
+        # Init: gain sqrt(2) on the ReLU path, small on action heads, 1 on value.
+        for m in self.modules():
+            if isinstance(m, (nn.Linear, nn.Conv2d)):
+                nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain("relu"))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+        for head in self.action_heads:
+            nn.init.orthogonal_(head.weight, gain=0.01)
+        nn.init.orthogonal_(self.value_head.weight, gain=1.0)
+
+    @torch.no_grad()
+    def update_norm(self, scalar: torch.Tensor) -> None:
+        """Update running mean/var from a batch of SCALAR vectors (rollout only)."""
+        if not self.normalize_obs:
+            return
+        batch_mean = scalar.mean(dim=0)
+        batch_var = scalar.var(dim=0, unbiased=False)
+        batch_count = float(scalar.shape[0])
+        delta = batch_mean - self.obs_mean
+        tot = self.obs_count + batch_count
+        self.obs_mean += delta * (batch_count / tot)
+        m_a = self.obs_var * self.obs_count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta.pow(2) * (self.obs_count * batch_count / tot)
+        self.obs_var.copy_(m2 / tot)
+        self.obs_count.copy_(tot)
+
+    def _norm_scalar(self, scalar: torch.Tensor) -> torch.Tensor:
+        if not self.normalize_obs:
+            return scalar
+        return torch.clamp((scalar - self.obs_mean) / torch.sqrt(self.obs_var + 1e-8), -10.0, 10.0)
+
+    def _trunk(self, grid: torch.Tensor, scalar: torch.Tensor) -> torch.Tensor:
+        g = self.cnn(grid)
+        g = self.cnn_fc(g.reshape(g.shape[0], -1))
+        s = self.scalar_mlp(self._norm_scalar(scalar))
+        return self.fuse(torch.cat([g, s], dim=-1))
+
+    def forward(self, grid: torch.Tensor, scalar: torch.Tensor):
+        h = self._trunk(grid, scalar)
+        ha = self.actor_mlp(h)
+        dists = [Categorical(logits=head(ha)) for head in self.action_heads]
+        v = self.value_head(self.critic_mlp(h)).squeeze(-1)
+        return dists, v
+
+    def act(self, grid: torch.Tensor, scalar: torch.Tensor):
+        dists, v = self.forward(grid, scalar)
+        actions = torch.stack([d.sample() for d in dists], dim=-1)
+        if self.active_factors < len(dists):
+            actions[:, self.active_factors:] = 0
+        active = dists[:self.active_factors]
+        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
+        ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
+        return actions, logp, ent, v
+
+    def evaluate(self, grid: torch.Tensor, scalar: torch.Tensor, actions: torch.Tensor):
+        dists, v = self.forward(grid, scalar)
+        active = dists[:self.active_factors]
+        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
+        ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
+        return logp, ent, v
+
+
+# ==========================================================================
 # ROLLOUT BUFFER
 # ==========================================================================
 
@@ -336,12 +476,27 @@ def train(cfg: PPOConfig, env) -> None:
     log.info("action factors: %d active out of %d (stage=%s mask=%s)",
              active_factors, n_all, cfg.stage, cfg.mask_unused_action_factors)
 
-    net = ActorCritic(obs_dim, cfg.hidden_dim, cfg.n_hidden_layers,
-                      active_factors=active_factors, normalize_obs=cfg.normalize_obs).to(device)
+    net = CNNActorCritic(hidden_dim=cfg.hidden_dim, active_factors=active_factors,
+                         normalize_obs=cfg.normalize_obs).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
 
     n_factors = len(ACTION_FACTORS)
-    rb = Rollout(cfg.rollout_length, cfg.n_envs, obs_dim, n_factors, device)
+    # CNN rollout storage: grid (T,N,14,21,21) + scalar (T,N,161) instead of a
+    # single flat obs tensor. Reuse the Rollout class for actions/logprobs/
+    # rewards/dones/values/GAE (those are obs-agnostic).
+    T, N = cfg.rollout_length, cfg.n_envs
+    rb = Rollout(T, N, 1, n_factors, device)   # obs_dim=1 placeholder; we don't use rb.obs
+    rb_grid = torch.zeros(T, N, EGO_CHANNELS, EGO_GRID, EGO_GRID, device=device)
+    rb_scalar = torch.zeros(T, N, SCALAR_DIM, device=device)
+
+    def _split_batch(obs_list):
+        """obs dict list -> (grid[N,14,21,21], scalar[N,161]) torch tensors."""
+        grids, scalars = [], []
+        for o in obs_list:
+            g, s = split_obs(o)
+            grids.append(g); scalars.append(s)
+        return (torch.from_numpy(np.stack(grids)).to(device),
+                torch.from_numpy(np.stack(scalars)).to(device))
 
     # ---- Run dir + TB ----
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -373,7 +528,7 @@ def train(cfg: PPOConfig, env) -> None:
 
     # ---- Initial reset ----
     obs_list, _ = env.reset()
-    obs = torch.from_numpy(np.stack([_flat_obs(o) for o in obs_list])).to(device)
+    grid, scalar = _split_batch(obs_list)
     dones = torch.zeros(cfg.n_envs, device=device)
 
     # ---- Episode trackers ----
@@ -427,15 +582,15 @@ def train(cfg: PPOConfig, env) -> None:
 
         # -------- ROLLOUT --------
         for t in range(cfg.rollout_length):
-            rb.obs[t] = obs
+            rb_grid[t] = grid
+            rb_scalar[t] = scalar
             rb.dones[t] = dones
 
-            # Update obs normalization stats from freshly-collected obs ONLY
-            # (not during the PPO update epochs, which reuse this data). No-op
-            # when normalize_obs is disabled.
-            net.update_norm(obs)
+            # Update scalar-branch normalization stats from freshly-collected
+            # obs ONLY (not during the PPO update epochs, which reuse this data).
+            net.update_norm(scalar)
             with torch.no_grad():
-                actions, logp, _, values = net.act(obs)
+                actions, logp, _, values = net.act(grid, scalar)
             rb.actions[t] = actions
             rb.logprobs[t] = logp
             rb.values[t] = values
@@ -449,7 +604,7 @@ def train(cfg: PPOConfig, env) -> None:
             done_np = np.logical_or(terms, truncs).astype(np.float32)
 
             rb.rewards[t] = torch.from_numpy(np.asarray(rewards, dtype=np.float32)).to(device)
-            obs = torch.from_numpy(np.stack([_flat_obs(o) for o in next_obs_list])).to(device)
+            grid, scalar = _split_batch(next_obs_list)
             dones = torch.from_numpy(done_np).to(device)
 
             # Episode-return bookkeeping.
@@ -493,11 +648,12 @@ def train(cfg: PPOConfig, env) -> None:
 
         # -------- COMPUTE GAE --------
         with torch.no_grad():
-            _, _, _, next_value = net.act(obs)
+            _, _, _, next_value = net.act(grid, scalar)
         advantages, returns = rb.compute_gae(next_value, dones, cfg.gamma, cfg.gae_lambda)
 
         # Flatten (T, N, ...) -> (T*N, ...)
-        b_obs = rb.obs.reshape(-1, obs_dim)
+        b_grid = rb_grid.reshape(-1, EGO_CHANNELS, EGO_GRID, EGO_GRID)
+        b_scalar = rb_scalar.reshape(-1, SCALAR_DIM)
         b_actions = rb.actions.reshape(-1, n_factors)
         b_logprobs = rb.logprobs.reshape(-1)
         b_advantages = advantages.reshape(-1)
@@ -523,7 +679,7 @@ def train(cfg: PPOConfig, env) -> None:
             for start in range(0, batch_size, minibatch_size):
                 mb = b_inds[start:start + minibatch_size]
 
-                new_logp, new_ent, new_v = net.evaluate(b_obs[mb], b_actions[mb])
+                new_logp, new_ent, new_v = net.evaluate(b_grid[mb], b_scalar[mb], b_actions[mb])
                 ratio = torch.exp(new_logp - b_logprobs[mb])
                 # Advantages already normalized batch-level above (Phase 2).
                 mb_adv = b_advantages[mb]
@@ -587,7 +743,7 @@ def train(cfg: PPOConfig, env) -> None:
             # Recompute distribution entropy per factor from the last minibatch's
             # obs so we get a fresh reading (not just the mean over updates).
             with torch.no_grad():
-                dists, _ = net.forward(b_obs[:min(256, batch_size)])
+                dists, _ = net.forward(b_grid[:min(256, batch_size)], b_scalar[:min(256, batch_size)])
             factor_names = ["move", "shoot", "use_item", "drop_bomb", "use_pillcard"]
             for k, d in enumerate(dists):
                 name = factor_names[k] if k < len(factor_names) else f"factor_{k}"

@@ -99,6 +99,12 @@ HISTORY_FRAMES = 4
 HISTORY_FEATS = 4                                    # (nx, ny, vx, vy)
 PLAYER_HISTORY_DIM = HISTORY_FRAMES * HISTORY_FEATS  # 4 * 4 = 16
 
+# Egocentric CNN grid (2026-07-15 architecture rebuild). 14 channels, 21x21,
+# player-centered. Built in the Lua mod (obs.lua build_ego_grid); channel order
+# MUST match. See that function's comment for the per-channel meaning.
+EGO_CHANNELS = 14
+EGO_GRID = 21
+
 # B4: Per-episode latent variable z ~ N(0, I). Sampled at reset,
 # constant for the whole episode. Encourages strategic diversity.
 Z_DIM = 16
@@ -109,6 +115,9 @@ def observation_space() -> spaces.Dict:
         "player":     spaces.Box(-np.inf, np.inf, shape=(PLAYER_DIM,), dtype=np.float32),
         "passives":   spaces.MultiBinary(PASSIVES_K),
         "room_grid":  spaces.Box(0.0, 1.0, shape=(4, ROOM_H, ROOM_W), dtype=np.float32),
+        # Egocentric CNN grid (2026-07-15). The primary spatial input for the
+        # new CNN architecture. 14 channels, player-centered 21x21.
+        "ego_grid":   spaces.Box(-1.0, 1.0, shape=(EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32),
         "doors":      spaces.Box(0.0, 1.0, shape=(4, DOOR_FEATS), dtype=np.float32),
         "enemies": spaces.Dict({
             "feats": spaces.Box(-np.inf, np.inf, shape=(MAX_ENEMIES, ENEMY_FEATS), dtype=np.float32),
@@ -208,6 +217,25 @@ def _decode_room_grid(raw: dict | None) -> np.ndarray:
         if n:
             grid[ch].reshape(-1)[:n] = np.asarray(arr[:n], dtype=np.float32)
     return grid
+
+
+def _decode_ego_grid(raw: list | None) -> np.ndarray:
+    """Decode the egocentric CNN grid: 14 channels of flat 441-length arrays
+    (Lua build_ego_grid) -> (14, 21, 21) float32, clipped to [-1, 1].
+
+    raw is a list of 14 flat arrays (channel-major, row-major within channel).
+    Missing/short arrays zero-fill (schema-safe if the mod hasn't been updated).
+    """
+    out = np.zeros((EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32)
+    if not raw:
+        return out
+    for ch in range(min(EGO_CHANNELS, len(raw))):
+        arr = raw[ch] or []
+        n = min(len(arr), EGO_GRID * EGO_GRID)
+        if n:
+            out[ch].reshape(-1)[:n] = np.asarray(arr[:n], dtype=np.float32)
+    np.clip(out, -1.0, 1.0, out=out)
+    return out
 
 
 def _decode_doors(raw: list | None) -> np.ndarray:
@@ -511,6 +539,7 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
 
     obs["passives"] = _decode_passives(raw.get("passives"))
     obs["room_grid"] = _decode_room_grid(raw.get("room_grid"))
+    obs["ego_grid"] = _decode_ego_grid(raw.get("ego_grid"))
     obs["doors"] = _decode_doors(raw.get("doors"))
     obs["spatial"] = _compute_spatial(raw)
 
@@ -573,6 +602,7 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         "player": obs["player"],
         "passives": obs["passives"].astype(np.float32),
         "room_grid": obs["room_grid"],
+        "ego_grid": obs.get("ego_grid", np.zeros((EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32)),
         "doors": obs["doors"],
         "global": obs["global"],
         "last_action": obs["last_action"],
@@ -594,3 +624,53 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         out[f"{key}_feats"] = obs[key]["feats"]
         out[f"{key}_mask"] = obs[key]["mask"].astype(np.float32)
     return out
+
+
+# ==========================================================================
+# CNN-architecture obs split (2026-07-15 rebuild)
+# ==========================================================================
+#
+# The new CNN+GRU network consumes TWO tensors, not the flat concat:
+#   * ego_grid: (14, 21, 21) spatial image -> CNN tower (UNnormalized)
+#   * scalar:   (SCALAR_DIM,) low-D vector -> MLP branch (Welford-normalized)
+#
+# The scalar vector deliberately EXCLUDES spatial[8:10] (unit-vec-to-nearest-
+# enemy + inv-dist). Those are kept ONLY as a bearing-probe label / optional
+# aux target — feeding them into the policy would let the shoot head bypass the
+# CNN and make the probe circular (it would "aim" via the shortcut, not via
+# learned spatial reasoning). The whole point is to prove the CNN can aim.
+
+# scalar layout: player(40) + global(20) + doors(4*18=72) + last_action(5)
+#              + spatial[0:8](8) + z(16) = 161
+SCALAR_DIM = PLAYER_DIM + GLOBAL_DIM + (4 * DOOR_FEATS) + len(ACTION_FACTORS) + 8 + Z_DIM
+
+
+def split_obs(obs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Split an encoded obs dict into (ego_grid, scalar) for the CNN network.
+
+    ego_grid: (14, 21, 21) float32 (fed raw to the CNN, already in [-1,1]).
+    scalar:   (SCALAR_DIM,) float32 (Welford-normalized in the net).
+    """
+    grid = obs.get("ego_grid")
+    if grid is None:
+        grid = np.zeros((EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32)
+    grid = np.asarray(grid, dtype=np.float32)
+
+    spatial = np.asarray(obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)), dtype=np.float32)
+    parts = [
+        np.asarray(obs["player"], dtype=np.float32).reshape(-1),
+        np.asarray(obs["global"], dtype=np.float32).reshape(-1),
+        np.asarray(obs["doors"], dtype=np.float32).reshape(-1),
+        np.asarray(obs["last_action"], dtype=np.float32).reshape(-1),
+        spatial[:8],                       # EXCLUDE 8:10 (aim shortcut) — probe label only
+        np.asarray(obs.get("z", np.zeros(Z_DIM, dtype=np.float32)), dtype=np.float32).reshape(-1),
+    ]
+    scalar = np.concatenate(parts).astype(np.float32)
+    return grid, scalar
+
+
+def nearest_enemy_bearing(obs: dict[str, Any]) -> np.ndarray:
+    """The (unit_dx, unit_dy) to nearest enemy — spatial dims 8:10 without
+    inv-dist. This is the bearing-probe LABEL (never fed to the policy)."""
+    spatial = np.asarray(obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)), dtype=np.float32)
+    return spatial[8:10].copy()
