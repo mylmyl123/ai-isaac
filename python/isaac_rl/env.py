@@ -356,21 +356,30 @@ class SocketIsaacEnv(gym.Env):
             # Advance frame-stack even on crash to avoid stale history.
             self._update_player_history(crash_raw)
             obs = self._build_obs(crash_raw)
+            # PBRS terminal correction on the crash path too: finalize_episode
+            # applies -Phi(s_last) with Phi(terminal)=0. Without this, a crash
+            # episode leaves an uncancelled potential residual and breaks the
+            # Ng-1999 policy-invariance guarantee. No-op when PBRS is disabled.
+            crash_reward = -1.0
+            pbrs_total, pbrs_bd = self.reward_shaper.finalize_episode("isaac_crash")
+            crash_reward += pbrs_total
             info: dict[str, Any] = {
                 "raw": _crash_penalty_obs(self.port),
                 "steps": self._steps,
-                "reward_breakdown": {"crash_penalty": -1.0},
+                "reward_breakdown": {"crash_penalty": -1.0, **pbrs_bd},
                 "crashed": True,
                 "ep_end_reason": "isaac_crash",
                 "behavior_metrics": self.reward_shaper.episode_behavior_metrics(),
             }
-            # Fold crash_penalty into the per-episode running sum, then emit
-            # the whole episode-total breakdown.
+            # Fold crash_penalty (+ any PBRS terminal correction) into the
+            # per-episode running sum, then emit the whole episode-total breakdown.
             self._episode_breakdown["crash_penalty"] = (
                 self._episode_breakdown.get("crash_penalty", 0.0) - 1.0
             )
+            for k, v in pbrs_bd.items():
+                self._episode_breakdown[k] = self._episode_breakdown.get(k, 0.0) + v
             info["reward_breakdown_episode"] = dict(self._episode_breakdown)
-            return obs, -1.0, True, False, info
+            return obs, crash_reward, True, False, info
 
         self._last_action = a
         self._steps += 1

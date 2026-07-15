@@ -110,11 +110,17 @@ class IsaacFleet:
     - Auto-respawn on crash via register_on_crash callbacks
     """
 
-    def __init__(self, binary: str, base_port: int, n_envs: int, stage: str):
+    def __init__(self, binary: str, base_port: int, n_envs: int, stage: str,
+                 spawn_min: float | None = None, spawn_max: float | None = None):
         self.binary = binary
         self.base_port = base_port
         self.n_envs = n_envs
         self.stage = stage.upper()
+        # Closer-spawn curriculum (Phase 2): passed to the mod via env vars.
+        # None = mod uses its defaults (200-500px). Set narrower/closer to
+        # bootstrap the sparse cold start; widen across runs to anneal out.
+        self.spawn_min = spawn_min
+        self.spawn_max = spawn_max
         self.procs: list[subprocess.Popen] = []
 
     def _install_dir(self) -> Path:
@@ -156,6 +162,10 @@ class IsaacFleet:
         env = os.environ.copy()
         env["ISAAC_RL_PORT"] = str(port)
         env["ISAAC_RL_STAGE"] = self.stage
+        if self.spawn_min is not None:
+            env["ISAAC_RL_SPAWN_MIN"] = str(self.spawn_min)
+        if self.spawn_max is not None:
+            env["ISAAC_RL_SPAWN_MAX"] = str(self.spawn_max)
 
         cmd = [self.binary, "--luadebug", "--set-stage=1"]
         log.info("[isaac %d/%d] port=%d stage=%s cwd=%s",
@@ -289,7 +299,8 @@ def main() -> int:
         if not binary:
             log.error("could not find Isaac binary. Pass --isaac <path> or use --no-launch-isaac.")
             return 2
-        fleet = IsaacFleet(binary=binary, base_port=cfg.base_port, n_envs=cfg.n_envs, stage=cfg.stage)
+        fleet = IsaacFleet(binary=binary, base_port=cfg.base_port, n_envs=cfg.n_envs, stage=cfg.stage,
+                           spawn_min=cfg.spawn_min, spawn_max=cfg.spawn_max)
         for i in range(cfg.n_envs):
             register_on_crash(cfg.base_port + i, fleet.respawn)
         fleet.spawn()
@@ -298,13 +309,17 @@ def main() -> int:
              cfg.n_envs, cfg.base_port, cfg.base_port + cfg.n_envs - 1)
 
     # ---- Build the vec env (accepts sockets, does handshake) ----
+    # PBRS needs the trainer's gamma to keep the shaping term policy-invariant
+    # (Ng 1999). pbrs_coef=0 (default) => pure 3-term reward baseline.
+    reward_cfg = RewardConfig(gamma=cfg.gamma, pbrs_coef=cfg.pbrs_coef)
+    log.info("reward: 3-term + pbrs_coef=%.4g (gamma=%.4g)", cfg.pbrs_coef, cfg.gamma)
     env = build_vec_env(
         n_envs=cfg.n_envs,
         base_port=cfg.base_port,
         reset_stage=cfg.reset_stage,
         max_episode_steps=cfg.max_episode_steps,
         launch_isaac=False,               # WE own the fleet, not vec_env
-        reward_config=RewardConfig(),     # 3-term reward
+        reward_config=reward_cfg,
     )
 
     try:

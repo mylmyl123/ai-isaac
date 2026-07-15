@@ -32,20 +32,32 @@ class RewardConfig:
 
     Do not add more terms here without an experiment showing the addition
     helps. Reward-shaping accumulation caused the previous project reset.
+
+    PBRS (2026-07-14): optional potential-based shaping for the sparse-reward
+    cold start. Ng et al. 1999 form F = gamma*Phi(s') - Phi(s); provably
+    optimal-policy-invariant, so it only densifies the signal, never changes
+    the optimum. DISABLED by default (pbrs_coef=0.0) — the 3-term reward is
+    still the baseline. `gamma` MUST equal the trainer's gamma (PPOConfig /
+    curriculum.yaml) for the invariance guarantee to hold.
     """
     r_kill: float = 1.0
     r_death: float = -1.0
     r_step: float = -0.001
+    # ---- PBRS (potential-based reward shaping) ----
+    pbrs_coef: float = 0.0            # 0.0 = off (pure 3-term baseline)
+    gamma: float = 0.995              # must match PPOConfig.gamma
 
 
 @dataclass
 class RewardState:
     """Minimal state persisted across a single episode.
 
-    Only `dead` is used externally (by env.py's mod_restart path). Kept as
-    a dataclass so `state.dead = True` reads naturally.
+    `dead` is used externally (by env.py's mod_restart path). `last_phi` holds
+    Phi(s) of the previous step for the PBRS telescoping term; None before the
+    first potential is computed.
     """
     dead: bool = False
+    last_phi: float | None = None
 
 
 class RewardShaper:
@@ -68,13 +80,64 @@ class RewardShaper:
         self.state = RewardState()
         self._episode_total = {}
 
+    # ---- PBRS potential ----------------------------------------------------
+
+    def _potential(self, raw_obs: dict[str, Any] | None) -> float:
+        """Phi(s) for potential-based shaping.
+
+        Phi(s) = -(normalized distance from player to nearest live enemy),
+        in [-~1.4, 0]: 0 when on top of the enemy (best), more negative when
+        far. Maximizing discounted sum of F = gamma*Phi(s')-Phi(s) rewards
+        CLOSING distance to the enemy, which densifies the aim/approach signal
+        without a kill. Returns 0.0 when disabled or no enemy is visible (so
+        F contributes nothing on enemy-less frames).
+
+        Uses the enemy relative-offset features the mod already emits
+        (obs.lua build_enemies: feats[2],feats[3] = (ex-px)/480, (ey-py)/270),
+        so no new obs field is needed. Reads the raw JSON, not the encoded obs.
+        """
+        if self.cfg.pbrs_coef == 0.0 or not raw_obs:
+            return 0.0
+        enemies = raw_obs.get("enemies") or {}
+        feats = enemies.get("feats") or []
+        mask = enemies.get("mask") or []
+        best = None
+        for i, row in enumerate(feats):
+            if not row or (i < len(mask) and not mask[i]):
+                continue
+            # feats[2]=rel_x/480, feats[3]=rel_y/270 (normalized offsets).
+            try:
+                rx = float(row[2]); ry = float(row[3])
+            except (IndexError, TypeError, ValueError):
+                continue
+            d = (rx * rx + ry * ry) ** 0.5
+            if best is None or d < best:
+                best = d
+        if best is None:
+            return 0.0            # no visible enemy -> flat potential
+        return -best
+
     def finalize_episode(self, reason: str) -> tuple[float, dict[str, float]]:
         """Called at env-side terminal-obs handoff. Returns (total, breakdown).
 
-        Old shaper emitted outcome bonuses here (survival, depth, efficiency).
-        This shaper emits nothing — 3-term reward means no end-of-episode bonus.
-        Kept as a stub so env.py doesn't need to be touched.
+        PBRS terminal correction (CRITICAL for invariance): Ng-1999 requires
+        Phi(terminal)=0, so the final transition contributes
+        F = gamma*Phi(terminal) - Phi(s_last) = -Phi(s_last). The mod_restart
+        and isaac_crash terminal paths in env.py bypass __call__ entirely and
+        only call THIS method, so the terminal correction MUST live here or the
+        uncancelled -Phi(s_last) residual silently breaks policy-invariance.
+        Fires once per episode; guarded by last_phi being set + not already
+        consumed.
         """
+        bd: dict[str, float] = {}
+        if self.cfg.pbrs_coef != 0.0 and self.state.last_phi is not None:
+            # F_terminal = gamma*0 - Phi(s_last), scaled by pbrs_coef.
+            f_term = self.cfg.pbrs_coef * (-self.state.last_phi)
+            bd["pbrs"] = f_term
+            self.state.last_phi = None   # consumed; don't double-apply
+            for k, v in bd.items():
+                self._episode_total[k] = self._episode_total.get(k, 0.0) + v
+            return f_term, bd
         return 0.0, {}
 
     def episode_behavior_metrics(self) -> dict[str, float]:
@@ -132,6 +195,20 @@ class RewardShaper:
                 bd["death"] = bd.get("death", 0.0) + self.cfg.r_death
                 self.state.dead = True
                 terminated = True
+
+        # PBRS shaping term F = gamma*Phi(s') - Phi(s), added per non-terminal
+        # step (Ng et al. 1999). No-op when pbrs_coef=0. On a terminal step we
+        # do NOT add the running term here — finalize_episode() applies the
+        # -Phi(s_last) correction with Phi(terminal)=0 to keep the telescoping
+        # sum (and thus policy-invariance) exact. last_phi carries Phi(s) across
+        # steps; on the first step (last_phi None) there is no previous state so
+        # the term is skipped and we just seed last_phi.
+        if self.cfg.pbrs_coef != 0.0 and not terminated:
+            phi_now = self._potential(raw_obs)
+            if self.state.last_phi is not None:
+                f = self.cfg.pbrs_coef * (self.cfg.gamma * phi_now - self.state.last_phi)
+                bd["pbrs"] = bd.get("pbrs", 0.0) + f
+            self.state.last_phi = phi_now
 
         total = sum(bd.values())
         # Fold into per-episode running total.

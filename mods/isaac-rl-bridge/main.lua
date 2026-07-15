@@ -114,9 +114,23 @@ local STAGE_ENEMY_COUNT     = (STAGE == "B") and 3 or 1
 local STAGE_SPAWN_FLIES     = STAGE_SPAWN_ENEMIES
 local STAGE_FLY_COUNT       = STAGE_ENEMY_COUNT
 
+-- Spawn-distance band (Phase 2, 2026-07-14). The enemy spawns between MIN and
+-- MAX pixels from the player. Read from env vars so train.py can ANNEAL the
+-- band outward over training (closer-spawn curriculum for the sparse-reward
+-- cold start: a stationary Horf far away is almost never hit by a random
+-- policy; spawning it close manufactures the first accidental kills, then we
+-- widen back to the full 200-500px anti-camp task). Defaults preserve the
+-- prior 200-500 behavior when the vars are unset. A floor keeps the enemy far
+-- enough that its own shots don't instakill on spawn.
+local SPAWN_DIST_MIN = tonumber(os.getenv("ISAAC_RL_SPAWN_MIN") or "") or 200
+local SPAWN_DIST_MAX = tonumber(os.getenv("ISAAC_RL_SPAWN_MAX") or "") or 500
+if SPAWN_DIST_MIN < 60 then SPAWN_DIST_MIN = 60 end          -- anti-instakill floor
+if SPAWN_DIST_MAX < SPAWN_DIST_MIN then SPAWN_DIST_MAX = SPAWN_DIST_MIN + 40 end
+
 Isaac.DebugString("[isaac-rl-bridge] curriculum stage=" .. STAGE
     .. " enemy_type=" .. tostring(STAGE_ENEMY_TYPE)
     .. " enemy_count=" .. tostring(STAGE_ENEMY_COUNT)
+    .. " spawn_band=" .. tostring(SPAWN_DIST_MIN) .. "-" .. tostring(SPAWN_DIST_MAX)
     .. " seal_doors=" .. tostring(STAGE_SEAL_DOORS)
     .. " wipe_enemies=" .. tostring(STAGE_WIPE_ENEMIES)
     .. " spawn_enemies=" .. tostring(STAGE_SPAWN_ENEMIES))
@@ -226,7 +240,7 @@ function stage0_spawn_fly(player)
             local ry = y_min + math.random() * (y_max - y_min)
             local candidate = Vector(rx, ry)
             local d = (candidate - player.Position):Length()
-            if d >= 200 and d <= 500 then
+            if d >= SPAWN_DIST_MIN and d <= SPAWN_DIST_MAX then
                 -- Snap to a valid nav position (avoid rocks / pits).
                 local free = Isaac.GetFreeNearPosition(candidate, 40)
                 if free then
@@ -240,11 +254,12 @@ function stage0_spawn_fly(player)
         Isaac.DebugString("[isaac-rl-bridge] random spawn failed: " .. tostring(err))
     end
 
-    -- Fallback: random angle around player at ~300px. Handles tiny rooms
-    -- where the min-distance band is unsatisfiable.
+    -- Fallback: random angle around player at the mid-band distance. Handles
+    -- tiny rooms where the min-distance band is unsatisfiable.
     if not spawn_pos then
+        local mid = (SPAWN_DIST_MIN + SPAWN_DIST_MAX) / 2
         local angle = math.random() * 2 * math.pi
-        local desired = player.Position + Vector(math.cos(angle) * 300, math.sin(angle) * 300)
+        local desired = player.Position + Vector(math.cos(angle) * mid, math.sin(angle) * mid)
         spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
     end
 

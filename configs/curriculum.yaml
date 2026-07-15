@@ -65,3 +65,23 @@ log_every_updates: 1
 # Stages 0, A, B don't need item/bomb/pillcard actions. Masking them at
 # sample time removes entropy leakage from the 3 useless factors.
 mask_unused_action_factors: true
+
+# ---- Reward shaping (Phase-2 cold-start fix) ------------------------------
+# PBRS coefficient. 0.0 = pure 3-term reward (the honest sparse BASELINE —
+# run this first to measure the stall). Set >0 (e.g. 0.1) to enable the
+# potential-based distance-to-enemy shaping that densifies the signal so a
+# stationary Horf can be learned. Provably policy-invariant (Ng 1999): same
+# optimum, only faster. The sparse-vs-PBRS pair is the paper's ablation.
+pbrs_coef: 0.0
+
+# ---- Closer-spawn curriculum (Phase-2 cold-start fix) --------------------
+# Enemy spawn-distance band (px from player). null = mod default (200-500,
+# the full anti-camp task). To bootstrap the sparse cold start on a stationary
+# Horf, set a closer band (e.g. spawn_min=90, spawn_max=170) so a random
+# policy lands its first accidental kills, then relaunch with a wider band to
+# anneal out. Report the band as a distance curriculum in the paper; the final
+# result MUST be at the wide 200-500 band or the anti-camp claim is void.
+spawn_min: null
+spawn_max: null
+
+

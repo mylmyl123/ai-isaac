@@ -98,6 +98,21 @@ class PPOConfig:
     # bleed into the loss. See swarm-outputs/01-red-team-audit.md.
     mask_unused_action_factors: bool = True
 
+    # ---- Reward shaping (PBRS cold-start fix, 2026-07-14) ----
+    # Potential-based reward shaping coefficient. 0.0 = pure 3-term reward
+    # (the baseline). >0 densifies the sparse signal via Phi = -dist-to-enemy,
+    # provably policy-invariant (Ng 1999). Passed into RewardConfig by train.py
+    # along with `gamma` (which MUST match for invariance).
+    pbrs_coef: float = 0.0
+
+    # ---- Closer-spawn curriculum (Phase-2 cold-start fix) ----
+    # Enemy spawn-distance band (px from player), passed to the mod via env
+    # vars. null/None = mod default (200-500). Set closer (e.g. 90-170) to
+    # bootstrap the first accidental kills on a stationary Horf, then relaunch
+    # wider to anneal out to the full anti-camp task.
+    spawn_min: float | None = None
+    spawn_max: float | None = None
+
     # ---- Network ----
     hidden_dim: int = 256
     n_hidden_layers: int = 2
