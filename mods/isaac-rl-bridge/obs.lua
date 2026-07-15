@@ -242,6 +242,171 @@ local function build_room_grid(room)
     return { walls = walls, rocks = rocks, spikes = spikes, poop = poop }
 end
 
+-- =====================================================================
+-- Egocentric multi-channel grid (2026-07-15 architecture rebuild).
+--
+-- Rasterizes EVERYTHING (player, enemies, enemy projectiles, own tears,
+-- pickups, terrain) into a player-CENTERED 14-channel 21x21 image so a CNN
+-- can read spatial relationships (aim direction, incoming fire, cover, walls)
+-- that the old flat entity-list obs could not represent. The player is fixed
+-- at the exact center cell (CENTER,CENTER); the crop translates with the
+-- player, so the same relative geometry always lands on the same cells
+-- (translation-equivariant -> aiming is a near-linear conv readout).
+--
+-- CELL_PX=16 (half-tile), CROP=21 -> a 336x336 world-px window. Room interior
+-- is 480x270, so the window covers the full height + the aim-relevant width;
+-- entities beyond the crop clamp to the border ring (presence only).
+--
+-- Channels (0-based, matches python/isaac_rl/spaces.py _decode_ego_grid):
+--   0 player_self         1.0 at center only
+--   1 enemy_presence      min(count/3, 1)
+--   2 enemy_hp_frac       hp/max_hp of nearest-in-cell enemy
+--   3 enemy_threat        max(boss*1 + champion*0.6 + flying*0.3)
+--   4 enemy_vel_x         nearest-in-cell enemy vx/10 clip[-1,1]
+--   5 enemy_vel_y         nearest-in-cell enemy vy/10 clip[-1,1]
+--   6 enemy_proj_presence 1.0 where an enemy projectile/laser is
+--   7 enemy_proj_vel_x    nearest-in-cell proj vx/12 clip[-1,1]
+--   8 enemy_proj_vel_y    nearest-in-cell proj vy/12 clip[-1,1]
+--   9 own_tear_presence   1.0 where player's own tears are
+--  10 pickup_presence     1.0 where a pickup is
+--  11 wall_pit            1.0 static wall/pit
+--  12 rock                1.0 rocks (all GRID_ROCK* variants)
+--  13 hazard_poop         1.0 spikes/fire OR poop/tnt (merged)
+--
+-- Reused module-level buffers (zero in place) to avoid GC churn, mirroring
+-- build_room_grid. 14 channel arrays + one nearest-distance scratch array.
+local EGO_C, EGO_G = 14, 21
+local EGO_N = EGO_G * EGO_G          -- 441
+local EGO_CELL_PX = 16.0
+local EGO_CENTER = 10                -- 0-based center index (21//2)
+local _ego = {}
+for c = 1, EGO_C do
+    _ego[c] = {}
+    for i = 1, EGO_N do _ego[c][i] = 0 end
+end
+local _ego_bestd = {}               -- per-cell nearest-dist scratch (value channels)
+for i = 1, EGO_N do _ego_bestd[i] = math.huge end
+
+local function _clip1(v)
+    if v > 1.0 then return 1.0 elseif v < -1.0 then return -1.0 else return v end
+end
+
+-- world (ex,ey) relative to player (px,py) -> 1-based flat index, or nil if OOR.
+-- clamp=true snaps out-of-range to the border ring (for presence channels).
+local function _ego_cell(ex, ey, px, py, clamp)
+    local cx = math.floor((ex - px) / EGO_CELL_PX + 0.5) + EGO_CENTER
+    local cy = math.floor((ey - py) / EGO_CELL_PX + 0.5) + EGO_CENTER
+    if cx < 0 or cx >= EGO_G or cy < 0 or cy >= EGO_G then
+        if not clamp then return nil end
+        if cx < 0 then cx = 0 elseif cx >= EGO_G then cx = EGO_G - 1 end
+        if cy < 0 then cy = 0 elseif cy >= EGO_G then cy = EGO_G - 1 end
+    end
+    return cy * EGO_G + cx + 1
+end
+
+local function build_ego_grid(room, player)
+    local px, py = player.Position.X, player.Position.Y
+    -- Zero channels + scratch in place.
+    for c = 1, EGO_C do
+        local ch = _ego[c]
+        for i = 1, EGO_N do ch[i] = 0 end
+    end
+    for i = 1, EGO_N do _ego_bestd[i] = math.huge end
+
+    -- ch0 player_self at center.
+    _ego[1][EGO_CENTER * EGO_G + EGO_CENTER + 1] = 1.0
+
+    -- Enemies + own tears + enemy projectiles + pickups from one entity scan.
+    for _, e in ipairs(Isaac.GetRoomEntities()) do
+        local et = e.Type
+        local ep = e.Position
+        if et == EntityType.ENTITY_TEAR then
+            -- player's own tear (ch9 presence)
+            local idx = _ego_cell(ep.X, ep.Y, px, py, true)
+            if idx then _ego[10][idx] = 1.0 end
+        elseif et == EntityType.ENTITY_PROJECTILE or et == EntityType.ENTITY_LASER then
+            -- enemy projectile (ch6 presence + ch7/8 nearest-wins velocity)
+            local pidx = _ego_cell(ep.X, ep.Y, px, py, true)
+            if pidx then
+                _ego[7][pidx] = 1.0
+                local vidx = _ego_cell(ep.X, ep.Y, px, py, false)  -- value only if in-range
+                if vidx then
+                    local dx = ep.X - px; local dy = ep.Y - py
+                    local d = dx * dx + dy * dy
+                    if d < _ego_bestd[vidx] then
+                        _ego_bestd[vidx] = d
+                        _ego[8][vidx] = _clip1((e.Velocity.X or 0) / 12.0)
+                        _ego[9][vidx] = _clip1((e.Velocity.Y or 0) / 12.0)
+                    end
+                end
+            end
+        elseif et == EntityType.ENTITY_PICKUP then
+            local idx = _ego_cell(ep.X, ep.Y, px, py, true)
+            if idx then _ego[11][idx] = 1.0 end
+        else
+            local npc = e:ToNPC()
+            if npc and npc:IsVulnerableEnemy() and not npc:IsDead() then
+                local pidx = _ego_cell(ep.X, ep.Y, px, py, true)
+                if pidx then
+                    -- ch1 enemy_presence (additive, clamped to 1 at /3)
+                    local pv = _ego[2][pidx] + (1.0 / 3.0)
+                    _ego[2][pidx] = (pv > 1.0) and 1.0 or pv
+                    -- value channels: nearest-to-player wins
+                    local dx = ep.X - px; local dy = ep.Y - py
+                    local d = dx * dx + dy * dy
+                    if d < _ego_bestd[pidx] then
+                        _ego_bestd[pidx] = d
+                        local max_hp = math.max(1.0, e.MaxHitPoints)
+                        _ego[3][pidx] = e.HitPoints / max_hp
+                        local threat = 0.0
+                        if npc:IsBoss() then threat = threat + 1.0 end
+                        if npc:IsChampion() then threat = threat + 0.6 end
+                        if (e.GridCollisionClass or 5) == 0 then threat = threat + 0.3 end
+                        _ego[4][pidx] = (threat > 1.0) and 1.0 or threat
+                        _ego[5][pidx] = _clip1((e.Velocity.X or 0) / 10.0)
+                        _ego[6][pidx] = _clip1((e.Velocity.Y or 0) / 10.0)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Terrain, rasterized EGOCENTRICALLY (the key change vs build_room_grid):
+    -- map each grid entity's world center through the same transform.
+    local grid_size = room:GetGridSize()
+    for i = 0, grid_size - 1 do
+        local ge = room:GetGridEntity(i)
+        if ge then
+            local ok, wp = pcall(function() return room:GetGridPosition(i) end)
+            if ok and wp then
+                local idx = _ego_cell(wp.X, wp.Y, px, py, false)
+                if idx then
+                    local t = ge:GetType()
+                    if t == GridEntityType.GRID_WALL or t == GridEntityType.GRID_PIT then
+                        _ego[12][idx] = 1.0
+                    elseif t == GridEntityType.GRID_ROCK or t == GridEntityType.GRID_ROCKT
+                        or t == GridEntityType.GRID_ROCK_BOMB or t == GridEntityType.GRID_ROCK_ALT
+                        or t == GridEntityType.GRID_ROCK_SS or t == GridEntityType.GRID_ROCK_SPIKED
+                        or t == GridEntityType.GRID_ROCKB then
+                        _ego[13][idx] = 1.0
+                    elseif t == GridEntityType.GRID_SPIKES or t == GridEntityType.GRID_SPIKES_ONOFF
+                        or t == GridEntityType.GRID_FIREPLACE
+                        or t == GridEntityType.GRID_POOP or t == GridEntityType.GRID_TNT then
+                        _ego[14][idx] = 1.0
+                    end
+                end
+            end
+        end
+    end
+
+    -- Return the 14 reused channel arrays wrapped fresh (channel-major).
+    -- Python reshapes to (14, 21, 21). Do NOT mutate elsewhere.
+    return {
+        _ego[1], _ego[2], _ego[3], _ego[4], _ego[5], _ego[6], _ego[7],
+        _ego[8], _ego[9], _ego[10], _ego[11], _ego[12], _ego[13], _ego[14],
+    }
+end
+
 local DOOR_SLOTS = { DoorSlot.LEFT0, DoorSlot.UP0, DoorSlot.RIGHT0, DoorSlot.DOWN0 }
 
 -- 2026-07-12 Track A: expanded from 6 feats [exists, open, locked, boss,
@@ -312,6 +477,13 @@ function Obs.build(tick, reward_events, run_state)
     local enemies, e_mask, n_enemies = build_enemies(room, player, tl, br)
     local proj,    p_mask, n_proj    = build_projectiles(room, player, tl, br)
     local pickups, k_mask, n_pickups = build_pickups(room, player, tl, br)
+    -- Egocentric CNN grid (2026-07-15 rebuild). Built from its own entity scan
+    -- so the legacy flat lists above stay intact until the probe gate passes.
+    local ego_ok, ego_grid = pcall(build_ego_grid, room, player)
+    if not ego_ok then
+        Isaac.DebugString("[isaac-rl-bridge] build_ego_grid failed: " .. tostring(ego_grid))
+        ego_grid = nil
+    end
 
     return {
         schema = 2,
@@ -420,6 +592,7 @@ function Obs.build(tick, reward_events, run_state)
         },
         passives = build_passives(player),
         room_grid = build_room_grid(room),
+        ego_grid = ego_grid,   -- 14-channel egocentric grid (nil if build failed)
         doors = build_doors(room),
         enemies = { feats = enemies, mask = e_mask, count = n_enemies },
         projectiles = { feats = proj, mask = p_mask, count = n_proj },

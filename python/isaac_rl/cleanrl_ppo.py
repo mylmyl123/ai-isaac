@@ -51,7 +51,14 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from .spaces import ACTION_FACTORS, flatten_dict_obs
+from .spaces import (
+    ACTION_FACTORS,
+    EGO_CHANNELS,
+    EGO_GRID,
+    SCALAR_DIM,
+    flatten_dict_obs,
+    split_obs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -266,6 +273,139 @@ class ActorCritic(nn.Module):
         """Recompute logprob + entropy + value for GIVEN actions (PPO update).
         Only over ACTIVE factors (must match act())."""
         dists, v = self.forward(x)
+        active = dists[:self.active_factors]
+        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
+        ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
+        return logp, ent, v
+
+
+# ==========================================================================
+# CNN ACTOR-CRITIC (2026-07-15 architecture rebuild)
+# ==========================================================================
+
+
+class CNNActorCritic(nn.Module):
+    """Egocentric-grid CNN + scalar-MLP fusion -> factored action heads + value.
+
+    Replaces the flat-MLP ActorCritic that was measurably BLIND to enemy
+    position (constant shoot direction regardless of bearing). Inputs are TWO
+    tensors from spaces.split_obs():
+      * grid   (B, 14, 21, 21) — egocentric spatial image, fed UNNORMALIZED
+        (already in [-1,1]; normalizing sparse presence planes destroys the
+        zero baseline the CNN relies on).
+      * scalar (B, 161)        — low-D vector, Welford-normalized here.
+
+    ReLU everywhere (escapes the Tanh saturation that caused the blindness),
+    orthogonal init gain=sqrt(2) on the ReLU path. Keeps the factored
+    MultiDiscrete heads + active_factors masking identical to the MLP version.
+
+    NON-RECURRENT (phase 1). forward(grid, scalar) is stateless so the offline
+    bearing probe (single frame) works. The GRU is added in phase 2 only after
+    this passes the probe.
+    """
+    def __init__(self, hidden_dim: int = 256, active_factors: int | None = None,
+                 normalize_obs: bool = True):
+        super().__init__()
+        # Welford normalizer over the SCALAR branch only (grid stays raw).
+        self.normalize_obs = bool(normalize_obs)
+        self.register_buffer("obs_mean", torch.zeros(SCALAR_DIM))
+        self.register_buffer("obs_var", torch.ones(SCALAR_DIM))
+        self.register_buffer("obs_count", torch.tensor(1e-4))
+
+        # CNN tower over the 14x21x21 grid.
+        self.cnn = nn.Sequential(
+            nn.Conv2d(EGO_CHANNELS, 32, kernel_size=3, stride=1, padding=1), nn.ReLU(),  # 21x21
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),            # 11x11
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),            # 6x6
+        )
+        cnn_flat = 64 * 6 * 6  # 2304
+        self.cnn_fc = nn.Sequential(nn.Linear(cnn_flat, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU())
+
+        # Scalar branch.
+        self.scalar_mlp = nn.Sequential(
+            nn.Linear(SCALAR_DIM, 128), nn.LayerNorm(128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+        )
+
+        # Fusion trunk.
+        self.fuse = nn.Sequential(
+            nn.Linear(hidden_dim + 128, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
+        )
+
+        # Separate post-trunk actor / critic heads.
+        self.actor_mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
+        self.critic_mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
+        self.action_heads = nn.ModuleList(
+            [nn.Linear(hidden_dim, int(n_choices)) for n_choices in ACTION_FACTORS]
+        )
+        self.value_head = nn.Linear(hidden_dim, 1)
+        # Optional aux head: predict unit-vec-to-nearest-enemy (label from
+        # spaces.nearest_enemy_bearing). Forces the CNN to encode bearing; used
+        # with a small MSE aux loss. Off unless the trainer wires it.
+        self.aux_bearing = nn.Linear(hidden_dim, 2)
+
+        n_all = len(ACTION_FACTORS)
+        if active_factors is None or active_factors < 1 or active_factors > n_all:
+            active_factors = n_all
+        self.active_factors = int(active_factors)
+
+        # Init: gain sqrt(2) on the ReLU path, small on action heads, 1 on value.
+        for m in self.modules():
+            if isinstance(m, (nn.Linear, nn.Conv2d)):
+                nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain("relu"))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+        for head in self.action_heads:
+            nn.init.orthogonal_(head.weight, gain=0.01)
+        nn.init.orthogonal_(self.value_head.weight, gain=1.0)
+
+    @torch.no_grad()
+    def update_norm(self, scalar: torch.Tensor) -> None:
+        """Update running mean/var from a batch of SCALAR vectors (rollout only)."""
+        if not self.normalize_obs:
+            return
+        batch_mean = scalar.mean(dim=0)
+        batch_var = scalar.var(dim=0, unbiased=False)
+        batch_count = float(scalar.shape[0])
+        delta = batch_mean - self.obs_mean
+        tot = self.obs_count + batch_count
+        self.obs_mean += delta * (batch_count / tot)
+        m_a = self.obs_var * self.obs_count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta.pow(2) * (self.obs_count * batch_count / tot)
+        self.obs_var.copy_(m2 / tot)
+        self.obs_count.copy_(tot)
+
+    def _norm_scalar(self, scalar: torch.Tensor) -> torch.Tensor:
+        if not self.normalize_obs:
+            return scalar
+        return torch.clamp((scalar - self.obs_mean) / torch.sqrt(self.obs_var + 1e-8), -10.0, 10.0)
+
+    def _trunk(self, grid: torch.Tensor, scalar: torch.Tensor) -> torch.Tensor:
+        g = self.cnn(grid)
+        g = self.cnn_fc(g.reshape(g.shape[0], -1))
+        s = self.scalar_mlp(self._norm_scalar(scalar))
+        return self.fuse(torch.cat([g, s], dim=-1))
+
+    def forward(self, grid: torch.Tensor, scalar: torch.Tensor):
+        h = self._trunk(grid, scalar)
+        ha = self.actor_mlp(h)
+        dists = [Categorical(logits=head(ha)) for head in self.action_heads]
+        v = self.value_head(self.critic_mlp(h)).squeeze(-1)
+        return dists, v
+
+    def act(self, grid: torch.Tensor, scalar: torch.Tensor):
+        dists, v = self.forward(grid, scalar)
+        actions = torch.stack([d.sample() for d in dists], dim=-1)
+        if self.active_factors < len(dists):
+            actions[:, self.active_factors:] = 0
+        active = dists[:self.active_factors]
+        logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
+        ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
+        return actions, logp, ent, v
+
+    def evaluate(self, grid: torch.Tensor, scalar: torch.Tensor, actions: torch.Tensor):
+        dists, v = self.forward(grid, scalar)
         active = dists[:self.active_factors]
         logp = torch.stack([d.log_prob(actions[:, k]) for k, d in enumerate(active)], dim=-1).sum(-1)
         ent = torch.stack([d.entropy() for d in active], dim=-1).sum(-1)
