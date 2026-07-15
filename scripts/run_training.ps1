@@ -31,6 +31,7 @@ param(
     [int]$FullSteps = 200000,
     [int]$SmokeMinEpisodes = 3,
     [double]$PbrsCoef = -1,            # -1 = use config value; >=0 overrides (0=off, e.g. 0.1=on)
+    [double]$RHit = -1,                # -1 = use config value; >=0 overrides (0=off, ~0.3 to break random shoot head)
     [double]$SpawnMin = -1,            # -1 = mod default (200); >=0 overrides (e.g. 90 for close band)
     [double]$SpawnMax = -1,            # -1 = mod default (500); >=0 overrides (e.g. 170)
     [switch]$SkipSmoke,
@@ -112,6 +113,7 @@ function Invoke-Train($steps, $runNameSuffix, $withTb) {
     $overrides = @("total_env_steps=$steps", "run_name=$runName")
     if ($Stage -ne "") { $overrides += "stage=$Stage" }
     if ($PbrsCoef -ge 0) { $overrides += "pbrs_coef=$PbrsCoef" }
+    if ($RHit -ge 0) { $overrides += "r_hit=$RHit" }
     if ($SpawnMin -ge 0) { $overrides += "spawn_min=$SpawnMin" }
     if ($SpawnMax -ge 0) { $overrides += "spawn_max=$SpawnMax" }
     $argList = @("train.py", "--config", $Config, "--isaac", $Isaac)

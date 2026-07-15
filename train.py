@@ -311,8 +311,8 @@ def main() -> int:
     # ---- Build the vec env (accepts sockets, does handshake) ----
     # PBRS needs the trainer's gamma to keep the shaping term policy-invariant
     # (Ng 1999). pbrs_coef=0 (default) => pure 3-term reward baseline.
-    reward_cfg = RewardConfig(gamma=cfg.gamma, pbrs_coef=cfg.pbrs_coef)
-    log.info("reward: 3-term + pbrs_coef=%.4g (gamma=%.4g)", cfg.pbrs_coef, cfg.gamma)
+    reward_cfg = RewardConfig(gamma=cfg.gamma, pbrs_coef=cfg.pbrs_coef, r_hit=cfg.r_hit)
+    log.info("reward: 3-term + pbrs_coef=%.4g (gamma=%.4g) + r_hit=%.4g", cfg.pbrs_coef, cfg.gamma, cfg.r_hit)
     env = build_vec_env(
         n_envs=cfg.n_envs,
         base_port=cfg.base_port,

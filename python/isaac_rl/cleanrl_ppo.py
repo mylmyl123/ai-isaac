@@ -104,6 +104,11 @@ class PPOConfig:
     # provably policy-invariant (Ng 1999). Passed into RewardConfig by train.py
     # along with `gamma` (which MUST match for invariance).
     pbrs_coef: float = 0.0
+    # Dense per-hit reward (2026-07-14). >0 rewards every tear that connects
+    # with an enemy (not just kills), giving the shoot head a direction-
+    # correlated gradient. Scaled by damage-fraction so r_kill stays dominant.
+    # 0.0 = off (baseline). ~0.3 recommended to break the random shoot head.
+    r_hit: float = 0.0
 
     # ---- Closer-spawn curriculum (Phase-2 cold-start fix) ----
     # Enemy spawn-distance band (px from player), passed to the mod via env

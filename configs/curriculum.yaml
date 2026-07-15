@@ -78,6 +78,15 @@ mask_unused_action_factors: true
 # confirm it is firing. The sparse-vs-PBRS pair is the paper's ablation.
 pbrs_coef: 0.0
 
+# Dense per-hit reward (Phase-2c). Rewards every tear that CONNECTS with the
+# enemy, not just the killing blow — on a stationary Horf a landed tear means
+# correct aim, so this gives the shoot head a dense direction-correlated
+# gradient ~3x per kill (fixes the "shoot head stays random" failure seen at
+# 130k steps). Scaled by damage-fraction so total hit reward per enemy ~= r_hit
+# and r_kill stays dominant. 0.0 = off (baseline). Set ~0.3 to enable.
+# This is the recommended cold-start fix; watch reward/hit + entropy/shoot in TB.
+r_hit: 0.0
+
 # ---- Closer-spawn curriculum (Phase-2 cold-start fix) --------------------
 # Enemy spawn-distance band (px from player). null = mod default (200-500,
 # the full anti-camp task). To bootstrap the sparse cold start on a stationary

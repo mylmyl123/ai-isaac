@@ -43,6 +43,17 @@ class RewardConfig:
     r_kill: float = 1.0
     r_death: float = -1.0
     r_step: float = -0.001
+    # ---- Dense per-hit reward (Phase-2c cold-start fix) ----
+    # r_hit rewards every tear that CONNECTS with an enemy, not just the
+    # killing blow. On a stationary Horf a tear only lands if fired in the
+    # correct cardinal direction, so each hit is a labeled example of correct
+    # aim — this gives the shoot head a dense, direction-correlated gradient
+    # ~3x more often than kills and with a much shorter credit-assignment lag,
+    # fixing the "shoot head stays uniform-random" failure. Scaled by damage
+    # fraction (dmg / npc_max_hp) so the TOTAL hit reward over one enemy's life
+    # sums to ~r_hit regardless of how many tears it took — r_kill stays the
+    # dominant terminal payoff and hits cannot be farmed. 0.0 = off (baseline).
+    r_hit: float = 0.0
     # ---- PBRS (potential-based reward shaping) ----
     pbrs_coef: float = 0.0            # 0.0 = off (pure 3-term baseline)
     gamma: float = 0.995              # must match PPOConfig.gamma
@@ -182,6 +193,16 @@ class RewardShaper:
             # NOT as {kind: 'kill'}. Recognize both for forward-compat.
             if kind == "kill" or (kind == "damage_to_npc" and ev.get("killed")):
                 bd["kill"] = bd.get("kill", 0.0) + self.cfg.r_kill
+            elif kind == "damage_to_npc" and self.cfg.r_hit != 0.0:
+                # Dense per-hit reward on a NON-lethal connect. A landed tear on
+                # a (stationary) enemy means the shoot head aimed correctly.
+                # Scale by damage fraction so total hit reward per enemy ~= r_hit
+                # (fractions across the ~3 hits to kill sum to ~1), keeping
+                # r_kill strictly dominant and preventing multi-hit farming.
+                max_hp = float(ev.get("npc_max_hp", 0) or 0)
+                dmg = float(ev.get("dmg", 0) or 0)
+                frac = (dmg / max_hp) if max_hp > 0 else 0.0
+                bd["hit"] = bd.get("hit", 0.0) + self.cfg.r_hit * min(1.0, frac)
             elif kind == "death" and not self.state.dead:
                 bd["death"] = bd.get("death", 0.0) + self.cfg.r_death
                 self.state.dead = True

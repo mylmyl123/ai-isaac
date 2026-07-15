@@ -14,11 +14,17 @@ from isaac_rl.spaces import ACTION_FACTORS
 
 
 def test_reward_config_has_three_terms():
-    """Regression: reward config must not accumulate terms again."""
+    """Regression: reward stays 3-term BY DEFAULT — no silent shaping creep.
+
+    r_hit (dense per-hit) and pbrs_coef (potential shaping) are opt-in
+    ablatable terms added 2026-07; they must default to 0.0 so the out-of-the-
+    box reward is exactly {r_kill, r_death, r_step}. This guards the discipline
+    (shaping only when explicitly enabled) without forbidding the flagged terms.
+    """
     cfg = RewardConfig()
-    fields = [f for f in cfg.__dataclass_fields__ if f.startswith("r_")]
-    assert len(fields) == 3, f"expected 3 r_* terms, got {len(fields)}: {fields}"
-    assert set(fields) == {"r_kill", "r_death", "r_step"}
+    assert cfg.r_kill == 1.0 and cfg.r_death == -1.0 and cfg.r_step == -0.001
+    assert cfg.r_hit == 0.0, "r_hit must default to 0 (opt-in shaping only)"
+    assert cfg.pbrs_coef == 0.0, "pbrs_coef must default to 0 (opt-in shaping only)"
 
 
 def test_reward_shaper_kill_and_step():
