@@ -71,6 +71,14 @@ function R.attach(mod)
                     else
                         R._killed_this_tick[seed] = true
                         R.stats.kills = R.stats.kills + 1
+                        -- Smoke-gate instrumentation (2026-07-14): log the
+                        -- entity type of every counted kill so an automated
+                        -- identity check can assert kills come from the
+                        -- intended enemy (Horf=12 on Stage 0) and not some
+                        -- other NPC. Only fires on real (deduped) kills, so
+                        -- volume is bounded and it never spams per-tear.
+                        Isaac.DebugString("[isaac-rl-bridge] kill npc_type="
+                            .. tostring(entity.Type) .. " variant=" .. tostring(entity.Variant))
                     end
                 end
                 R.push({
