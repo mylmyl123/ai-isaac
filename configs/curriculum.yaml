@@ -67,11 +67,15 @@ log_every_updates: 1
 mask_unused_action_factors: true
 
 # ---- Reward shaping (Phase-2 cold-start fix) ------------------------------
-# PBRS coefficient. 0.0 = pure 3-term reward (the honest sparse BASELINE —
-# run this first to measure the stall). Set >0 (e.g. 0.1) to enable the
-# potential-based distance-to-enemy shaping that densifies the signal so a
-# stationary Horf can be learned. Provably policy-invariant (Ng 1999): same
-# optimum, only faster. The sparse-vs-PBRS pair is the paper's ablation.
+# PBRS coefficient. 0.0 = pure 3-term reward (the honest sparse BASELINE).
+# When ON, it densifies the signal via a potential Phi = -dist-to-enemy so the
+# agent is rewarded for CLOSING on the enemy every tick (breaks corner-camping).
+# Provably policy-invariant (Ng 1999): same optimum, only faster.
+# MAGNITUDE MATTERS: at coef=0.1 a real approach step pays only ~0.002, which
+# the entropy bonus (~0.009/step) swamps -> looks like "PBRS does nothing".
+# Use 0.5-1.0 so an approach step pays ~0.01-0.03/step, comparable to the
+# entropy pull and the per-kill influence. Watch reward/pbrs in TensorBoard to
+# confirm it is firing. The sparse-vs-PBRS pair is the paper's ablation.
 pbrs_coef: 0.0
 
 # ---- Closer-spawn curriculum (Phase-2 cold-start fix) --------------------

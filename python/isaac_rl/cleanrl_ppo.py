@@ -335,6 +335,13 @@ def train(cfg: PPOConfig, env) -> None:
     completed_ep_rewards: list[float] = []
     completed_ep_lens: list[int] = []
     completed_ep_kills: list[int] = []
+    # Phase 2b: running per-episode reward-breakdown accumulator (kill / death /
+    # step / pbrs). Lets us LOG each reward component to TB so we can see
+    # whether PBRS (or any term) is actually contributing — previously the
+    # breakdown was computed but never surfaced, so a too-weak PBRS looked
+    # identical to PBRS-off. Keyed by breakdown name -> list of per-episode totals.
+    from collections import deque as _deque
+    completed_ep_breakdown: dict[str, _deque] = {}
 
     # Per-episode CSV log — opened once, appended every episode. This gives
     # us variance across episodes, not just moving averages. Small ~500KB
@@ -406,6 +413,13 @@ def train(cfg: PPOConfig, env) -> None:
                     bd_ep = infos[i].get("reward_breakdown_episode") or {}
                     r_kill = float(cfg_r_kill)
                     ep_kills[i] = int(round(float(bd_ep.get("kill", 0.0)) / r_kill)) if r_kill else 0
+                    # Record each reward-breakdown component (last 20 eps) for TB.
+                    for _k, _v in bd_ep.items():
+                        dq = completed_ep_breakdown.get(_k)
+                        if dq is None:
+                            dq = _deque(maxlen=20)
+                            completed_ep_breakdown[_k] = dq
+                        dq.append(float(_v))
                     completed_ep_rewards.append(float(ep_rewards[i]))
                     completed_ep_lens.append(int(ep_lens[i]))
                     completed_ep_kills.append(int(ep_kills[i]))
@@ -503,6 +517,13 @@ def train(cfg: PPOConfig, env) -> None:
             writer.add_scalar("loss/approx_kl", np.mean(approx_kls), global_step)
             writer.add_scalar("loss/clipfrac", np.mean(clipfracs), global_step)
             writer.add_scalar("charts/lr", optimizer.param_groups[0]["lr"], global_step)
+
+            # Per-episode mean of each reward component (kill/death/step/pbrs).
+            # Watch reward/pbrs to confirm PBRS is actually contributing, and
+            # reward/kill to see the true kill signal magnitude.
+            for _k, _dq in completed_ep_breakdown.items():
+                if _dq:
+                    writer.add_scalar(f"reward/{_k}", float(np.mean(_dq)), global_step)
 
             # ---- Per-action-factor entropy: which head is collapsing? ----
             # Recompute distribution entropy per factor from the last minibatch's
