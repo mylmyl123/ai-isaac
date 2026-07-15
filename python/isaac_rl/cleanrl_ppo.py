@@ -476,12 +476,27 @@ def train(cfg: PPOConfig, env) -> None:
     log.info("action factors: %d active out of %d (stage=%s mask=%s)",
              active_factors, n_all, cfg.stage, cfg.mask_unused_action_factors)
 
-    net = ActorCritic(obs_dim, cfg.hidden_dim, cfg.n_hidden_layers,
-                      active_factors=active_factors, normalize_obs=cfg.normalize_obs).to(device)
+    net = CNNActorCritic(hidden_dim=cfg.hidden_dim, active_factors=active_factors,
+                         normalize_obs=cfg.normalize_obs).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
 
     n_factors = len(ACTION_FACTORS)
-    rb = Rollout(cfg.rollout_length, cfg.n_envs, obs_dim, n_factors, device)
+    # CNN rollout storage: grid (T,N,14,21,21) + scalar (T,N,161) instead of a
+    # single flat obs tensor. Reuse the Rollout class for actions/logprobs/
+    # rewards/dones/values/GAE (those are obs-agnostic).
+    T, N = cfg.rollout_length, cfg.n_envs
+    rb = Rollout(T, N, 1, n_factors, device)   # obs_dim=1 placeholder; we don't use rb.obs
+    rb_grid = torch.zeros(T, N, EGO_CHANNELS, EGO_GRID, EGO_GRID, device=device)
+    rb_scalar = torch.zeros(T, N, SCALAR_DIM, device=device)
+
+    def _split_batch(obs_list):
+        """obs dict list -> (grid[N,14,21,21], scalar[N,161]) torch tensors."""
+        grids, scalars = [], []
+        for o in obs_list:
+            g, s = split_obs(o)
+            grids.append(g); scalars.append(s)
+        return (torch.from_numpy(np.stack(grids)).to(device),
+                torch.from_numpy(np.stack(scalars)).to(device))
 
     # ---- Run dir + TB ----
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -513,7 +528,7 @@ def train(cfg: PPOConfig, env) -> None:
 
     # ---- Initial reset ----
     obs_list, _ = env.reset()
-    obs = torch.from_numpy(np.stack([_flat_obs(o) for o in obs_list])).to(device)
+    grid, scalar = _split_batch(obs_list)
     dones = torch.zeros(cfg.n_envs, device=device)
 
     # ---- Episode trackers ----
@@ -567,15 +582,15 @@ def train(cfg: PPOConfig, env) -> None:
 
         # -------- ROLLOUT --------
         for t in range(cfg.rollout_length):
-            rb.obs[t] = obs
+            rb_grid[t] = grid
+            rb_scalar[t] = scalar
             rb.dones[t] = dones
 
-            # Update obs normalization stats from freshly-collected obs ONLY
-            # (not during the PPO update epochs, which reuse this data). No-op
-            # when normalize_obs is disabled.
-            net.update_norm(obs)
+            # Update scalar-branch normalization stats from freshly-collected
+            # obs ONLY (not during the PPO update epochs, which reuse this data).
+            net.update_norm(scalar)
             with torch.no_grad():
-                actions, logp, _, values = net.act(obs)
+                actions, logp, _, values = net.act(grid, scalar)
             rb.actions[t] = actions
             rb.logprobs[t] = logp
             rb.values[t] = values
@@ -589,7 +604,7 @@ def train(cfg: PPOConfig, env) -> None:
             done_np = np.logical_or(terms, truncs).astype(np.float32)
 
             rb.rewards[t] = torch.from_numpy(np.asarray(rewards, dtype=np.float32)).to(device)
-            obs = torch.from_numpy(np.stack([_flat_obs(o) for o in next_obs_list])).to(device)
+            grid, scalar = _split_batch(next_obs_list)
             dones = torch.from_numpy(done_np).to(device)
 
             # Episode-return bookkeeping.
@@ -633,11 +648,12 @@ def train(cfg: PPOConfig, env) -> None:
 
         # -------- COMPUTE GAE --------
         with torch.no_grad():
-            _, _, _, next_value = net.act(obs)
+            _, _, _, next_value = net.act(grid, scalar)
         advantages, returns = rb.compute_gae(next_value, dones, cfg.gamma, cfg.gae_lambda)
 
         # Flatten (T, N, ...) -> (T*N, ...)
-        b_obs = rb.obs.reshape(-1, obs_dim)
+        b_grid = rb_grid.reshape(-1, EGO_CHANNELS, EGO_GRID, EGO_GRID)
+        b_scalar = rb_scalar.reshape(-1, SCALAR_DIM)
         b_actions = rb.actions.reshape(-1, n_factors)
         b_logprobs = rb.logprobs.reshape(-1)
         b_advantages = advantages.reshape(-1)
@@ -663,7 +679,7 @@ def train(cfg: PPOConfig, env) -> None:
             for start in range(0, batch_size, minibatch_size):
                 mb = b_inds[start:start + minibatch_size]
 
-                new_logp, new_ent, new_v = net.evaluate(b_obs[mb], b_actions[mb])
+                new_logp, new_ent, new_v = net.evaluate(b_grid[mb], b_scalar[mb], b_actions[mb])
                 ratio = torch.exp(new_logp - b_logprobs[mb])
                 # Advantages already normalized batch-level above (Phase 2).
                 mb_adv = b_advantages[mb]
@@ -727,7 +743,7 @@ def train(cfg: PPOConfig, env) -> None:
             # Recompute distribution entropy per factor from the last minibatch's
             # obs so we get a fresh reading (not just the mean over updates).
             with torch.no_grad():
-                dists, _ = net.forward(b_obs[:min(256, batch_size)])
+                dists, _ = net.forward(b_grid[:min(256, batch_size)], b_scalar[:min(256, batch_size)])
             factor_names = ["move", "shoot", "use_item", "drop_bomb", "use_pillcard"]
             for k, d in enumerate(dists):
                 name = factor_names[k] if k < len(factor_names) else f"factor_{k}"
