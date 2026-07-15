@@ -83,9 +83,9 @@ local RECORD_MODE = os.getenv("ISAAC_RL_RECORD") == "1"
 -- the flag and moving to Stage 1.
 local STAGE0_MODE = os.getenv("ISAAC_RL_STAGE0") == "1"
 -- 2026-07-14 (Phase 1): curriculum stage. Sent by train.py via ISAAC_RL_STAGE.
---   "0" 1 Horf (stationary shooter). Control task — provably ANTI-camp.
---        Horf shoots 3-way spread when player is in line of sight. Corner-
---        camping is strictly dominated: Horf's tears reach corners.
+--   "0" 1 Horf (stationary shooter, EntityType 12). Control task — provably
+--        ANTI-camp. Horf shoots blood shots when player is in line of sight;
+--        camping in a corner is strictly dominated (Horf's tears reach corners).
 --   A  sealed room, 1 Attack Fly. Kept as FAILURE-MODE REPRODUCER (paper).
 --        Homing fly + sealed room = corner-camping local optimum.
 --   B  sealed room, 3 Attack Flies. Multi-enemy target selection.
@@ -102,8 +102,12 @@ if STAGE0_MODE and STAGE == "E" then STAGE = "A" end
 local STAGE_SEAL_DOORS      = (STAGE == "0" or STAGE == "A" or STAGE == "B")
 local STAGE_WIPE_ENEMIES    = (STAGE == "0" or STAGE == "A" or STAGE == "B" or STAGE == "C")
 local STAGE_SPAWN_ENEMIES   = (STAGE == "0" or STAGE == "A" or STAGE == "B" or STAGE == "C")
--- Enemy type per stage. 26=HORF (stationary shooter), 18=ATTACKFLY (homing).
-local STAGE_ENEMY_TYPE      = (STAGE == "0") and 26 or 18
+-- Enemy type per stage. 12=HORF (stationary blood-shot shooter), 18=ATTACKFLY
+-- (homing). Verified against canonical Repentance resources/scripts/enums.lua:
+-- ENTITY_HORF=12, ENTITY_ATTACKFLY=18. (The prior value 26 was ENTITY_MAW, a
+-- DIFFERENT enemy — Stage 0 was silently spawning Maws, defeating the
+-- "provably anti-camp stationary shooter" premise of the control task.)
+local STAGE_ENEMY_TYPE      = (STAGE == "0") and 12 or 18
 local STAGE_ENEMY_VARIANT   = (STAGE == "0") and 0 or 0
 local STAGE_ENEMY_COUNT     = (STAGE == "B") and 3 or 1
 -- Legacy variable names kept for compat with existing code below.
@@ -244,8 +248,8 @@ function stage0_spawn_fly(player)
         spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
     end
 
-    -- Attack Fly (18) is homing. Horf (26) is stationary shooter. Both spawned
-    -- via Isaac.Spawn(entity_type, variant, subtype, pos, vel, spawner).
+    -- Horf (12) is a stationary blood-shot shooter. Attack Fly (18) is homing.
+    -- Both spawned via Isaac.Spawn(entity_type, variant, subtype, pos, vel, spawner).
     local fly = Isaac.Spawn(STAGE_ENEMY_TYPE, STAGE_ENEMY_VARIANT, 0, spawn_pos, Vector(0, 0), nil)
     if fly then
         fly:ClearEntityFlags(EntityFlag.FLAG_FRIENDLY)

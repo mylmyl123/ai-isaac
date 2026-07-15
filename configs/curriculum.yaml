@@ -30,7 +30,14 @@ max_episode_steps: 1800
 total_env_steps: 200_000          # Phase-1: 200k to observe full trajectory
 
 # ---- PPO hyperparameters (Phase-1 tuned) ---------------------------------
-rollout_length: 128
+# Phase 2 (2026-07-14): rollout_length 128 -> 512. A Stage-0/A episode is
+# ~300-800 ticks; a 128-step rollout (batch 256 w/ 2 envs) ends mid-episode
+# every time, so ~100% of advantage targets were bootstrap-dominated. 512
+# ≈ one episode, cutting bootstrap reliance at ~zero extra compute (same
+# total_env_steps, fewer-but-larger updates). Do NOT raise n_envs instead:
+# SyncVecEnv steps envs sequentially over blocking sockets, so more envs =
+# fewer gradient updates at fixed budget.
+rollout_length: 512
 n_epochs: 4
 n_minibatches: 4
 lr: 3.0e-4

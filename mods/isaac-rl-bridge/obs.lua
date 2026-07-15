@@ -333,6 +333,15 @@ function Obs.build(tick, reward_events, run_state)
             shot_speed = player.ShotSpeed,
             luck = player.Luck,
             can_shoot = player:CanShoot(),
+            -- Fire cooldown (Phase 2, 2026-07-14): FireCooldown is the number
+            -- of frames until the player can fire the next tear (0 = ready).
+            -- MaxFireDelay is the constant period. The RL agent previously saw
+            -- only can_shoot (a bare bool) and MaxFireDelay (constant), so it
+            -- could not learn "wait N frames then fire" timing on the
+            -- aim-and-shoot task. We emit the raw countdown; the Python decoder
+            -- normalizes it by MaxFireDelay. safe_get so a missing field on
+            -- some Repentance build degrades to 0 instead of crashing Obs.build.
+            fire_cooldown = safe_get(0, function() return player.FireCooldown end),
             frame_count = player.FrameCount,
             is_dead = player:IsDead(),
             -- ADDED 2026-07-12 for BC recording (Track A obs rehab).

@@ -159,6 +159,12 @@ _PLAYER_FIELDS = (
     "keys", "bombs", "coins",
     "damage", "fire_delay", "move_speed", "tear_range", "shot_speed", "luck",
     "can_shoot", "frame_count", "is_dead",
+    # Phase 2 (2026-07-14): normalized fire-cooldown-remaining. Written
+    # explicitly in encode_obs() (not a raw passthrough) as
+    # fire_cooldown / max(1, MaxFireDelay), clipped to [0, 1]. Gives the
+    # agent the countdown to next tear so it can learn shot timing on the
+    # aim-and-shoot task. Slot 20 of PLAYER_DIM=40 (was unused zero-fill).
+    "fire_cooldown_norm",
 )
 
 _GLOBAL_FIELDS = (
@@ -429,6 +435,18 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
             break
         v = p.get(name, 0)
         obs["player"][i] = float(bool(v)) if isinstance(v, bool) else float(v or 0)
+
+    # Phase 2: normalized fire-cooldown-remaining. The mod emits raw
+    # `fire_cooldown` (frames until next tear) + `fire_delay` (== MaxFireDelay).
+    # `fire_cooldown_norm` is not a raw JSON field, so the loop above left its
+    # slot at 0; compute it here as cooldown / max(1, MaxFireDelay), clipped to
+    # [0, 1]. 0 == ready to fire, 1 == just fired / full cooldown.
+    idx_cd = _PLAYER_FIELDS.index("fire_cooldown_norm")
+    if idx_cd < PLAYER_DIM:
+        raw_cd = float(p.get("fire_cooldown", 0) or 0)
+        max_delay = float(p.get("fire_delay", 0) or 0)
+        norm_cd = raw_cd / max(1.0, max_delay) if max_delay > 0 else 0.0
+        obs["player"][idx_cd] = float(min(1.0, max(0.0, norm_cd)))
 
     g = raw.get("global") or {}
     for i, name in enumerate(_GLOBAL_FIELDS):

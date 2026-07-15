@@ -16,162 +16,174 @@ end
 M.PASSIVES_K = 733
 
 -- NPC (entity type) -> dense index. Type is EntityType.ENTITY_* in the Isaac API.
--- We index by numeric EntityType value.
+-- We index by numeric EntityType value. The dense index is just this list's
+-- position, so the mapping is stable/distinct as long as the numeric list is.
+--
+-- 2026-07-14: comments corrected against the canonical Repentance
+-- resources/scripts/enums.lua (the prior comments were a wrong copy-paste guess
+-- that mislabeled every entry — e.g. it called 12 "Clotty" and 26 "Boil",
+-- which is what let Stage 0 ship spawning Maw(26) under the belief it was
+-- Horf. Real values: Horf=12, Fly=13, Pooter=14, AttackFly=18, Maw=26).
+-- The numeric list and its ordering are UNCHANGED — only the labels — so
+-- dense indices (and therefore the policy's enemy type_idx feature) are
+-- byte-for-byte identical to before. Types with no canonical enemy name in
+-- enums.lua (mostly 106-110, 201-255) are kept as list padding and marked
+-- "(unmapped)"; they never fire on the current curriculum.
 M.NPC_TYPES = {}
 local common_npcs = {
-    10,  -- ENTITY_FLY / Attack Fly
-    11,  -- Pooter
-    12,  -- Clotty
-    13,  -- Mulligan
-    14,  -- Shopkeeper
-    15,  -- Larry Jr. (boss)
-    16,  -- Monstro (boss)
-    17,  -- Magnet Fly (?)
-    18,  -- Maw of the Void (?)
-    19,  -- Host
-    20,  -- Chub (boss)
-    21,  -- Hopper
-    22,  -- Boil / Sack
-    23,  -- Spitty
-    24,  -- Nulls
-    25,  -- Trite
-    26,  -- Boil (dup)
-    27,  -- Guts
-    28,  -- Sucker
-    29,  -- Sisters Vis
-    30,  -- Fred (?)
-    32,  -- Leech
-    33,  -- Lump
-    34,  -- Mrs. Mole (?)
-    35,  -- Widow
-    36,  -- Daddy Longlegs (boss)
-    37,  -- Blastocyst
-    38,  -- Embryo
-    39,  -- Momma Gurdy
-    41,  -- The Bloat
-    42,  -- Peep
-    43,  -- Baby Long Legs
-    44,  -- Wizoob
-    45,  -- Mom (BOSS)
-    46,  -- Slide
-    47,  -- Heart
-    50,  -- Charger
-    51,  -- Gaper (Rebirth/AB)
-    52,  -- Horf
-    53,  -- Fatty
-    54,  -- Delirium (endgame)
-    55,  -- Fly (variant)
-    56,  -- Swarm
-    57,  -- Dank
-    58,  -- Boil (dup)
-    59,  -- Deep Gaper
-    60,  -- Round Worm
-    61,  -- Level 2 Fly
-    62,  -- Level 2 Spider
-    63,  -- Nerve Ending
-    64,  -- Camillo Jr.
-    65,  -- Mama Gurdy
-    66,  -- Trite (dup)
-    67,  -- Grub
-    68,  -- Larry Jr. seg
-    69,  -- Pin
-    70,  -- Fistula
-    71,  -- Teratoma
-    72,  -- Lokii
-    73,  -- Nulls (dup)
-    74,  -- Membrane
-    75,  -- Envy / Sloth
-    76,  -- Sloth
-    77,  -- Lust
-    78,  -- Wrath
-    79,  -- Gluttony
-    80,  -- Greed
-    81,  -- Envy
-    82,  -- Pride
-    83,  -- Super Envy
-    84,  -- Cage
-    85,  -- Duke of Flies
-    86,  -- The Husk
-    87,  -- Larry Jr. (dup)
-    88,  -- Krampus
-    89,  -- Steven / Blighted Ovum
-    90,  -- Mask + Heart
-    91,  -- Widow (dup)
-    92,  -- Daddy Long Legs (dup)
-    93,  -- Isaac (boss version)
-    94,  -- Deep Blob
-    95,  -- Bee
-    96,  -- Fistuloid
-    97,  -- Nulls
-    98,  -- Baby
-    99,  -- Wall Creep
-    100, -- Rag Man
-    101, -- Uriel
-    102, -- Gabriel
-    103, -- The Fallen
-    104, -- Satan
-    105, -- Cyclopia
-    106, -- Nulls
-    107, -- Nulls
-    108, -- Nulls
-    109, -- Nulls
-    110, -- Nulls
-    200, -- Fireplace / grid-adjacent
-    201, -- Nulls
-    202, -- Nulls
-    203, -- Nulls
-    204, -- Nulls
-    205, -- Nulls
-    206, -- Nulls
-    207, -- Nulls
-    208, -- Nulls
-    209, -- Nulls
-    210, -- Nulls
-    211, -- Nulls
-    212, -- Nulls
-    213, -- Nulls
-    214, -- Nulls
-    215, -- Nulls
-    216, -- Nulls
-    217, -- Nulls
-    218, -- Nulls
-    219, -- Nulls
-    220, -- Nulls
-    221, -- Nulls
-    222, -- Nulls
-    223, -- Nulls
-    224, -- Nulls
-    225, -- Nulls
-    226, -- Nulls
-    227, -- Nulls
-    228, -- Nulls
-    229, -- Nulls
-    230, -- Nulls
-    231, -- Nulls
-    232, -- Nulls
-    233, -- Nulls
-    234, -- Nulls
-    235, -- Nulls
-    236, -- Nulls
-    237, -- Nulls
-    238, -- Nulls
-    239, -- Nulls
-    240, -- Nulls
-    241, -- Nulls
-    242, -- Nulls
-    243, -- Nulls
-    244, -- Nulls
-    245, -- Nulls
-    246, -- Nulls
-    247, -- Nulls
-    248, -- Nulls
-    249, -- Nulls
-    250, -- Nulls
-    251, -- Nulls
-    252, -- Nulls
-    253, -- Nulls
-    254, -- Nulls
-    255, -- Nulls
+    10,  -- Gaper
+    11,  -- Gusher
+    12,  -- Horf            (Stage 0 control enemy: stationary blood-shot shooter)
+    13,  -- Fly             (basic, harmless)
+    14,  -- Pooter
+    15,  -- Clotty
+    16,  -- Mulligan
+    17,  -- Shopkeeper
+    18,  -- Attack Fly      (Stage A/B enemy: homing, contact damage)
+    19,  -- Larry Jr. (boss)
+    20,  -- Monstro (boss)
+    21,  -- Maggot
+    22,  -- Hive
+    23,  -- Charger
+    24,  -- Globin
+    25,  -- Boom Fly
+    26,  -- Maw
+    27,  -- Host
+    28,  -- Chub (boss)
+    29,  -- Hopper
+    30,  -- Boil
+    32,  -- Brain
+    33,  -- Fireplace
+    34,  -- Leaper
+    35,  -- Mr. Maw
+    36,  -- Gurdy (boss)
+    37,  -- (unmapped)
+    38,  -- Baby
+    39,  -- Vis
+    41,  -- Knight
+    42,  -- Stone Head
+    43,  -- Monstro II (boss)
+    44,  -- Poky
+    45,  -- Mom (boss)
+    46,  -- Sloth (miniboss)
+    47,  -- Lust (miniboss)
+    50,  -- Greed (miniboss)
+    51,  -- Envy (miniboss)
+    52,  -- Pride (miniboss)
+    53,  -- Dople
+    54,  -- Flaming Hopper
+    55,  -- Leech
+    56,  -- Lump
+    57,  -- Membrain
+    58,  -- Para-Bite
+    59,  -- Fred
+    60,  -- Eye
+    61,  -- Sucker
+    62,  -- Pin (boss)
+    63,  -- Famine (boss)
+    64,  -- Pestilence (boss)
+    65,  -- War (boss)
+    66,  -- Death (boss)
+    67,  -- Duke of Flies (boss)
+    68,  -- Peep (boss)
+    69,  -- Loki (boss)
+    70,  -- (unmapped)
+    71,  -- Fistula (big)
+    72,  -- Fistula (medium)
+    73,  -- Fistula (small)
+    74,  -- Blastocyst (boss)
+    75,  -- Blastocyst (medium)
+    76,  -- Blastocyst (small)
+    77,  -- Embryo
+    78,  -- Mom's Heart (boss)
+    79,  -- Gemini (boss)
+    80,  -- Moter
+    81,  -- The Fallen (boss)
+    82,  -- Headless Horseman (boss)
+    83,  -- (unmapped)
+    84,  -- (unmapped)
+    85,  -- (unmapped)
+    86,  -- (unmapped)
+    87,  -- (unmapped)
+    88,  -- (unmapped)
+    89,  -- (unmapped)
+    90,  -- (unmapped)
+    91,  -- (unmapped)
+    92,  -- (unmapped)
+    93,  -- (unmapped)
+    94,  -- (unmapped)
+    95,  -- (unmapped)
+    96,  -- (unmapped)
+    97,  -- (unmapped)
+    98,  -- (unmapped)
+    99,  -- (unmapped)
+    100, -- (unmapped)
+    101, -- (unmapped)
+    102, -- (unmapped)
+    103, -- (unmapped)
+    104, -- (unmapped)
+    105, -- (unmapped)
+    106, -- (unmapped)
+    107, -- (unmapped)
+    108, -- (unmapped)
+    109, -- (unmapped)
+    110, -- (unmapped)
+    200, -- (unmapped)
+    201, -- (unmapped)
+    202, -- (unmapped)
+    203, -- (unmapped)
+    204, -- (unmapped)
+    205, -- (unmapped)
+    206, -- (unmapped)
+    207, -- (unmapped)
+    208, -- (unmapped)
+    209, -- (unmapped)
+    210, -- (unmapped)
+    211, -- (unmapped)
+    212, -- (unmapped)
+    213, -- (unmapped)
+    214, -- (unmapped)
+    215, -- (unmapped)
+    216, -- (unmapped)
+    217, -- (unmapped)
+    218, -- (unmapped)
+    219, -- (unmapped)
+    220, -- (unmapped)
+    221, -- (unmapped)
+    222, -- (unmapped)
+    223, -- (unmapped)
+    224, -- (unmapped)
+    225, -- (unmapped)
+    226, -- (unmapped)
+    227, -- (unmapped)
+    228, -- (unmapped)
+    229, -- (unmapped)
+    230, -- (unmapped)
+    231, -- (unmapped)
+    232, -- (unmapped)
+    233, -- (unmapped)
+    234, -- (unmapped)
+    235, -- (unmapped)
+    236, -- (unmapped)
+    237, -- (unmapped)
+    238, -- (unmapped)
+    239, -- (unmapped)
+    240, -- (unmapped)
+    241, -- (unmapped)
+    242, -- (unmapped)
+    243, -- (unmapped)
+    244, -- (unmapped)
+    245, -- (unmapped)
+    246, -- (unmapped)
+    247, -- (unmapped)
+    248, -- (unmapped)
+    249, -- (unmapped)
+    250, -- (unmapped)
+    251, -- (unmapped)
+    252, -- (unmapped)
+    253, -- (unmapped)
+    254, -- (unmapped)
+    255, -- (unmapped)
 }
 for i, tid in ipairs(common_npcs) do
     M.NPC_TYPES[tid] = i

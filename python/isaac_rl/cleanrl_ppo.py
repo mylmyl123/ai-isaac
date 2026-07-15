@@ -308,6 +308,11 @@ def train(cfg: PPOConfig, env) -> None:
     dones = torch.zeros(cfg.n_envs, device=device)
 
     # ---- Episode trackers ----
+    # r_kill used to convert episode kill-reward back into a kill COUNT for the
+    # kills_mean metric (Phase 2 kill-counting fix). The env is constructed with
+    # RewardConfig() defaults in train.py, so read that default here.
+    from .reward import RewardConfig as _RewardConfig
+    cfg_r_kill = float(_RewardConfig().r_kill)
     ep_rewards = np.zeros(cfg.n_envs, dtype=np.float32)
     ep_lens = np.zeros(cfg.n_envs, dtype=np.int64)
     ep_kills = np.zeros(cfg.n_envs, dtype=np.int64)
@@ -370,15 +375,22 @@ def train(cfg: PPOConfig, env) -> None:
             # Episode-return bookkeeping.
             ep_rewards += np.asarray(rewards, dtype=np.float32)
             ep_lens += 1
-            for i, info in enumerate(infos):
-                for ev in (info.get("raw") or {}).get("events", []) or []:
-                    k = ev.get("kind")
-                    # Mod emits kills as damage_to_npc + killed=True. See reward.py.
-                    if k == "kill" or (k == "damage_to_npc" and ev.get("killed")):
-                        ep_kills[i] += 1
 
             for i in range(cfg.n_envs):
                 if terms[i] or truncs[i]:
+                    # Phase 2 (2026-07-14): count kills from the reward
+                    # breakdown, NOT from info["raw"]["events"]. On the death /
+                    # mod_restart terminal step, info["raw"] is the NEXT
+                    # episode's first frame (env.py returns the reconnected obs),
+                    # so per-step event-counting miscounts kills on the terminal
+                    # tick. vec_env.py splices reward_breakdown_episode from the
+                    # terminal info; kill reward / r_kill is the ground-truth
+                    # kill count the agent actually optimized. This makes
+                    # kills_mean consistent with the reward signal by
+                    # construction, and is immune to the terminal-obs frame swap.
+                    bd_ep = infos[i].get("reward_breakdown_episode") or {}
+                    r_kill = float(cfg_r_kill)
+                    ep_kills[i] = int(round(float(bd_ep.get("kill", 0.0)) / r_kill)) if r_kill else 0
                     completed_ep_rewards.append(float(ep_rewards[i]))
                     completed_ep_lens.append(int(ep_lens[i]))
                     completed_ep_kills.append(int(ep_kills[i]))
@@ -405,6 +417,14 @@ def train(cfg: PPOConfig, env) -> None:
         b_returns = returns.reshape(-1)
         b_values = rb.values.reshape(-1)
 
+        # Phase 2 (2026-07-14): normalize advantages ONCE over the full batch,
+        # not per-minibatch. Kill events are rare (~1 per ~150 ticks), so most
+        # 64-sample minibatches contain 0-1 high-advantage sample; per-minibatch
+        # renorm then rescales that lone sample against near-zero neighbors,
+        # amplifying noise into artificial advantages. Batch-level norm keeps
+        # the advantage scale consistent across all minibatches.
+        b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+
         # -------- PPO UPDATE --------
         batch_size = cfg.rollout_length * cfg.n_envs
         minibatch_size = batch_size // cfg.n_minibatches
@@ -418,8 +438,8 @@ def train(cfg: PPOConfig, env) -> None:
 
                 new_logp, new_ent, new_v = net.evaluate(b_obs[mb], b_actions[mb])
                 ratio = torch.exp(new_logp - b_logprobs[mb])
+                # Advantages already normalized batch-level above (Phase 2).
                 mb_adv = b_advantages[mb]
-                mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
                 pg1 = -mb_adv * ratio
                 pg2 = -mb_adv * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef)
