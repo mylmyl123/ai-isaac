@@ -268,6 +268,14 @@ def main() -> int:
         else:
             log.warning("override key ignored (unknown to PPOConfig): %s", k)
 
+    # Normalize stage to a string. The override coercion above turns a numeric
+    # stage (e.g. --override stage=0) into an int, and a YAML `stage: 0` also
+    # loads as an int; downstream code does cfg.stage.upper() (IsaacFleet) and
+    # string comparisons (cleanrl_ppo action-mask gate, mod ISAAC_RL_STAGE env
+    # var), all of which require a str. Coerce once here so "0" and 0 behave
+    # identically everywhere.
+    cfg.stage = str(cfg.stage)
+
     log.info("config: %s", asdict(cfg))
 
     launch = not args.no_launch_isaac
