@@ -54,6 +54,12 @@ lr_floor_frac: 0.1                # if anneal_lr=true, floor at 10% of base LR
 hidden_dim: 256
 n_hidden_layers: 2
 
+# Input normalization (2026-07-15). Running mean/std over the obs, applied
+# inside the network, clipped to [-10,10]. Fixes the Tanh saturation that made
+# the policy blind to enemy position (a raw frame counter swamped the aim
+# signal ~7600:1). true = on (default). Set false for the ablation arm.
+normalize_obs: true
+
 # ---- Runtime --------------------------------------------------------------
 device: cuda
 seed: 42

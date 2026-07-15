@@ -128,6 +128,10 @@ class PPOConfig:
     # ---- Network ----
     hidden_dim: int = 256
     n_hidden_layers: int = 2
+    # Input normalization (2026-07-15): running mean/std over the obs vector,
+    # applied inside the network. Fixes the Tanh saturation that made the
+    # policy blind to enemy position. On by default; set false for the ablation.
+    normalize_obs: bool = True
 
     # ---- Runtime ----
     device: str = "cuda"
@@ -172,8 +176,21 @@ class ActorCritic(nn.Module):
     leaking into useless action heads (drop_bomb / use_pillcard on Stage 0).
     """
     def __init__(self, obs_dim: int, hidden_dim: int, n_layers: int,
-                 active_factors: int | None = None):
+                 active_factors: int | None = None, normalize_obs: bool = True):
         super().__init__()
+        # ---- Input normalization (2026-07-15) ----
+        # The obs is a 2606-dim raw vector; unnormalized it saturates the Tanh
+        # trunk (measured: 99% of units pegged, a raw frame-counter swamped the
+        # enemy-bearing signal ~7600:1, so the policy was blind to enemy
+        # position). Standardize with a running mean/std (Welford, updated only
+        # during rollout collection) applied at the top of forward(), clipped to
+        # [-10, 10]. As registered buffers this saves/loads with the checkpoint
+        # and applies IDENTICALLY in act/evaluate/forward and the offline probe.
+        self.normalize_obs = bool(normalize_obs)
+        self.register_buffer("obs_mean", torch.zeros(obs_dim))
+        self.register_buffer("obs_var", torch.ones(obs_dim))
+        self.register_buffer("obs_count", torch.tensor(1e-4))
+
         layers: list[nn.Module] = []
         d = obs_dim
         for _ in range(n_layers):
@@ -201,8 +218,33 @@ class ActorCritic(nn.Module):
             nn.init.orthogonal_(head.weight, gain=0.01)
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
 
+    @torch.no_grad()
+    def update_norm(self, x: torch.Tensor) -> None:
+        """Update running obs mean/var from a batch (Welford / parallel merge).
+        Call ONLY during rollout collection, never inside the PPO update epochs
+        (so normalization stats aren't skewed by repeated passes over the same
+        rollout). No-op when normalize_obs is False."""
+        if not self.normalize_obs:
+            return
+        batch_mean = x.mean(dim=0)
+        batch_var = x.var(dim=0, unbiased=False)
+        batch_count = float(x.shape[0])
+        delta = batch_mean - self.obs_mean
+        tot = self.obs_count + batch_count
+        self.obs_mean += delta * (batch_count / tot)
+        m_a = self.obs_var * self.obs_count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta.pow(2) * (self.obs_count * batch_count / tot)
+        self.obs_var.copy_(m2 / tot)
+        self.obs_count.copy_(tot)
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.normalize_obs:
+            return x
+        return torch.clamp((x - self.obs_mean) / torch.sqrt(self.obs_var + 1e-8), -10.0, 10.0)
+
     def forward(self, x: torch.Tensor) -> tuple[list[Categorical], torch.Tensor]:
-        h = self.trunk(x)
+        h = self.trunk(self._normalize(x))
         dists = [Categorical(logits=head(h)) for head in self.action_heads]
         v = self.value_head(h).squeeze(-1)
         return dists, v
@@ -295,7 +337,7 @@ def train(cfg: PPOConfig, env) -> None:
              active_factors, n_all, cfg.stage, cfg.mask_unused_action_factors)
 
     net = ActorCritic(obs_dim, cfg.hidden_dim, cfg.n_hidden_layers,
-                      active_factors=active_factors).to(device)
+                      active_factors=active_factors, normalize_obs=cfg.normalize_obs).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
 
     n_factors = len(ACTION_FACTORS)
@@ -388,6 +430,10 @@ def train(cfg: PPOConfig, env) -> None:
             rb.obs[t] = obs
             rb.dones[t] = dones
 
+            # Update obs normalization stats from freshly-collected obs ONLY
+            # (not during the PPO update epochs, which reuse this data). No-op
+            # when normalize_obs is disabled.
+            net.update_norm(obs)
             with torch.no_grad():
                 actions, logp, _, values = net.act(obs)
             rb.actions[t] = actions

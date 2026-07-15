@@ -82,7 +82,13 @@ DOOR_FEATS = 18
 #   [0, 1] player position normalized to [-1, 1] within room
 #   [2, 3, 4, 5] normalized distance to each wall (left, up, right, down)
 #   [6, 7] unit vector to nearest OPEN door, or (0, 0) if none open
-SPATIAL_DIM = 8
+#   [8, 9] unit vector to nearest live ENEMY (aim direction), (0,0) if none
+#   [10]   inverse distance to nearest enemy (1/(1+dist_norm)) in (0,1]
+# 2026-07-15: dims 8-10 added because the shoot head was measured to be blind
+# to enemy bearing (the raw 2-of-2606 enemy-offset dims were swamped by an
+# unnormalized frame counter into a saturated Tanh). This dense, already-
+# oriented, scale-stable aim signal is a near-linear readout for the shoot head.
+SPATIAL_DIM = 11
 
 # Player history frame-stacking (added 2026-07-02).
 # Last N frames of player state, oldest-first: [nx, ny, vx, vy] per frame.
@@ -301,6 +307,43 @@ def _compute_spatial(
     out[6] = best_dir[0]
     out[7] = best_dir[1]
 
+    # Unit vector to nearest live ENEMY + inverse distance (dims 8-10, added
+    # 2026-07-15). This is the aim signal the shoot head needs, delivered dense,
+    # already-oriented, and scale-stable so it survives the flat MLP. The enemy
+    # offset the mod emits (enemies.feats[i][2],[3]) is ANISOTROPICALLY scaled
+    # (pixel_dx/480, pixel_dy/270); we undo that to recover true pixel deltas
+    # before computing the bearing, so the unit vector is geometrically correct
+    # (a 45-degree enemy reads as (0.707,0.707), not skewed by the 480!=270
+    # denominators). Falls back to (0,0,0) when no enemy is visible.
+    enemies = raw.get("enemies")
+    best_edist = None
+    best_edir = (0.0, 0.0)
+    if isinstance(enemies, dict):
+        feats = enemies.get("feats") or []
+        mask = enemies.get("mask") or []
+        for i, row in enumerate(feats):
+            if not row or len(row) < 4:
+                continue
+            if i < len(mask) and not mask[i]:
+                continue
+            # Undo the anisotropic normalization -> true pixel deltas.
+            try:
+                dx = float(row[2]) * 480.0
+                dy = float(row[3]) * 270.0
+            except (TypeError, ValueError):
+                continue
+            dist = float(np.hypot(dx, dy))
+            if best_edist is None or dist < best_edist:
+                best_edist = dist
+                best_edir = (dx / dist, dy / dist) if dist > 1e-6 else (0.0, 0.0)
+    out[8] = best_edir[0]
+    out[9] = best_edir[1]
+    if best_edist is not None:
+        # Inverse distance normalized by the room diagonal -> (0, 1], larger
+        # when the enemy is close. room diag from bounds computed above.
+        diag = float(np.hypot(width, height))
+        out[10] = 1.0 / (1.0 + best_edist / max(1.0, diag))
+
     return out
 
 
@@ -435,6 +478,17 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
             break
         v = p.get(name, 0)
         obs["player"][i] = float(bool(v)) if isinstance(v, bool) else float(v or 0)
+
+    # 2026-07-15: frame_count is an unbounded monotonic counter (grows into the
+    # thousands per episode) that carries NO task-relevant info but, fed raw,
+    # saturated the Tanh trunk and swamped the enemy-bearing signal ~7600:1 (the
+    # measured cause of the shoot head being blind to enemy position). Bound it
+    # to a small value at the source; the running obs-normalizer handles the
+    # rest. Kept in-slot (not removed) so obs indices/checkpoints don't shift.
+    if "frame_count" in _PLAYER_FIELDS:
+        fc_idx = _PLAYER_FIELDS.index("frame_count")
+        if fc_idx < PLAYER_DIM:
+            obs["player"][fc_idx] = float(p.get("frame_count", 0) or 0) / 1800.0
 
     # Phase 2: normalized fire-cooldown-remaining. The mod emits raw
     # `fire_cooldown` (frames until next tear) + `fire_delay` (== MaxFireDelay).
