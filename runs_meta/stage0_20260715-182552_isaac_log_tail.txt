@@ -1,0 +1,58 @@
+﻿[INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (520, 280) player=(345, 409) dist=217
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Unregistering the mod loadout due to the game exit.
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 1621105538
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: (INFO) [Stats+@PlayerService] Requesting a full reload due to the change of active players.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (160, 240) player=(320, 380) dist=212
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - [warn] no animation named Clos[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Unregistering the mod loadout due to the game exit.
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 1285740697
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: (INFO) [Stats+@PlayerService] Requesting a full reload due to the change of active players.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (440, 240) player=(320, 380) dist=184
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Unregistering the mod loadout due to the game exit.
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 3210496042
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: (INFO) [Stats+@PlayerService] Requesting a full reload due to the change of active players.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Reloading the state of the mod.
+[INFO] - Lua Debug: (INFO) [Stats+@ConfigRepository] Successfully loaded stored config.
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] Waiting for the ModConfigMenuProviderService...
+[INFO] - Lua Debug: (INFO) [Stats+@ModConfigMenuService] No Mod Config Menu is present, skipping the registration of ModConfigMenuService.
+[INFO] - Lua Debug: (INFO) [Stats+@ApplicationLifecycleManager] Mod state reloaded successfully.
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (560, 320) player=(320, 380) dist=247
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
