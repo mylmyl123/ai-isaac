@@ -1,0 +1,56 @@
+﻿[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 1667643816
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (240, 320) player=(320, 380) dist=100
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (120, 400) player=(246, 384) dist=127
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 2345350998
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (320, 280) player=(320, 380) dist=100
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 3742376034
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (240, 400) player=(320, 380) dist=82
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
+[INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
+[INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 4199636506
+[INFO] - Lua Debug: [isaac-rl-bridge] connected to trainer on port 9500
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (280, 320) player=(320, 380) dist=72
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: cleared 0 NPCs, spawned 1 flies, seal_doors=true
+[INFO] - Lua Debug: [isaac-rl-bridge] reset command received but game just started 32 ticks ago, skipping duplicate
+[INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (280, 360) player=(216, 409) dist=80
+[INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (320, 360) player=(240, 160) dist=215
+[INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (280, 240) player=(350, 297) dist=91
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
+[INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (240, 240) player=(351, 271) dist=115
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
