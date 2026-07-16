@@ -1,4 +1,9 @@
-﻿[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
+﻿[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
+[INFO] - Lua Debug: [isaac-rl-bridge] handle_player_death firing (source=MC_POST_UPDATE)
 [INFO] - Lua Debug: [isaac-rl-bridge] terminal-obs DELIVERED (source=MC_POST_UPDATE)
 [INFO] - Lua Debug: [isaac-rl-bridge] issuing 'restart' from MC_POST_UPDATE
 [INFO] - Level::Init m_Stage 1, m_StageType 0 Seed 1667643816
@@ -45,8 +50,20 @@
 [INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
 [INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
 [INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9500 — timeout
 [INFO] - Lua Debug: [isaac-rl-bridge] kill npc_type=12 variant=0
 [INFO] - Lua Debug: [isaac-rl-bridge] STAGE=0: spawned type=12 at (240, 240) player=(351, 271) dist=115
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
+[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
 [INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
 [INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
 [INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:73: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9503 — timeout
