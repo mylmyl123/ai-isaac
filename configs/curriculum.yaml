@@ -26,7 +26,8 @@ run_name: cleanrl_ppo_stage0
 # 256-batch run learned only "survive" (kills declined 1.0->0.1). More envs =
 # bigger batch so the rare kill signal survives advantage-norm. Episodes cut to
 # 500 so "survive to the 1800 cap without killing" is no longer the easy optimum.
-n_envs: 8
+# 4 envs (not 8) to keep the machine load manageable; batch = 4*512 = 2048.
+n_envs: 4
 base_port: 9500
 reset_stage: 1                    # Basement 1
 max_episode_steps: 500
