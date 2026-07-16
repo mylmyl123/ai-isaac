@@ -104,14 +104,38 @@ def test_kill_count_from_breakdown_arithmetic():
 # Changes 1+2: entity-id correctness in the mod (static text checks)
 # --------------------------------------------------------------------------
 
-def test_stage0_spawns_horf_12_not_maw_26():
+def test_stage0_spawns_charger_23():
+    """Stage 0 = 2x Charger (type 23): moving/un-camp-able bootstrap. NOT 26
+    (Maw, the old ID bug) and NOT 12 (Horf, the stationary enemy that let the
+    agent park out of range). Stage A/B stay Attack Fly (18)."""
     main_lua = (REPO / "mods" / "isaac-rl-bridge" / "main.lua").read_text(encoding="utf-8")
-    # The Stage-0 enemy type must be 12 (Horf), not 26 (Maw).
     m = re.search(r'STAGE_ENEMY_TYPE\s*=\s*\(STAGE\s*==\s*"0"\)\s*and\s*(\d+)\s*or\s*(\d+)', main_lua)
     assert m is not None, "could not find STAGE_ENEMY_TYPE assignment"
-    horf, fly = int(m.group(1)), int(m.group(2))
-    assert horf == 12, f"Stage 0 must spawn Horf (12), got {horf}"
-    assert fly == 18, f"Stage A/B must spawn Attack Fly (18), got {fly}"
+    stage0_type, other_type = int(m.group(1)), int(m.group(2))
+    assert stage0_type == 23, f"Stage 0 must spawn Charger (23), got {stage0_type}"
+    assert other_type == 18, f"Stage A/B must spawn Attack Fly (18), got {other_type}"
+    # Stage 0 count must be 2 (two enemies -> un-camp-able).
+    c = re.search(r'STAGE_ENEMY_COUNT\s*=\s*\(STAGE\s*==\s*"0"\)\s*and\s*(\d+)', main_lua)
+    assert c is not None and int(c.group(1)) == 2, "Stage 0 must spawn 2 enemies"
+
+
+def test_stage0_respawn_tops_up_to_full_population():
+    """Respawn must MAINTAIN N live enemies (top up the deficit as soon as one
+    dies), not wait for a full room-clear then refill. The old 'npc_count == 0'
+    gate let the room sit at 1 (and briefly 0) enemy, diluting the always-under-
+    pressure signal. Must count only LIVE combatants and spawn the deficit."""
+    main_lua = (REPO / "mods" / "isaac-rl-bridge" / "main.lua").read_text(encoding="utf-8")
+    # Must top up on a deficit, not only on a fully-empty room.
+    assert "npc_count < STAGE_FLY_COUNT" in main_lua, \
+        "respawn must top up to full population (npc_count < STAGE_FLY_COUNT)"
+    assert "npc_count == 0" not in main_lua, \
+        "respawn must not gate on a fully-cleared room"
+    # Must spawn exactly the deficit (STAGE_FLY_COUNT - npc_count).
+    assert "STAGE_FLY_COUNT - npc_count" in main_lua, \
+        "respawn must spawn exactly the deficit"
+    # Must count only live combatants (skip death-frame corpses + non-enemies).
+    assert "IsDead()" in main_lua and "IsActiveEnemy" in main_lua, \
+        "population count must exclude dead/non-combatant NPCs"
 
 
 def test_npc_types_horf_and_attackfly_distinct_and_present():
