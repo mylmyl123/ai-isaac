@@ -799,23 +799,29 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
     end
 
     -- Stage-0 continuous-respawn: every STAGE0_RESPAWN_POLL_TICKS game ticks,
-    -- check if the fly is gone. If the room has zero NPCs, spawn a new fly
-    -- next to the player. This turns Stage 0 from a one-shot 'kill 1 fly'
-    -- test into a proper training curriculum: each episode contains many
-    -- kills instead of one, giving the WM / actor a dense reward signal.
+    -- MAINTAIN a steady population of STAGE_ENEMY_COUNT live enemies. As soon
+    -- as one dies, spawn a replacement so there are always N alive (not "wait
+    -- for the room to fully clear, then respawn the whole wave" — that left
+    -- the agent facing 1 enemy for a stretch and briefly 0, diluting the
+    -- always-under-pressure, un-camp-able signal we want from 2 Chargers).
+    -- This gives the actor a dense, continuous reward signal.
     if STAGE_SPAWN_FLIES and (tick % STAGE0_RESPAWN_POLL_TICKS) == 0 and reset_cooldown == 0 and not death_announced then
         pcall(function()
             local room = Game():GetRoom()
+            -- Count only LIVE combatants: ToNPC filters to NPCs; IsDead() skips
+            -- the death-frame corpse (so we don't under-count and over-spawn),
+            -- and IsActiveEnemy(false) skips non-combatant NPCs (effects, some
+            -- friendly/neutral entities) so the top-up matches real threats.
             local npc_count = 0
             for _, ent in ipairs(Isaac.GetRoomEntities()) do
-                if ent:ToNPC() ~= nil then
+                local npc = ent:ToNPC()
+                if npc ~= nil and not npc:IsDead() and npc:IsActiveEnemy(false) then
                     npc_count = npc_count + 1
                 end
             end
-            if npc_count == 0 then
-                -- Respawn the FULL wave (STAGE_ENEMY_COUNT), not just one — so a
-                -- 2-Charger stage stays a 2-enemy task after each room-clear.
-                for _ = 1, STAGE_FLY_COUNT do stage0_spawn_fly(nil) end
+            -- Top up the deficit: always drive the population back to N.
+            if npc_count < STAGE_FLY_COUNT then
+                for _ = 1, (STAGE_FLY_COUNT - npc_count) do stage0_spawn_fly(nil) end
             end
             -- Re-seal doors every poll cycle. Bombs, explosions, and even
             -- some enemy deaths can unbar/reopen doors; a single missed

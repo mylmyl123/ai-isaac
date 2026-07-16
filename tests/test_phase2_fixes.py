@@ -119,6 +119,25 @@ def test_stage0_spawns_charger_23():
     assert c is not None and int(c.group(1)) == 2, "Stage 0 must spawn 2 enemies"
 
 
+def test_stage0_respawn_tops_up_to_full_population():
+    """Respawn must MAINTAIN N live enemies (top up the deficit as soon as one
+    dies), not wait for a full room-clear then refill. The old 'npc_count == 0'
+    gate let the room sit at 1 (and briefly 0) enemy, diluting the always-under-
+    pressure signal. Must count only LIVE combatants and spawn the deficit."""
+    main_lua = (REPO / "mods" / "isaac-rl-bridge" / "main.lua").read_text(encoding="utf-8")
+    # Must top up on a deficit, not only on a fully-empty room.
+    assert "npc_count < STAGE_FLY_COUNT" in main_lua, \
+        "respawn must top up to full population (npc_count < STAGE_FLY_COUNT)"
+    assert "npc_count == 0" not in main_lua, \
+        "respawn must not gate on a fully-cleared room"
+    # Must spawn exactly the deficit (STAGE_FLY_COUNT - npc_count).
+    assert "STAGE_FLY_COUNT - npc_count" in main_lua, \
+        "respawn must spawn exactly the deficit"
+    # Must count only live combatants (skip death-frame corpses + non-enemies).
+    assert "IsDead()" in main_lua and "IsActiveEnemy" in main_lua, \
+        "population count must exclude dead/non-combatant NPCs"
+
+
 def test_npc_types_horf_and_attackfly_distinct_and_present():
     tables_lua = (REPO / "mods" / "isaac-rl-bridge" / "tables.lua").read_text(encoding="utf-8")
     # Extract the numeric NPC id list (one "<int>," per line inside common_npcs).
