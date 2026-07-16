@@ -382,12 +382,28 @@ local function build_room_tensor(room, player, tl)
         end
     end
 
-    -- Return the 14 reused channel arrays wrapped fresh (channel-major).
-    -- Python reshapes to (14, 34, 60). Do NOT mutate elsewhere.
-    return {
-        _rt[1], _rt[2], _rt[3], _rt[4], _rt[5], _rt[6], _rt[7],
-        _rt[8], _rt[9], _rt[10], _rt[11], _rt[12], _rt[13], _rt[14],
-    }
+    -- Return a SPARSE encoding: a flat list [c, idx, v, c, idx, v, ...] of the
+    -- nonzero cells only (c = 0-based channel, idx = 0-based cell index within
+    -- the 34x60 channel, v = value). The dense tensor is 14*2040 = 28560 cells
+    -- and ~99.9% zeros on Stage 0, so dense JSON was ~140 KB/frame — too big for
+    -- Lua json.encode + the send window, causing socket drops. Sparse is ~2 KB.
+    -- Python _decode_room_tensor scatters these back into a dense (14,34,60).
+    local sparse = {}
+    local si = 0
+    for c = 1, RT_C do
+        local ch = _rt[c]
+        local c0 = c - 1                     -- 0-based channel for Python
+        for i = 1, RT_N do
+            local v = ch[i]
+            if v ~= 0 then
+                sparse[si + 1] = c0
+                sparse[si + 2] = i - 1        -- 0-based cell index
+                sparse[si + 3] = v
+                si = si + 3
+            end
+        end
+    end
+    return sparse
 end
 
 local DOOR_SLOTS = { DoorSlot.LEFT0, DoorSlot.UP0, DoorSlot.RIGHT0, DoorSlot.DOWN0 }
@@ -457,12 +473,12 @@ function Obs.build(tick, reward_events, run_state)
     local vel = player.Velocity
     local tl, br = room_bounds(room)
 
-    local enemies, e_mask, n_enemies = build_enemies(room, player, tl, br)
-    local proj,    p_mask, n_proj    = build_projectiles(room, player, tl, br)
-    local pickups, k_mask, n_pickups = build_pickups(room, player, tl, br)
-    -- Full-room layered tensor (2026-07-15 rebuild v2). Built from its own
-    -- entity scan so the legacy flat lists above stay intact until the probe
-    -- gate passes.
+    -- Full-room layered tensor (2026-07-15 rebuild v2) — the ONLY spatial obs
+    -- the CNN uses. The old flat entity/terrain lists (build_enemies /
+    -- build_projectiles / build_pickups / build_passives / build_room_grid /
+    -- build_doors) are no longer built or sent: they were unused by the policy
+    -- and bloated the payload past the 50ms send window (socket drops). Their
+    -- functions remain defined for reference / possible future use.
     local rt_ok, room_tensor = pcall(build_room_tensor, room, player, tl)
     if not rt_ok then
         Isaac.DebugString("[isaac-rl-bridge] build_room_tensor failed: " .. tostring(room_tensor))
@@ -574,13 +590,16 @@ function Obs.build(tick, reward_events, run_state)
                 return t
             end)(),
         },
-        passives = build_passives(player),
-        room_grid = build_room_grid(room),
-        room_tensor = room_tensor,   -- full-room 14-channel layered tensor (nil if build failed)
-        doors = build_doors(room),
-        enemies = { feats = enemies, mask = e_mask, count = n_enemies },
-        projectiles = { feats = proj, mask = p_mask, count = n_proj },
-        pickups = { feats = pickups, mask = k_mask, count = n_pickups },
+        room_tensor_sparse = room_tensor,   -- flat [c,idx,v,...] of nonzero cells (nil if build failed)
+        -- 2026-07-15 (Phase-3): the CNN consumes ONLY room_tensor + a few
+        -- player/global scalars. The old flat obs fields (passives, room_grid,
+        -- doors, enemies/projectiles/pickups feature lists) are NOT read by the
+        -- policy and were bloating the JSON payload to ~90KB+/frame — big enough
+        -- that the send couldn't complete within net.lua's 50ms timeout, causing
+        -- partial sends -> socket close -> 'socket closed while reading frame'.
+        -- Removed from the wire. Python's decode_obs zero-fills any missing key,
+        -- so this is safe. (build_enemies/projectiles/pickups/passives/room_grid
+        -- /doors are still defined but no longer called from Obs.build.)
         -- Room geometry (added 2026-07-02 for spatial-features obs). Uses
         -- the same tl/br as the entity normalizers so Python can compute
         -- player_normalized_position + wall distances + door directions

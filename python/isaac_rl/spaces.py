@@ -221,19 +221,31 @@ def _decode_room_grid(raw: dict | None) -> np.ndarray:
     return grid
 
 
-def _decode_room_tensor(raw: list | None) -> np.ndarray:
-    """Decode the full-room layered tensor: 14 channels of flat (60*34)-length
-    arrays (Lua build_room_tensor) -> (14, 34, 60) float32, clipped to [-1,1].
-    Channel-major, row-major (row=Y) within channel. Missing/short -> zeros."""
+def _decode_room_tensor(raw_sparse: list | None) -> np.ndarray:
+    """Decode the SPARSE full-room tensor into dense (14, 34, 60) float32.
+
+    raw_sparse is a flat list [c, idx, v, c, idx, v, ...] of nonzero cells
+    (0-based channel c, 0-based cell index idx within the 34x60 channel, value
+    v), emitted by Lua build_room_tensor. Sparse because the dense tensor is
+    ~99.9% zeros on Stage 0 — dense JSON was ~140 KB/frame (socket drops),
+    sparse is ~2 KB. Missing/empty -> all zeros. Out-of-range entries skipped.
+    """
     out = np.zeros((ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W), dtype=np.float32)
-    if not raw:
+    if not raw_sparse:
         return out
+    flat = out.reshape(ROOM_TENSOR_C, -1)   # (14, 2040) view; writes hit `out`
     n_cells = ROOM_TENSOR_H * ROOM_TENSOR_W
-    for ch in range(min(ROOM_TENSOR_C, len(raw))):
-        arr = raw[ch] or []
-        n = min(len(arr), n_cells)
-        if n:
-            out[ch].reshape(-1)[:n] = np.asarray(arr[:n], dtype=np.float32)
+    m = len(raw_sparse)
+    i = 0
+    while i + 2 < m:
+        try:
+            c = int(raw_sparse[i]); idx = int(raw_sparse[i + 1]); v = float(raw_sparse[i + 2])
+        except (TypeError, ValueError):
+            i += 3
+            continue
+        if 0 <= c < ROOM_TENSOR_C and 0 <= idx < n_cells:
+            flat[c, idx] = v
+        i += 3
     np.clip(out, -1.0, 1.0, out=out)
     return out
 
@@ -539,7 +551,7 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
 
     obs["passives"] = _decode_passives(raw.get("passives"))
     obs["room_grid"] = _decode_room_grid(raw.get("room_grid"))
-    obs["room_tensor"] = _decode_room_tensor(raw.get("room_tensor"))
+    obs["room_tensor"] = _decode_room_tensor(raw.get("room_tensor_sparse"))
     obs["doors"] = _decode_doors(raw.get("doors"))
     obs["spatial"] = _compute_spatial(raw)
 

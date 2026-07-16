@@ -35,7 +35,13 @@ function Net.connect(host, port, timeout_s)
     -- per PPO update, giving a visible ~30s stutter every rollout. A short
     -- 50ms timeout keeps Isaac responsive; on timeout we just re-use the
     -- previous action for one tick, which is invisible to training.
-    self.timeout_s = timeout_s or 0.05
+    -- 2026-07-15: raised 50ms -> 120ms. The room_tensor obs is a larger payload
+    -- than the old flat obs; under a PPO-update stall the OS send buffer can
+    -- need >50ms to drain, causing partial sends -> socket close -> Python
+    -- 'socket closed while reading frame'. 120ms gives the write room to
+    -- complete while still keeping Isaac responsive (on timeout we reuse the
+    -- previous action for one tick, invisible to training).
+    self.timeout_s = timeout_s or 0.12
     self.sock = nil
     self:_reconnect()
     return self
