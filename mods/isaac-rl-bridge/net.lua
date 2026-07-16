@@ -54,24 +54,48 @@ function Net:_reconnect()
     end
     local s = socket.tcp()
     s:settimeout(self.timeout_s)
-    -- Retry a few times so the trainer can start after Isaac. Kept SHORT so a
-    -- reconnect never freezes Isaac for more than ~1.25s. Previously 40
-    -- retries * 250ms = up to 10s of frozen game loop, which read on-screen
-    -- as the 'walks into corner and lags' symptom during Python's PPO
-    -- gradient-update window.
+    -- Reconnect budget must OUTLAST a Python PPO gradient update. Every episode
+    -- reset, Python closes the client socket and re-listens (env.py reset() ->
+    -- _accept), so the mod reconnects each episode. Normally that succeeds in
+    -- <100ms. But when a reset lands WHILE Python is mid-PPO-update, Python
+    -- hasn't reached accept() yet — the connect() refuses/times out until the
+    -- update finishes (a few seconds at this batch size). The old 5*0.25s=1.25s
+    -- budget expired inside that window and error()'d at this line, producing
+    -- the 'could not connect to trainer — timeout' bursts in the Isaac log
+    -- (10-13 in a row, then recovery once accept() was reached).
+    --
+    -- Fix: poll FAST (short connect timeout + 60ms sleep) over a LONG total
+    -- budget (~8s). Key point: a successful connect returns the INSTANT Python
+    -- reaches accept(), so the game only stalls for as long as Python is
+    -- genuinely busy — NOT the full budget. Fast polling keeps the normal-case
+    -- reconnect invisible (<100ms) while surviving a full update window without
+    -- crashing the PostUpdate callback. This is why the old 40*250ms froze the
+    -- game (250ms sleep = coarse polling, up to 250ms wasted past accept-ready);
+    -- 60ms polling drains almost immediately once the listener is back.
+    s:settimeout(0.06)
     local last_err
-    for _ = 1, 5 do
+    local deadline = 8.0        -- total seconds to keep trying before giving up
+    local elapsed = 0.0
+    while elapsed < deadline do
         local ok, err = s:connect(self.host, self.port)
         if ok then
+            s:settimeout(self.timeout_s)   -- restore normal send/recv timeout
             s:setoption("tcp-nodelay", true)
             self.sock = s
             return true
         end
         last_err = err
-        socket.sleep(0.25)
+        socket.sleep(0.06)
+        elapsed = elapsed + 0.06
+        -- A fresh TCP socket may be unusable after a failed connect() on some
+        -- stacks; recreate it each attempt to be safe.
+        pcall(function() s:close() end)
+        s = socket.tcp()
+        s:settimeout(0.06)
     end
     error("[isaac-rl-bridge] could not connect to trainer at " ..
-        self.host .. ":" .. tostring(self.port) .. " — " .. tostring(last_err))
+        self.host .. ":" .. tostring(self.port) .. " — " .. tostring(last_err) ..
+        " (gave up after " .. tostring(deadline) .. "s — trainer down, not just mid-update?)")
 end
 
 -- Send a length-prefixed frame. Reconnects on peer-death; drops-on-timeout.
