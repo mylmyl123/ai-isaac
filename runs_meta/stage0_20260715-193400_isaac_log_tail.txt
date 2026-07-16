@@ -1,0 +1,1 @@
+﻿[INFO] - Error in "PostUpdate" call: ...he Binding of Isaac Rebirth/mods/isaac-rl-bridge/net.lua:67: [isaac-rl-bridge] could not connect to trainer at 127.0.0.1:9501 — timeout
