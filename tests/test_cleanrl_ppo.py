@@ -22,7 +22,9 @@ def test_reward_config_has_three_terms():
     (shaping only when explicitly enabled) without forbidding the flagged terms.
     """
     cfg = RewardConfig()
-    assert cfg.r_kill == 1.0 and cfg.r_death == -1.0 and cfg.r_step == -0.001
+    # Phase-3 (2026-07-15): r_kill raised to +3 so killing dominates the idle
+    # bleed (the 2-env run's reward taught survival). death/step unchanged.
+    assert cfg.r_kill == 3.0 and cfg.r_death == -1.0 and cfg.r_step == -0.001
     assert cfg.r_hit == 0.0, "r_hit must default to 0 (opt-in shaping only)"
     assert cfg.pbrs_coef == 0.0, "pbrs_coef must default to 0 (opt-in shaping only)"
 
@@ -34,9 +36,9 @@ def test_reward_shaper_kill_and_step():
         {"events": [{"kind": "kill"}], "player": {"hp_red": 3}},
         action=None,
     )
-    assert total == pytest.approx(1.0 - 0.001)
+    assert total == pytest.approx(3.0 - 0.001)   # r_kill=3 default (Phase-3)
     assert terminated is False
-    assert bd["kill"] == 1.0
+    assert bd["kill"] == 3.0
     assert bd["step"] == pytest.approx(-0.001)
 
 
@@ -50,7 +52,7 @@ def test_reward_shaper_kill_via_damage_to_npc():
          "player": {"hp_red": 3}},
         action=None,
     )
-    assert bd.get("kill") == 1.0, "damage_to_npc + killed=True must count as a kill"
+    assert bd.get("kill") == 3.0, "damage_to_npc + killed=True must count as a kill"
     # Non-lethal damage_to_npc should NOT count as a kill.
     s2 = RewardShaper()
     _, _, bd2 = s2(

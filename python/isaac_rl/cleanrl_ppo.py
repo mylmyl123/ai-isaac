@@ -107,6 +107,10 @@ class PPOConfig:
     mask_unused_action_factors: bool = True
 
     # ---- Reward shaping (PBRS cold-start fix, 2026-07-14) ----
+    # Kill reward (Phase-3, 2026-07-15). Raised from the default +1 to make
+    # killing dominate the idle/step bleed (the 2-env run's reward taught
+    # survival because idle -5.6/ep dwarfed kill +1.4/ep). Passed to RewardConfig.
+    r_kill: float = 3.0
     # Potential-based reward shaping coefficient. 0.0 = pure 3-term reward
     # (the baseline). >0 densifies the sparse signal via Phi = -dist-to-enemy,
     # provably policy-invariant (Ng 1999). Passed into RewardConfig by train.py
@@ -122,8 +126,8 @@ class PPOConfig:
     # present). Makes surviving without killing bleed reward -> fixes the
     # park-and-spray exploit. grace=12 tracks the mod's respawn cadence so
     # loitering is penalized but a prompt killer is not. 0.0 = off.
-    r_idle: float = -0.005
-    idle_grace: int = 12
+    r_idle: float = -0.002
+    idle_grace: int = 20
 
     # ---- Closer-spawn curriculum (Phase-2 cold-start fix) ----
     # Enemy spawn-distance band (px from player), passed to the mod via env
@@ -537,10 +541,9 @@ def train(cfg: PPOConfig, env) -> None:
 
     # ---- Episode trackers ----
     # r_kill used to convert episode kill-reward back into a kill COUNT for the
-    # kills_mean metric (Phase 2 kill-counting fix). The env is constructed with
-    # RewardConfig() defaults in train.py, so read that default here.
-    from .reward import RewardConfig as _RewardConfig
-    cfg_r_kill = float(_RewardConfig().r_kill)
+    # kills_mean metric (Phase 2 kill-counting fix). Read from cfg.r_kill so it
+    # stays consistent when r_kill is retuned (Phase-3 raised it to +3).
+    cfg_r_kill = float(cfg.r_kill)
     ep_rewards = np.zeros(cfg.n_envs, dtype=np.float32)
     ep_lens = np.zeros(cfg.n_envs, dtype=np.int64)
     ep_kills = np.zeros(cfg.n_envs, dtype=np.int64)

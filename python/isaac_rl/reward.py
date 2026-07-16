@@ -44,7 +44,7 @@ class RewardConfig:
     still the baseline. `gamma` MUST equal the trainer's gamma (PPOConfig /
     curriculum.yaml) for the invariance guarantee to hold.
     """
-    r_kill: float = 1.0
+    r_kill: float = 3.0
     r_death: float = -1.0
     r_step: float = -0.001
     # ---- Idle penalty (2026-07-15): "time since last kill" pressure ----
@@ -68,8 +68,14 @@ class RewardConfig:
     # Verified at r_idle=-0.005, grace=12: a ~90-tick kill cycle nets +0.525,
     # never-killing a full 1800-tick episode bleeds strongly negative, and
     # killing beats both idling and suicide. r_idle=0.0 disables it.
-    r_idle: float = -0.005
-    idle_grace: int = 12
+    # Phase-3 (2026-07-15): defaults aligned with PPOConfig/curriculum.yaml.
+    # r_kill raised to +3 (kills must dominate the idle/step bleed — the 2-env
+    # run's reward taught survival because idle -5.6/ep dwarfed kill +1.4/ep).
+    # idle softened to -0.002, grace 20 (a gentle anti-loiter nudge, not the
+    # dominant signal). train.py passes these from cfg, so this is the single
+    # source of truth. Verified: survive-no-kill ~-1.5, a killer +22..+47.
+    r_idle: float = -0.002
+    idle_grace: int = 20
     # ---- Dense per-hit reward (Phase-2c cold-start fix) ----
     # DISABLED by default (r_hit=0.0). Rewarded every connecting tear, which the
     # 2026-07-15 overnight sweep showed causes a "park and spray one fixed

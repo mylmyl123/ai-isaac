@@ -64,7 +64,7 @@ def test_penalty_persists_after_grace():
 
 
 def test_kill_resets_counter_and_killing_step_not_penalized():
-    sh = RewardShaper(RewardConfig(r_idle=-0.005, idle_grace=12))
+    sh = RewardShaper(RewardConfig(r_idle=-0.005, idle_grace=12, r_kill=1.0))
     sh.reset()
     for _ in range(20):                       # go past grace so penalty is active
         _step(sh)
@@ -121,7 +121,9 @@ def test_r_idle_zero_disables():
 
 def test_default_config_has_idle_active():
     cfg = RewardConfig()
-    assert cfg.r_idle == -0.005 and cfg.idle_grace == 12
+    # Phase-3 defaults (2026-07-15): idle softened, kill raised.
+    assert cfg.r_idle == -0.002 and cfg.idle_grace == 20
+    assert cfg.r_kill == 3.0
     # And the superseded shaping terms are OFF by default.
     assert cfg.r_hit == 0.0 and cfg.pbrs_coef == 0.0
 
