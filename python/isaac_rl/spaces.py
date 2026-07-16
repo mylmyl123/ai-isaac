@@ -99,11 +99,13 @@ HISTORY_FRAMES = 4
 HISTORY_FEATS = 4                                    # (nx, ny, vx, vy)
 PLAYER_HISTORY_DIM = HISTORY_FRAMES * HISTORY_FEATS  # 4 * 4 = 16
 
-# Egocentric CNN grid (2026-07-15 architecture rebuild). 14 channels, 21x21,
-# player-centered. Built in the Lua mod (obs.lua build_ego_grid); channel order
-# MUST match. See that function's comment for the per-channel meaning.
-EGO_CHANNELS = 14
-EGO_GRID = 21
+# Full-room layered tensor (2026-07-15 rebuild v2). 14 channels, full-room
+# absolute frame at 8px/cell over the 480x270 room -> 60 wide x 34 tall. Built
+# in the Lua mod (obs.lua build_room_tensor); channel order MUST match. Every
+# entity at its true room position, nothing cropped. Rows=Y (34), Cols=X (60).
+ROOM_TENSOR_C = 14
+ROOM_TENSOR_W = 60
+ROOM_TENSOR_H = 34
 
 # B4: Per-episode latent variable z ~ N(0, I). Sampled at reset,
 # constant for the whole episode. Encourages strategic diversity.
@@ -115,9 +117,9 @@ def observation_space() -> spaces.Dict:
         "player":     spaces.Box(-np.inf, np.inf, shape=(PLAYER_DIM,), dtype=np.float32),
         "passives":   spaces.MultiBinary(PASSIVES_K),
         "room_grid":  spaces.Box(0.0, 1.0, shape=(4, ROOM_H, ROOM_W), dtype=np.float32),
-        # Egocentric CNN grid (2026-07-15). The primary spatial input for the
-        # new CNN architecture. 14 channels, player-centered 21x21.
-        "ego_grid":   spaces.Box(-1.0, 1.0, shape=(EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32),
+        # Full-room layered tensor (2026-07-15 v2). The primary spatial input:
+        # every entity + terrain at true room position, nothing cropped.
+        "room_tensor": spaces.Box(-1.0, 1.0, shape=(ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W), dtype=np.float32),
         "doors":      spaces.Box(0.0, 1.0, shape=(4, DOOR_FEATS), dtype=np.float32),
         "enemies": spaces.Dict({
             "feats": spaces.Box(-np.inf, np.inf, shape=(MAX_ENEMIES, ENEMY_FEATS), dtype=np.float32),
@@ -219,19 +221,17 @@ def _decode_room_grid(raw: dict | None) -> np.ndarray:
     return grid
 
 
-def _decode_ego_grid(raw: list | None) -> np.ndarray:
-    """Decode the egocentric CNN grid: 14 channels of flat 441-length arrays
-    (Lua build_ego_grid) -> (14, 21, 21) float32, clipped to [-1, 1].
-
-    raw is a list of 14 flat arrays (channel-major, row-major within channel).
-    Missing/short arrays zero-fill (schema-safe if the mod hasn't been updated).
-    """
-    out = np.zeros((EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32)
+def _decode_room_tensor(raw: list | None) -> np.ndarray:
+    """Decode the full-room layered tensor: 14 channels of flat (60*34)-length
+    arrays (Lua build_room_tensor) -> (14, 34, 60) float32, clipped to [-1,1].
+    Channel-major, row-major (row=Y) within channel. Missing/short -> zeros."""
+    out = np.zeros((ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W), dtype=np.float32)
     if not raw:
         return out
-    for ch in range(min(EGO_CHANNELS, len(raw))):
+    n_cells = ROOM_TENSOR_H * ROOM_TENSOR_W
+    for ch in range(min(ROOM_TENSOR_C, len(raw))):
         arr = raw[ch] or []
-        n = min(len(arr), EGO_GRID * EGO_GRID)
+        n = min(len(arr), n_cells)
         if n:
             out[ch].reshape(-1)[:n] = np.asarray(arr[:n], dtype=np.float32)
     np.clip(out, -1.0, 1.0, out=out)
@@ -539,7 +539,7 @@ def encode_obs(raw: dict[str, Any], last_action: np.ndarray | None = None) -> di
 
     obs["passives"] = _decode_passives(raw.get("passives"))
     obs["room_grid"] = _decode_room_grid(raw.get("room_grid"))
-    obs["ego_grid"] = _decode_ego_grid(raw.get("ego_grid"))
+    obs["room_tensor"] = _decode_room_tensor(raw.get("room_tensor"))
     obs["doors"] = _decode_doors(raw.get("doors"))
     obs["spatial"] = _compute_spatial(raw)
 
@@ -602,7 +602,7 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
         "player": obs["player"],
         "passives": obs["passives"].astype(np.float32),
         "room_grid": obs["room_grid"],
-        "ego_grid": obs.get("ego_grid", np.zeros((EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32)),
+        "room_tensor": obs.get("room_tensor", np.zeros((ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W), dtype=np.float32)),
         "doors": obs["doors"],
         "global": obs["global"],
         "last_action": obs["last_action"],
@@ -630,47 +630,59 @@ def flatten_dict_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
 # CNN-architecture obs split (2026-07-15 rebuild)
 # ==========================================================================
 #
-# The new CNN+GRU network consumes TWO tensors, not the flat concat:
-#   * ego_grid: (14, 21, 21) spatial image -> CNN tower (UNnormalized)
-#   * scalar:   (SCALAR_DIM,) low-D vector -> MLP branch (Welford-normalized)
+# The CNN+GRU network consumes TWO tensors:
+#   * room_tensor: (14, 34, 60) full-room spatial image -> CNN tower (raw, [-1,1])
+#   * scalar:      (SCALAR_DIM,) position-LESS features -> MLP branch (normalized)
 #
-# The scalar vector deliberately EXCLUDES spatial[8:10] (unit-vec-to-nearest-
-# enemy + inv-dist). Those are kept ONLY as a bearing-probe label / optional
-# aux target — feeding them into the policy would let the shoot head bypass the
-# CNN and make the probe circular (it would "aim" via the shortcut, not via
-# learned spatial reasoning). The whole point is to prove the CNN can aim.
+# The scalar branch holds ONLY genuinely non-spatial data (HP, cooldown, stats,
+# flags). ALL positional information — player, enemies, projectiles, tears,
+# pickups, terrain — lives in the room_tensor at true position. There is NO
+# nearest-enemy / aim-shortcut scalar: the model must read enemy position from
+# the spatial layers, which is the whole point and keeps the probe honest.
 
-# scalar layout: player(40) + global(20) + doors(4*18=72) + last_action(5)
-#              + spatial[0:8](8) + z(16) = 161
-SCALAR_DIM = PLAYER_DIM + GLOBAL_DIM + (4 * DOOR_FEATS) + len(ACTION_FACTORS) + 8 + Z_DIM
+# Scalar layout (position-less only): from the player block —
+#   hp_red, hp_soul, hp_black, hp_max, keys, bombs, coins, damage, fire_delay,
+#   move_speed, tear_range, shot_speed, luck, can_shoot, fire_cooldown_norm (15)
+# plus global flags: is_clear, frames_since_room, frames_since_hit (3)
+# plus last_action(5) + z(16) = 39.
+_SCALAR_PLAYER_FIELDS = (
+    "hp_red", "hp_soul", "hp_black", "hp_max", "keys", "bombs", "coins",
+    "damage", "fire_delay", "move_speed", "tear_range", "shot_speed", "luck",
+    "can_shoot", "fire_cooldown_norm",
+)
+_SCALAR_GLOBAL_FIELDS = ("is_clear", "frames_since_room", "frames_since_hit")
+SCALAR_DIM = len(_SCALAR_PLAYER_FIELDS) + len(_SCALAR_GLOBAL_FIELDS) + len(ACTION_FACTORS) + Z_DIM
+
+
+def _player_field(obs_player: np.ndarray, name: str) -> float:
+    i = _PLAYER_FIELDS.index(name) if name in _PLAYER_FIELDS else -1
+    return float(obs_player[i]) if 0 <= i < len(obs_player) else 0.0
+
+
+def _global_field(obs_global: np.ndarray, name: str) -> float:
+    i = _GLOBAL_FIELDS.index(name) if name in _GLOBAL_FIELDS else -1
+    return float(obs_global[i]) if 0 <= i < len(obs_global) else 0.0
 
 
 def split_obs(obs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    """Split an encoded obs dict into (ego_grid, scalar) for the CNN network.
+    """Split an encoded obs dict into (room_tensor, scalar) for the CNN network.
 
-    ego_grid: (14, 21, 21) float32 (fed raw to the CNN, already in [-1,1]).
-    scalar:   (SCALAR_DIM,) float32 (Welford-normalized in the net).
+    room_tensor: (14, 34, 60) float32 (fed raw to the CNN, already in [-1,1]).
+    scalar:      (SCALAR_DIM,) float32, position-LESS only (Welford-normalized
+                 in the net). All spatial info is in room_tensor.
     """
-    grid = obs.get("ego_grid")
+    grid = obs.get("room_tensor")
     if grid is None:
-        grid = np.zeros((EGO_CHANNELS, EGO_GRID, EGO_GRID), dtype=np.float32)
+        grid = np.zeros((ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W), dtype=np.float32)
     grid = np.asarray(grid, dtype=np.float32)
 
-    spatial = np.asarray(obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)), dtype=np.float32)
+    p = np.asarray(obs["player"], dtype=np.float32).reshape(-1)
+    g = np.asarray(obs["global"], dtype=np.float32).reshape(-1)
     parts = [
-        np.asarray(obs["player"], dtype=np.float32).reshape(-1),
-        np.asarray(obs["global"], dtype=np.float32).reshape(-1),
-        np.asarray(obs["doors"], dtype=np.float32).reshape(-1),
+        np.array([_player_field(p, n) for n in _SCALAR_PLAYER_FIELDS], dtype=np.float32),
+        np.array([_global_field(g, n) for n in _SCALAR_GLOBAL_FIELDS], dtype=np.float32),
         np.asarray(obs["last_action"], dtype=np.float32).reshape(-1),
-        spatial[:8],                       # EXCLUDE 8:10 (aim shortcut) — probe label only
         np.asarray(obs.get("z", np.zeros(Z_DIM, dtype=np.float32)), dtype=np.float32).reshape(-1),
     ]
     scalar = np.concatenate(parts).astype(np.float32)
     return grid, scalar
-
-
-def nearest_enemy_bearing(obs: dict[str, Any]) -> np.ndarray:
-    """The (unit_dx, unit_dy) to nearest enemy — spatial dims 8:10 without
-    inv-dist. This is the bearing-probe LABEL (never fed to the policy)."""
-    spatial = np.asarray(obs.get("spatial", np.zeros(SPATIAL_DIM, dtype=np.float32)), dtype=np.float32)
-    return spatial[8:10].copy()

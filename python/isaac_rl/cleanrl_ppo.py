@@ -53,8 +53,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .spaces import (
     ACTION_FACTORS,
-    EGO_CHANNELS,
-    EGO_GRID,
+    ROOM_TENSOR_C,
+    ROOM_TENSOR_H,
+    ROOM_TENSOR_W,
     SCALAR_DIM,
     flatten_dict_obs,
     split_obs,
@@ -285,15 +286,18 @@ class ActorCritic(nn.Module):
 
 
 class CNNActorCritic(nn.Module):
-    """Egocentric-grid CNN + scalar-MLP fusion -> factored action heads + value.
+    """Full-room tensor CNN + scalar-MLP fusion -> factored action heads + value.
 
     Replaces the flat-MLP ActorCritic that was measurably BLIND to enemy
     position (constant shoot direction regardless of bearing). Inputs are TWO
     tensors from spaces.split_obs():
-      * grid   (B, 14, 21, 21) — egocentric spatial image, fed UNNORMALIZED
+      * grid   (B, 14, 34, 60) — full-room layered spatial image (every entity
+        + terrain at true room position, nothing cropped), fed UNNORMALIZED
         (already in [-1,1]; normalizing sparse presence planes destroys the
         zero baseline the CNN relies on).
-      * scalar (B, 161)        — low-D vector, Welford-normalized here.
+      * scalar (B, SCALAR_DIM)  — position-LESS features only (HP, cooldown,
+        stats, flags), Welford-normalized here. No enemy position / aim shortcut
+        lives here — all spatial info is in the grid.
 
     ReLU everywhere (escapes the Tanh saturation that caused the blindness),
     orthogonal init gain=sqrt(2) on the ReLU path. Keeps the factored
@@ -312,13 +316,17 @@ class CNNActorCritic(nn.Module):
         self.register_buffer("obs_var", torch.ones(SCALAR_DIM))
         self.register_buffer("obs_count", torch.tensor(1e-4))
 
-        # CNN tower over the 14x21x21 grid.
+        # CNN tower over the full-room 14x34x60 tensor. Strides downsample
+        # ~4x; the flattened size is computed from a dummy forward so it stays
+        # correct for the non-square 34x60 shape.
         self.cnn = nn.Sequential(
-            nn.Conv2d(EGO_CHANNELS, 32, kernel_size=3, stride=1, padding=1), nn.ReLU(),  # 21x21
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),            # 11x11
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),            # 6x6
+            nn.Conv2d(ROOM_TENSOR_C, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),  # ~17x30
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),             # ~9x15
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),             # ~5x8
         )
-        cnn_flat = 64 * 6 * 6  # 2304
+        with torch.no_grad():
+            dummy = torch.zeros(1, ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W)
+            cnn_flat = int(self.cnn(dummy).reshape(1, -1).shape[1])
         self.cnn_fc = nn.Sequential(nn.Linear(cnn_flat, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU())
 
         # Scalar branch.
@@ -339,10 +347,6 @@ class CNNActorCritic(nn.Module):
             [nn.Linear(hidden_dim, int(n_choices)) for n_choices in ACTION_FACTORS]
         )
         self.value_head = nn.Linear(hidden_dim, 1)
-        # Optional aux head: predict unit-vec-to-nearest-enemy (label from
-        # spaces.nearest_enemy_bearing). Forces the CNN to encode bearing; used
-        # with a small MSE aux loss. Off unless the trainer wires it.
-        self.aux_bearing = nn.Linear(hidden_dim, 2)
 
         n_all = len(ACTION_FACTORS)
         if active_factors is None or active_factors < 1 or active_factors > n_all:
@@ -486,7 +490,7 @@ def train(cfg: PPOConfig, env) -> None:
     # rewards/dones/values/GAE (those are obs-agnostic).
     T, N = cfg.rollout_length, cfg.n_envs
     rb = Rollout(T, N, 1, n_factors, device)   # obs_dim=1 placeholder; we don't use rb.obs
-    rb_grid = torch.zeros(T, N, EGO_CHANNELS, EGO_GRID, EGO_GRID, device=device)
+    rb_grid = torch.zeros(T, N, ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W, device=device)
     rb_scalar = torch.zeros(T, N, SCALAR_DIM, device=device)
 
     def _split_batch(obs_list):
@@ -652,7 +656,7 @@ def train(cfg: PPOConfig, env) -> None:
         advantages, returns = rb.compute_gae(next_value, dones, cfg.gamma, cfg.gae_lambda)
 
         # Flatten (T, N, ...) -> (T*N, ...)
-        b_grid = rb_grid.reshape(-1, EGO_CHANNELS, EGO_GRID, EGO_GRID)
+        b_grid = rb_grid.reshape(-1, ROOM_TENSOR_C, ROOM_TENSOR_H, ROOM_TENSOR_W)
         b_scalar = rb_scalar.reshape(-1, SCALAR_DIM)
         b_actions = rb.actions.reshape(-1, n_factors)
         b_logprobs = rb.logprobs.reshape(-1)

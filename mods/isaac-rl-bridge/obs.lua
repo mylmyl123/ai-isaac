@@ -243,22 +243,25 @@ local function build_room_grid(room)
 end
 
 -- =====================================================================
--- Egocentric multi-channel grid (2026-07-15 architecture rebuild).
+-- Full-room layered tensor (2026-07-15 rebuild v2).
 --
 -- Rasterizes EVERYTHING (player, enemies, enemy projectiles, own tears,
--- pickups, terrain) into a player-CENTERED 14-channel 21x21 image so a CNN
--- can read spatial relationships (aim direction, incoming fire, cover, walls)
--- that the old flat entity-list obs could not represent. The player is fixed
--- at the exact center cell (CENTER,CENTER); the crop translates with the
--- player, so the same relative geometry always lands on the same cells
--- (translation-equivariant -> aiming is a near-linear conv readout).
+-- pickups, terrain) into a FULL-ROOM absolute 14-channel image — every entity
+-- at its TRUE room position, NOTHING cropped or clamped away. The model sees
+-- the whole scene as one coherent multi-channel map (the standard spatial-
+-- planes representation), so enemy position is always in the obs at any
+-- distance, and the CNN can read spatial relationships (aim, line-of-sight,
+-- cover, incoming fire) directly.
 --
--- CELL_PX=16 (half-tile), CROP=21 -> a 336x336 world-px window. Room interior
--- is 480x270, so the window covers the full height + the aim-relevant width;
--- entities beyond the crop clamp to the border ring (presence only).
+-- Replaces the earlier egocentric ±168px crop, which threw away enemies beyond
+-- the window (Horf spawns 200-500px away -> off-crop -> agent couldn't aim).
 --
--- Channels (0-based, matches python/isaac_rl/spaces.py _decode_ego_grid):
---   0 player_self         1.0 at center only
+-- Grid: 480x270 room interior at 8 px/cell -> 60 wide x 34 tall (rounded up).
+-- world (ex,ey) -> cell: cx = floor((ex - tl_x)/8), cy = floor((ey - tl_y)/8).
+-- Entities outside the interior clamp to the edge (rare; e.g. spawn overlap).
+--
+-- Channels (0-based, matches python/isaac_rl/spaces.py _decode_room_tensor):
+--   0 player_self         1.0 at the player's cell
 --   1 enemy_presence      min(count/3, 1)
 --   2 enemy_hp_frac       hp/max_hp of nearest-in-cell enemy
 --   3 enemy_threat        max(boss*1 + champion*0.6 + flying*0.3)
@@ -273,137 +276,117 @@ end
 --  12 rock                1.0 rocks (all GRID_ROCK* variants)
 --  13 hazard_poop         1.0 spikes/fire OR poop/tnt (merged)
 --
--- Reused module-level buffers (zero in place) to avoid GC churn, mirroring
--- build_room_grid. 14 channel arrays + one nearest-distance scratch array.
-local EGO_C, EGO_G = 14, 21
-local EGO_N = EGO_G * EGO_G          -- 441
-local EGO_CELL_PX = 16.0
-local EGO_CENTER = 10                -- 0-based center index (21//2)
-local _ego = {}
-for c = 1, EGO_C do
-    _ego[c] = {}
-    for i = 1, EGO_N do _ego[c][i] = 0 end
+-- Reused module-level buffers (zero in place) to avoid GC churn.
+local RT_C = 14
+local RT_W, RT_H = 60, 34            -- 480/8=60, 270/8=33.75 -> 34
+local RT_N = RT_W * RT_H             -- 2040
+local RT_CELL_PX = 8.0
+local _rt = {}
+for c = 1, RT_C do
+    _rt[c] = {}
+    for i = 1, RT_N do _rt[c][i] = 0 end
 end
-local _ego_bestd = {}               -- per-cell nearest-dist scratch (value channels)
-for i = 1, EGO_N do _ego_bestd[i] = math.huge end
+local _rt_bestd = {}                 -- per-cell nearest-dist scratch (value channels)
+for i = 1, RT_N do _rt_bestd[i] = math.huge end
 
 local function _clip1(v)
     if v > 1.0 then return 1.0 elseif v < -1.0 then return -1.0 else return v end
 end
 
--- world (ex,ey) relative to player (px,py) -> 1-based flat index, or nil if OOR.
--- clamp=true snaps out-of-range to the border ring (for presence channels).
-local function _ego_cell(ex, ey, px, py, clamp)
-    local cx = math.floor((ex - px) / EGO_CELL_PX + 0.5) + EGO_CENTER
-    local cy = math.floor((ey - py) / EGO_CELL_PX + 0.5) + EGO_CENTER
-    if cx < 0 or cx >= EGO_G or cy < 0 or cy >= EGO_G then
-        if not clamp then return nil end
-        if cx < 0 then cx = 0 elseif cx >= EGO_G then cx = EGO_G - 1 end
-        if cy < 0 then cy = 0 elseif cy >= EGO_G then cy = EGO_G - 1 end
-    end
-    return cy * EGO_G + cx + 1
+-- world (ex,ey) -> 1-based flat cell index in the full-room grid, clamped to
+-- the interior (never nil: full-room framing means everything is representable).
+local function _rt_cell(ex, ey, tl_x, tl_y)
+    local cx = math.floor((ex - tl_x) / RT_CELL_PX)
+    local cy = math.floor((ey - tl_y) / RT_CELL_PX)
+    if cx < 0 then cx = 0 elseif cx >= RT_W then cx = RT_W - 1 end
+    if cy < 0 then cy = 0 elseif cy >= RT_H then cy = RT_H - 1 end
+    return cy * RT_W + cx + 1
 end
 
-local function build_ego_grid(room, player)
-    local px, py = player.Position.X, player.Position.Y
+local function build_room_tensor(room, player, tl)
+    local tl_x, tl_y = tl.X, tl.Y
     -- Zero channels + scratch in place.
-    for c = 1, EGO_C do
-        local ch = _ego[c]
-        for i = 1, EGO_N do ch[i] = 0 end
+    for c = 1, RT_C do
+        local ch = _rt[c]
+        for i = 1, RT_N do ch[i] = 0 end
     end
-    for i = 1, EGO_N do _ego_bestd[i] = math.huge end
+    for i = 1, RT_N do _rt_bestd[i] = math.huge end
 
-    -- ch0 player_self at center.
-    _ego[1][EGO_CENTER * EGO_G + EGO_CENTER + 1] = 1.0
+    -- ch0 player_self at the player's true cell.
+    local pcell = _rt_cell(player.Position.X, player.Position.Y, tl_x, tl_y)
+    _rt[1][pcell] = 1.0
 
     -- Enemies + own tears + enemy projectiles + pickups from one entity scan.
     for _, e in ipairs(Isaac.GetRoomEntities()) do
         local et = e.Type
         local ep = e.Position
+        local idx = _rt_cell(ep.X, ep.Y, tl_x, tl_y)
         if et == EntityType.ENTITY_TEAR then
-            -- player's own tear (ch9 presence)
-            local idx = _ego_cell(ep.X, ep.Y, px, py, true)
-            if idx then _ego[10][idx] = 1.0 end
+            _rt[10][idx] = 1.0                                   -- ch9 own tear
         elseif et == EntityType.ENTITY_PROJECTILE or et == EntityType.ENTITY_LASER then
-            -- enemy projectile (ch6 presence + ch7/8 nearest-wins velocity)
-            local pidx = _ego_cell(ep.X, ep.Y, px, py, true)
-            if pidx then
-                _ego[7][pidx] = 1.0
-                local vidx = _ego_cell(ep.X, ep.Y, px, py, false)  -- value only if in-range
-                if vidx then
-                    local dx = ep.X - px; local dy = ep.Y - py
-                    local d = dx * dx + dy * dy
-                    if d < _ego_bestd[vidx] then
-                        _ego_bestd[vidx] = d
-                        _ego[8][vidx] = _clip1((e.Velocity.X or 0) / 12.0)
-                        _ego[9][vidx] = _clip1((e.Velocity.Y or 0) / 12.0)
-                    end
-                end
+            _rt[7][idx] = 1.0                                    -- ch6 enemy proj presence
+            local d = (ep.X - player.Position.X)^2 + (ep.Y - player.Position.Y)^2
+            if d < _rt_bestd[idx] then
+                _rt_bestd[idx] = d
+                _rt[8][idx] = _clip1((e.Velocity.X or 0) / 12.0)  -- ch7
+                _rt[9][idx] = _clip1((e.Velocity.Y or 0) / 12.0)  -- ch8
             end
         elseif et == EntityType.ENTITY_PICKUP then
-            local idx = _ego_cell(ep.X, ep.Y, px, py, true)
-            if idx then _ego[11][idx] = 1.0 end
+            _rt[11][idx] = 1.0                                   -- ch10 pickup
         else
             local npc = e:ToNPC()
             if npc and npc:IsVulnerableEnemy() and not npc:IsDead() then
-                local pidx = _ego_cell(ep.X, ep.Y, px, py, true)
-                if pidx then
-                    -- ch1 enemy_presence (additive, clamped to 1 at /3)
-                    local pv = _ego[2][pidx] + (1.0 / 3.0)
-                    _ego[2][pidx] = (pv > 1.0) and 1.0 or pv
-                    -- value channels: nearest-to-player wins
-                    local dx = ep.X - px; local dy = ep.Y - py
-                    local d = dx * dx + dy * dy
-                    if d < _ego_bestd[pidx] then
-                        _ego_bestd[pidx] = d
-                        local max_hp = math.max(1.0, e.MaxHitPoints)
-                        _ego[3][pidx] = e.HitPoints / max_hp
-                        local threat = 0.0
-                        if npc:IsBoss() then threat = threat + 1.0 end
-                        if npc:IsChampion() then threat = threat + 0.6 end
-                        if (e.GridCollisionClass or 5) == 0 then threat = threat + 0.3 end
-                        _ego[4][pidx] = (threat > 1.0) and 1.0 or threat
-                        _ego[5][pidx] = _clip1((e.Velocity.X or 0) / 10.0)
-                        _ego[6][pidx] = _clip1((e.Velocity.Y or 0) / 10.0)
-                    end
+                -- ch1 enemy_presence (additive, clamped to 1 at /3)
+                local pv = _rt[2][idx] + (1.0 / 3.0)
+                _rt[2][idx] = (pv > 1.0) and 1.0 or pv
+                -- value channels: nearest-to-player wins per cell
+                local d = (ep.X - player.Position.X)^2 + (ep.Y - player.Position.Y)^2
+                if d < _rt_bestd[idx] then
+                    _rt_bestd[idx] = d
+                    local max_hp = math.max(1.0, e.MaxHitPoints)
+                    _rt[3][idx] = e.HitPoints / max_hp             -- ch2 hp_frac
+                    local threat = 0.0
+                    if npc:IsBoss() then threat = threat + 1.0 end
+                    if npc:IsChampion() then threat = threat + 0.6 end
+                    if (e.GridCollisionClass or 5) == 0 then threat = threat + 0.3 end
+                    _rt[4][idx] = (threat > 1.0) and 1.0 or threat -- ch3 threat
+                    _rt[5][idx] = _clip1((e.Velocity.X or 0) / 10.0) -- ch4
+                    _rt[6][idx] = _clip1((e.Velocity.Y or 0) / 10.0) -- ch5
                 end
             end
         end
     end
 
-    -- Terrain, rasterized EGOCENTRICALLY (the key change vs build_room_grid):
-    -- map each grid entity's world center through the same transform.
+    -- Terrain from Isaac's tile grid, at true room position.
     local grid_size = room:GetGridSize()
     for i = 0, grid_size - 1 do
         local ge = room:GetGridEntity(i)
         if ge then
             local ok, wp = pcall(function() return room:GetGridPosition(i) end)
             if ok and wp then
-                local idx = _ego_cell(wp.X, wp.Y, px, py, false)
-                if idx then
-                    local t = ge:GetType()
-                    if t == GridEntityType.GRID_WALL or t == GridEntityType.GRID_PIT then
-                        _ego[12][idx] = 1.0
-                    elseif t == GridEntityType.GRID_ROCK or t == GridEntityType.GRID_ROCKT
-                        or t == GridEntityType.GRID_ROCK_BOMB or t == GridEntityType.GRID_ROCK_ALT
-                        or t == GridEntityType.GRID_ROCK_SS or t == GridEntityType.GRID_ROCK_SPIKED
-                        or t == GridEntityType.GRID_ROCKB then
-                        _ego[13][idx] = 1.0
-                    elseif t == GridEntityType.GRID_SPIKES or t == GridEntityType.GRID_SPIKES_ONOFF
-                        or t == GridEntityType.GRID_FIREPLACE
-                        or t == GridEntityType.GRID_POOP or t == GridEntityType.GRID_TNT then
-                        _ego[14][idx] = 1.0
-                    end
+                local idx = _rt_cell(wp.X, wp.Y, tl_x, tl_y)
+                local t = ge:GetType()
+                if t == GridEntityType.GRID_WALL or t == GridEntityType.GRID_PIT then
+                    _rt[12][idx] = 1.0
+                elseif t == GridEntityType.GRID_ROCK or t == GridEntityType.GRID_ROCKT
+                    or t == GridEntityType.GRID_ROCK_BOMB or t == GridEntityType.GRID_ROCK_ALT
+                    or t == GridEntityType.GRID_ROCK_SS or t == GridEntityType.GRID_ROCK_SPIKED
+                    or t == GridEntityType.GRID_ROCKB then
+                    _rt[13][idx] = 1.0
+                elseif t == GridEntityType.GRID_SPIKES or t == GridEntityType.GRID_SPIKES_ONOFF
+                    or t == GridEntityType.GRID_FIREPLACE
+                    or t == GridEntityType.GRID_POOP or t == GridEntityType.GRID_TNT then
+                    _rt[14][idx] = 1.0
                 end
             end
         end
     end
 
     -- Return the 14 reused channel arrays wrapped fresh (channel-major).
-    -- Python reshapes to (14, 21, 21). Do NOT mutate elsewhere.
+    -- Python reshapes to (14, 34, 60). Do NOT mutate elsewhere.
     return {
-        _ego[1], _ego[2], _ego[3], _ego[4], _ego[5], _ego[6], _ego[7],
-        _ego[8], _ego[9], _ego[10], _ego[11], _ego[12], _ego[13], _ego[14],
+        _rt[1], _rt[2], _rt[3], _rt[4], _rt[5], _rt[6], _rt[7],
+        _rt[8], _rt[9], _rt[10], _rt[11], _rt[12], _rt[13], _rt[14],
     }
 end
 
@@ -477,12 +460,13 @@ function Obs.build(tick, reward_events, run_state)
     local enemies, e_mask, n_enemies = build_enemies(room, player, tl, br)
     local proj,    p_mask, n_proj    = build_projectiles(room, player, tl, br)
     local pickups, k_mask, n_pickups = build_pickups(room, player, tl, br)
-    -- Egocentric CNN grid (2026-07-15 rebuild). Built from its own entity scan
-    -- so the legacy flat lists above stay intact until the probe gate passes.
-    local ego_ok, ego_grid = pcall(build_ego_grid, room, player)
-    if not ego_ok then
-        Isaac.DebugString("[isaac-rl-bridge] build_ego_grid failed: " .. tostring(ego_grid))
-        ego_grid = nil
+    -- Full-room layered tensor (2026-07-15 rebuild v2). Built from its own
+    -- entity scan so the legacy flat lists above stay intact until the probe
+    -- gate passes.
+    local rt_ok, room_tensor = pcall(build_room_tensor, room, player, tl)
+    if not rt_ok then
+        Isaac.DebugString("[isaac-rl-bridge] build_room_tensor failed: " .. tostring(room_tensor))
+        room_tensor = nil
     end
 
     return {
@@ -592,7 +576,7 @@ function Obs.build(tick, reward_events, run_state)
         },
         passives = build_passives(player),
         room_grid = build_room_grid(room),
-        ego_grid = ego_grid,   -- 14-channel egocentric grid (nil if build failed)
+        room_tensor = room_tensor,   -- full-room 14-channel layered tensor (nil if build failed)
         doors = build_doors(room),
         enemies = { feats = enemies, mask = e_mask, count = n_enemies },
         projectiles = { feats = proj, mask = p_mask, count = n_proj },
