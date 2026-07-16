@@ -102,14 +102,24 @@ if STAGE0_MODE and STAGE == "E" then STAGE = "A" end
 local STAGE_SEAL_DOORS      = (STAGE == "0" or STAGE == "A" or STAGE == "B")
 local STAGE_WIPE_ENEMIES    = (STAGE == "0" or STAGE == "A" or STAGE == "B" or STAGE == "C")
 local STAGE_SPAWN_ENEMIES   = (STAGE == "0" or STAGE == "A" or STAGE == "B" or STAGE == "C")
--- Enemy type per stage. 12=HORF (stationary blood-shot shooter), 18=ATTACKFLY
--- (homing). Verified against canonical Repentance resources/scripts/enums.lua:
--- ENTITY_HORF=12, ENTITY_ATTACKFLY=18. (The prior value 26 was ENTITY_MAW, a
--- DIFFERENT enemy — Stage 0 was silently spawning Maws, defeating the
--- "provably anti-camp stationary shooter" premise of the control task.)
-local STAGE_ENEMY_TYPE      = (STAGE == "0") and 12 or 18
+-- Enemy type per stage. Verified against canonical Repentance
+-- resources/scripts/enums.lua: ENTITY_CHARGER=23, ENTITY_ATTACKFLY=18.
+-- 2026-07-16: Stage 0 -> 2x CHARGER (23). Why Charger over the stationary Horf
+-- (12) and the homing fly/Maw: (a) it MOVES (wanders, then fast-charges when it
+-- lines up with the player) so the "park out of range" optimum the stationary
+-- Horf allowed is gone; (b) the fast line-charge is NOT corner-campable the way
+-- a slow homing fly/Maw is (a fixed shoot direction won't reliably intersect a
+-- charge crossing the room); (c) contact-only (no projectiles) = a clean
+-- aim-and-shoot bootstrap, no dodge layered on before it can aim; (d) base
+-- Charger does NOT split/spawn on death (unlike Gaper) = clean kill signal;
+-- (e) normal HP (~2-3 tears) so first kills are reachable (unlike Maw's 20 HP).
+-- TWO of them (from different spawn points) makes it un-camp-able by
+-- construction — no single corner/direction is safe or optimal — and trains
+-- real multi-target selection (the room-tensor CNN handles multiple enemies
+-- natively; the old flat-slot obs could not).
+local STAGE_ENEMY_TYPE      = (STAGE == "0") and 23 or 18
 local STAGE_ENEMY_VARIANT   = (STAGE == "0") and 0 or 0
-local STAGE_ENEMY_COUNT     = (STAGE == "B") and 3 or 1
+local STAGE_ENEMY_COUNT     = (STAGE == "0") and 2 or (STAGE == "B") and 3 or 1
 -- Legacy variable names kept for compat with existing code below.
 local STAGE_SPAWN_FLIES     = STAGE_SPAWN_ENEMIES
 local STAGE_FLY_COUNT       = STAGE_ENEMY_COUNT
@@ -263,7 +273,7 @@ function stage0_spawn_fly(player)
         spawn_pos = Isaac.GetFreeNearPosition(desired, 60)
     end
 
-    -- Horf (12) is a stationary blood-shot shooter. Attack Fly (18) is homing.
+    -- Charger (23) wanders then fast-charges when lined up. Attack Fly (18) homes.
     -- Both spawned via Isaac.Spawn(entity_type, variant, subtype, pos, vel, spawner).
     local fly = Isaac.Spawn(STAGE_ENEMY_TYPE, STAGE_ENEMY_VARIANT, 0, spawn_pos, Vector(0, 0), nil)
     if fly then
@@ -803,7 +813,9 @@ mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
                 end
             end
             if npc_count == 0 then
-                stage0_spawn_fly(nil)
+                -- Respawn the FULL wave (STAGE_ENEMY_COUNT), not just one — so a
+                -- 2-Charger stage stays a 2-enemy task after each room-clear.
+                for _ = 1, STAGE_FLY_COUNT do stage0_spawn_fly(nil) end
             end
             -- Re-seal doors every poll cycle. Bombs, explosions, and even
             -- some enemy deaths can unbar/reopen doors; a single missed
